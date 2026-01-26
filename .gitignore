@@ -1,0 +1,13 @@
+# API keys - DO NOT COMMIT
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+.env
+
+# Output files
+*_enriched.csv
+*_enriched.json
+screening_*.csv
+screening_*.json

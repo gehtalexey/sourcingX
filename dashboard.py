@@ -318,9 +318,39 @@ if 'results' in st.session_state and st.session_state['results']:
             mime="application/json"
         )
 
-    # AI Screening Section
-    st.divider()
-    st.subheader("6. AI Screening")
+# Option to upload pre-enriched data for screening only
+st.divider()
+st.subheader("Or: Upload Pre-Enriched Data")
+st.markdown("Already have enriched data? Upload it here to skip directly to AI screening.")
+
+pre_enriched_file = st.file_uploader(
+    "Upload pre-enriched CSV or JSON",
+    type=['csv', 'json'],
+    key="pre_enriched_upload"
+)
+
+if pre_enriched_file:
+    try:
+        if pre_enriched_file.name.endswith('.json'):
+            pre_enriched_data = json.load(pre_enriched_file)
+            if isinstance(pre_enriched_data, list):
+                st.session_state['results'] = pre_enriched_data
+                st.session_state['results_df'] = flatten_for_csv(pre_enriched_data)
+        else:
+            df_uploaded = pd.read_csv(pre_enriched_file)
+            # Convert CSV rows to list of dicts
+            pre_enriched_data = df_uploaded.to_dict('records')
+            st.session_state['results'] = pre_enriched_data
+            st.session_state['results_df'] = df_uploaded
+
+        st.success(f"Loaded **{len(pre_enriched_data)}** pre-enriched profiles")
+        results = st.session_state['results']
+    except Exception as e:
+        st.error(f"Error loading file: {e}")
+
+# AI Screening Section
+st.divider()
+st.subheader("6. AI Screening")
 
     openai_key = load_openai_key()
     if not openai_key:
@@ -356,8 +386,13 @@ if 'results' in st.session_state and st.session_state['results']:
                     screening = screen_profile(profile, job_description, client)
 
                     # Get name from profile
-                    name = profile.get('full_name') or profile.get('name') or f"Profile {i+1}"
-                    linkedin_url = profile.get('linkedin_url') or profile.get('linkedin_profile_url') or ''
+                    first = profile.get('first_name', '')
+                    last = profile.get('last_name', '')
+                    if first or last:
+                        name = f"{first} {last}".strip()
+                    else:
+                        name = profile.get('full_name') or profile.get('name') or f"Profile {i+1}"
+                    linkedin_url = profile.get('public_url') or profile.get('linkedin_url') or profile.get('linkedin_profile_url') or ''
 
                     screening_results.append({
                         'name': name,

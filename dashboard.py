@@ -14,6 +14,8 @@ from pathlib import Path
 from datetime import datetime
 from plyer import notification
 from openai import OpenAI
+import gspread
+from google.oauth2.service_account import Credentials
 
 
 # Page config
@@ -38,6 +40,52 @@ def load_api_key():
 def load_openai_key():
     config = load_config()
     return config.get('openai_api_key')
+
+
+def get_gspread_client():
+    """Get authenticated gspread client using service account."""
+    config = load_config()
+    creds_file = config.get('google_credentials_file')
+    if not creds_file:
+        return None
+
+    creds_path = Path(__file__).parent / creds_file
+    if not creds_path.exists():
+        return None
+
+    scopes = [
+        'https://www.googleapis.com/auth/spreadsheets.readonly',
+        'https://www.googleapis.com/auth/drive.readonly'
+    ]
+
+    creds = Credentials.from_service_account_file(str(creds_path), scopes=scopes)
+    return gspread.authorize(creds)
+
+
+def load_sheet_as_df(sheet_url: str, worksheet_name: str = None) -> pd.DataFrame:
+    """Load a Google Sheet as a pandas DataFrame."""
+    client = get_gspread_client()
+    if not client:
+        return None
+
+    try:
+        spreadsheet = client.open_by_url(sheet_url)
+        if worksheet_name:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        else:
+            worksheet = spreadsheet.sheet1
+
+        data = worksheet.get_all_records()
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Error loading sheet: {e}")
+        return None
+
+
+def get_filter_sheets_config():
+    """Get filter sheets URLs from config."""
+    config = load_config()
+    return config.get('filter_sheets', {})
 
 
 def send_notification(title, message):
@@ -250,27 +298,57 @@ def filter_csv_columns(df: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, dict]:
-    """Apply pre-filters to candidates. Returns filtered df and stats."""
+def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, dict, dict]:
+    """Apply pre-filters to candidates. Returns filtered df, stats, and filtered_out dict."""
     stats = {}
+    filtered_out = {}  # Store removed candidates by filter type
     original_count = len(df)
 
     # Helper functions
+    def normalize_company(name):
+        """Normalize company name for comparison."""
+        if pd.isna(name) or not str(name).strip():
+            return ''
+        # Lowercase and strip
+        name = str(name).lower().strip()
+        # Remove common suffixes
+        for suffix in [' ltd', ' inc', ' corp', ' llc', ' limited', ' israel', ' il', ' technologies', ' tech', ' software', ' solutions', ' group']:
+            if name.endswith(suffix):
+                name = name[:-len(suffix)].strip()
+        return name
+
     def matches_list(company, company_list):
+        """Check if company matches any in the list - uses normalized exact match."""
         if pd.isna(company) or not str(company).strip():
             return False
-        company_lower = str(company).lower().strip()
+        company_norm = normalize_company(company)
+        if not company_norm:
+            return False
         for c in company_list:
-            if c in company_lower or company_lower in c:
+            c_norm = normalize_company(c)
+            if not c_norm:
+                continue
+            # Exact match after normalization
+            if company_norm == c_norm:
                 return True
+            # One contains the other fully (for cases like "Bank Leumi" vs "Bank Leumi Le-Israel")
+            if len(c_norm) >= 4 and len(company_norm) >= 4:
+                if company_norm.startswith(c_norm) or c_norm.startswith(company_norm):
+                    return True
         return False
 
     def matches_list_in_text(text, company_list):
+        """Check if any company from list appears in text - uses word boundary matching."""
         if pd.isna(text) or not str(text).strip():
             return False
         text_lower = str(text).lower()
         for c in company_list:
-            if c in text_lower:
+            c_norm = normalize_company(c)
+            if not c_norm or len(c_norm) < 3:
+                continue
+            # Use word boundary pattern for longer names
+            pattern = r'\b' + re.escape(c_norm) + r'\b'
+            if re.search(pattern, text_lower):
                 return True
         return False
 
@@ -283,6 +361,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
                                df['last_name'].fillna('').str.lower().str.strip())
             df['_is_past'] = df['_full_name'].isin(past_names)
             stats['past_candidates'] = df['_is_past'].sum()
+            filtered_out['Past Candidates'] = df[df['_is_past']].drop(columns=['_is_past', '_full_name']).copy()
             df = df[~df['_is_past']].drop(columns=['_is_past', '_full_name'])
 
     # 2. Blacklist filter
@@ -290,6 +369,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         blacklist = [c.lower().strip() for c in filters['blacklist']]
         df['_blacklisted'] = df['current_company'].apply(lambda x: matches_list(x, blacklist))
         stats['blacklist'] = df['_blacklisted'].sum()
+        filtered_out['Blacklist Companies'] = df[df['_blacklisted']].drop(columns=['_blacklisted']).copy()
         df = df[~df['_blacklisted']].drop(columns=['_blacklisted'])
 
     # 3. Not relevant companies (current)
@@ -297,6 +377,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         not_relevant = [c.lower().strip() for c in filters['not_relevant']]
         df['_not_relevant'] = df['current_company'].apply(lambda x: matches_list(x, not_relevant))
         stats['not_relevant_current'] = df['_not_relevant'].sum()
+        filtered_out['Not Relevant (Current)'] = df[df['_not_relevant']].drop(columns=['_not_relevant']).copy()
         df = df[~df['_not_relevant']].drop(columns=['_not_relevant'])
 
     # 4. Not relevant companies (past)
@@ -304,6 +385,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         not_relevant = [c.lower().strip() for c in filters['not_relevant']]
         df['_past_not_relevant'] = df['past_positions'].apply(lambda x: matches_list_in_text(x, not_relevant))
         stats['not_relevant_past'] = df['_past_not_relevant'].sum()
+        filtered_out['Not Relevant (Past)'] = df[df['_past_not_relevant']].drop(columns=['_past_not_relevant']).copy()
         df = df[~df['_past_not_relevant']].drop(columns=['_past_not_relevant'])
 
     # 5. Job hoppers filter
@@ -318,6 +400,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         df['_short_stints'] = df['past_positions'].apply(count_short_stints)
         df['_is_job_hopper'] = df['_short_stints'] >= 2
         stats['job_hoppers'] = df['_is_job_hopper'].sum()
+        filtered_out['Job Hoppers'] = df[df['_is_job_hopper']].drop(columns=['_short_stints', '_is_job_hopper']).copy()
         df = df[~df['_is_job_hopper']].drop(columns=['_short_stints', '_is_job_hopper'])
 
     # 6. Consulting companies filter
@@ -326,12 +409,14 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
                       'experis', 'manpower', 'infosys', 'tata', 'wipro', 'cognizant', 'accenture', 'capgemini']
         df['_is_consulting'] = df['current_company'].apply(lambda x: matches_list(x, consulting))
         stats['consulting'] = df['_is_consulting'].sum()
+        filtered_out['Consulting Companies'] = df[df['_is_consulting']].drop(columns=['_is_consulting']).copy()
         df = df[~df['_is_consulting']].drop(columns=['_is_consulting'])
 
     # 7. Long tenure filter
     if filters.get('filter_long_tenure'):
         df['_long_tenure'] = df['current_years_in_role'].apply(lambda x: x >= 8 if pd.notna(x) else False)
         stats['long_tenure'] = df['_long_tenure'].sum()
+        filtered_out['Long Tenure (8+ years)'] = df[df['_long_tenure']].drop(columns=['_long_tenure']).copy()
         df = df[~df['_long_tenure']].drop(columns=['_long_tenure'])
 
     # 8. Management titles filter
@@ -354,13 +439,32 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
 
         df['_is_management'] = df['current_title'].apply(is_management_title)
         stats['management_titles'] = df['_is_management'].sum()
+        filtered_out['Management Titles'] = df[df['_is_management']].drop(columns=['_is_management']).copy()
         df = df[~df['_is_management']].drop(columns=['_is_management'])
+
+    # 9. Mark target company candidates (add priority column - does not filter)
+    if filters.get('mark_target') and filters.get('target_companies'):
+        target_list = [c.lower().strip() for c in filters['target_companies']]
+        df['from_target_company'] = df['current_company'].apply(lambda x: matches_list(x, target_list))
+        stats['target_company_candidates'] = df['from_target_company'].sum()
+
+    # 11. Mark tech alerts / layoffs candidates (add priority column)
+    if filters.get('mark_tech_alerts') and filters.get('tech_alerts'):
+        alerts_list = [c.lower().strip() for c in filters['tech_alerts']]
+        df['from_layoff_company'] = df['current_company'].apply(lambda x: matches_list(x, alerts_list))
+        stats['layoff_company_candidates'] = df['from_layoff_company'].sum()
+
+    # 10. Mark university candidates (add priority column - does not filter)
+    if filters.get('mark_universities') and filters.get('universities'):
+        uni_list = [u.lower().strip() for u in filters['universities']]
+        df['from_target_university'] = df['education'].apply(lambda x: matches_list_in_text(x, uni_list) if pd.notna(x) else False)
+        stats['target_university_candidates'] = df['from_target_university'].sum()
 
     stats['original'] = original_count
     stats['final'] = len(df)
     stats['total_removed'] = original_count - len(df)
 
-    return df, stats
+    return df, stats, filtered_out
 
 
 def screen_profile(profile: dict, job_description: str, client: OpenAI) -> dict:
@@ -475,21 +579,109 @@ if 'results' in st.session_state and st.session_state['results']:
 
     # Pre-filter options
     with st.expander("Filter Options", expanded=True):
+        # Check for Google Sheets config
+        filter_sheets = get_filter_sheets_config().copy()
+        gspread_client = get_gspread_client()
+
+        # Allow user to specify their own filter sheet
+        st.markdown("**Your Filter Sheet:**")
+        st.caption(f"Share your sheet with: `linkedin-enricher@linkedin-enricher-485616.iam.gserviceaccount.com`")
+        user_sheet_url = st.text_input(
+            "Google Sheet URL (paste your own, or leave empty for default)",
+            value=st.session_state.get('user_sheet_url', ''),
+            placeholder="https://docs.google.com/spreadsheets/d/...",
+            key="user_sheet_input"
+        )
+
+        # Save to session state
+        if user_sheet_url:
+            st.session_state['user_sheet_url'] = user_sheet_url
+            filter_sheets['url'] = user_sheet_url
+
+        has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
+
+        if has_sheets:
+            if user_sheet_url:
+                st.success("Using your personal filter sheet")
+            else:
+                st.success("Using default filter sheet")
+
+            # Validate sheet connection
+            if st.button("Verify Sheet Connection", key="verify_sheet"):
+                with st.spinner("Checking sheet access..."):
+                    try:
+                        spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
+                        tabs = [ws.title for ws in spreadsheet.worksheets()]
+                        st.success(f"Connected! Found {len(tabs)} tabs")
+                        expected_tabs = ['Past Candidates', 'Blacklist', 'NotRelevant Companies', 'Target Companies', 'Universities', 'Tech Alerts']
+                        missing = [t for t in expected_tabs if t not in tabs]
+                        if missing:
+                            st.warning(f"Missing expected tabs: {', '.join(missing)}")
+                        else:
+                            st.info(f"All expected tabs found")
+                    except Exception as e:
+                        st.error(f"Cannot access sheet: {e}")
+                        st.info("Make sure you shared the sheet with the service account email above")
+
+        st.divider()
         col1, col2 = st.columns(2)
 
         with col1:
-            st.markdown("**Upload Filter Files:**")
-            past_candidates_file = st.file_uploader("Past Candidates CSV", type=['csv'], key="past_candidates")
-            blacklist_file = st.file_uploader("Blacklist Companies CSV", type=['csv'], key="blacklist")
-            not_relevant_file = st.file_uploader("Not Relevant Companies CSV", type=['csv'], key="not_relevant")
+            st.markdown("**Filter Data Sources:**")
+
+            # Past candidates
+            use_sheets_past = False
+            past_candidates_file = None
+            if has_sheets and filter_sheets.get('past_candidates'):
+                use_sheets_past = st.checkbox("Load Past Candidates from Google Sheet", value=True, key="use_sheets_past")
+                if not use_sheets_past:
+                    past_candidates_file = st.file_uploader("Past Candidates CSV", type=['csv'], key="past_candidates")
+            else:
+                past_candidates_file = st.file_uploader("Past Candidates CSV", type=['csv'], key="past_candidates")
+
+            # Blacklist
+            use_sheets_blacklist = False
+            blacklist_file = None
+            if has_sheets and filter_sheets.get('blacklist'):
+                use_sheets_blacklist = st.checkbox("Load Blacklist from Google Sheet", value=True, key="use_sheets_blacklist")
+                if not use_sheets_blacklist:
+                    blacklist_file = st.file_uploader("Blacklist Companies CSV", type=['csv'], key="blacklist")
+            else:
+                blacklist_file = st.file_uploader("Blacklist Companies CSV", type=['csv'], key="blacklist")
+
+            # Not relevant
+            use_sheets_not_relevant = False
+            not_relevant_file = None
+            if has_sheets and filter_sheets.get('not_relevant'):
+                use_sheets_not_relevant = st.checkbox("Load Not Relevant from Google Sheet", value=True, key="use_sheets_not_relevant")
+                if not use_sheets_not_relevant:
+                    not_relevant_file = st.file_uploader("Not Relevant Companies CSV", type=['csv'], key="not_relevant")
+            else:
+                not_relevant_file = st.file_uploader("Not Relevant Companies CSV", type=['csv'], key="not_relevant")
 
         with col2:
-            st.markdown("**Additional Filters:**")
+            st.markdown("**Exclusion Filters:**")
             filter_not_relevant_past = st.checkbox("Also filter past positions for not relevant", value=True)
             filter_job_hoppers = st.checkbox("Filter job hoppers (2+ roles < 1 year)", value=True)
             filter_consulting = st.checkbox("Filter consulting/project companies", value=True)
             filter_long_tenure = st.checkbox("Filter 8+ years at one company", value=True)
             filter_management = st.checkbox("Filter Director/VP/Head titles", value=True)
+
+            st.markdown("**Priority Markers (highlight, not filter):**")
+            # Target companies
+            use_target = has_sheets and filter_sheets.get('target_companies')
+            mark_target = st.checkbox("Highlight Target Company candidates", value=True, disabled=not use_target,
+                                      help="Adds column to identify candidates from target companies")
+
+            # Universities
+            use_universities = has_sheets and filter_sheets.get('universities')
+            mark_universities = st.checkbox("Highlight Target University candidates", value=True, disabled=not use_universities,
+                                           help="Adds column to identify candidates from target universities")
+
+            # Tech alerts / layoffs
+            use_tech_alerts = has_sheets and filter_sheets.get('tech_alerts')
+            mark_tech_alerts = st.checkbox("Highlight Layoff Company candidates", value=True, disabled=not use_tech_alerts,
+                                          help="Adds column to identify candidates from companies with recent layoffs")
 
         if st.button("Apply Filters", type="primary"):
             filters = {
@@ -498,28 +690,84 @@ if 'results' in st.session_state and st.session_state['results']:
                 'filter_long_tenure': filter_long_tenure,
                 'filter_management': filter_management,
                 'not_relevant_past': filter_not_relevant_past,
+                'mark_target': mark_target,
+                'mark_universities': mark_universities,
+                'mark_tech_alerts': mark_tech_alerts,
             }
 
-            # Load filter files
-            if past_candidates_file:
-                filters['past_candidates_df'] = pd.read_csv(past_candidates_file)
+            # Load filter data from Google Sheets or files
+            with st.spinner("Loading filter data..."):
+                sheet_url = filter_sheets.get('url', '')
 
-            if blacklist_file:
-                bl_df = pd.read_csv(blacklist_file)
-                filters['blacklist'] = bl_df.iloc[:, 0].dropna().tolist()
+                # Past candidates
+                if use_sheets_past and filter_sheets.get('past_candidates'):
+                    past_df = load_sheet_as_df(sheet_url, filter_sheets['past_candidates'])
+                    if past_df is not None:
+                        filters['past_candidates_df'] = past_df
+                        st.info(f"Loaded {len(past_df)} past candidates from Google Sheet")
+                elif past_candidates_file:
+                    filters['past_candidates_df'] = pd.read_csv(past_candidates_file)
 
-            if not_relevant_file:
-                nr_df = pd.read_csv(not_relevant_file)
-                filters['not_relevant'] = nr_df.iloc[:, 0].dropna().tolist()
+                # Blacklist
+                if use_sheets_blacklist and filter_sheets.get('blacklist'):
+                    bl_df = load_sheet_as_df(sheet_url, filter_sheets['blacklist'])
+                    if bl_df is not None and len(bl_df.columns) > 0:
+                        filters['blacklist'] = bl_df.iloc[:, 0].dropna().tolist()
+                        st.info(f"Loaded {len(filters['blacklist'])} blacklist companies from Google Sheet")
+                elif blacklist_file:
+                    bl_df = pd.read_csv(blacklist_file)
+                    filters['blacklist'] = bl_df.iloc[:, 0].dropna().tolist()
+
+                # Not relevant
+                if use_sheets_not_relevant and filter_sheets.get('not_relevant'):
+                    nr_df = load_sheet_as_df(sheet_url, filter_sheets['not_relevant'])
+                    if nr_df is not None and len(nr_df.columns) > 0:
+                        filters['not_relevant'] = nr_df.iloc[:, 0].dropna().tolist()
+                        st.info(f"Loaded {len(filters['not_relevant'])} not-relevant companies from Google Sheet")
+                elif not_relevant_file:
+                    nr_df = pd.read_csv(not_relevant_file)
+                    filters['not_relevant'] = nr_df.iloc[:, 0].dropna().tolist()
+
+                # Target companies
+                if mark_target and filter_sheets.get('target_companies'):
+                    tc_df = load_sheet_as_df(sheet_url, filter_sheets['target_companies'])
+                    if tc_df is not None and len(tc_df.columns) > 0:
+                        # Combine all company name columns
+                        target_companies = []
+                        for col in tc_df.columns:
+                            if 'company' in col.lower() or 'name' in col.lower():
+                                target_companies.extend(tc_df[col].dropna().tolist())
+                        filters['target_companies'] = [str(c) for c in target_companies if c]
+                        st.info(f"Loaded {len(filters['target_companies'])} target companies from Google Sheet")
+
+                # Universities
+                if mark_universities and filter_sheets.get('universities'):
+                    uni_df = load_sheet_as_df(sheet_url, filter_sheets['universities'])
+                    if uni_df is not None and len(uni_df.columns) > 0:
+                        filters['universities'] = uni_df.iloc[:, 0].dropna().tolist()
+                        st.info(f"Loaded {len(filters['universities'])} universities from Google Sheet")
+
+                # Tech alerts / layoffs
+                if mark_tech_alerts and filter_sheets.get('tech_alerts'):
+                    ta_df = load_sheet_as_df(sheet_url, filter_sheets['tech_alerts'])
+                    if ta_df is not None and len(ta_df.columns) > 0:
+                        # Combine all company name columns
+                        tech_alerts = []
+                        for col in ta_df.columns:
+                            if 'company' in col.lower() or 'name' in col.lower():
+                                tech_alerts.extend(ta_df[col].dropna().tolist())
+                        filters['tech_alerts'] = [str(c) for c in tech_alerts if c]
+                        st.info(f"Loaded {len(filters['tech_alerts'])} tech alert companies from Google Sheet")
 
             # Apply filters
             with st.spinner("Applying filters..."):
                 df = st.session_state['results_df']
-                filtered_df, stats = apply_pre_filters(df, filters)
+                filtered_df, stats, filtered_out = apply_pre_filters(df, filters)
 
                 st.session_state['results_df'] = filtered_df
                 st.session_state['results'] = filtered_df.to_dict('records')
                 st.session_state['filter_stats'] = stats
+                st.session_state['filtered_out'] = filtered_out
 
             st.success(f"Filtering complete! {stats['final']} candidates remaining")
             st.rerun()
@@ -543,6 +791,66 @@ if 'results' in st.session_state and st.session_state['results']:
             for key, value in stats.items():
                 if key not in ['original', 'final', 'total_removed'] and value > 0:
                     st.text(f"{key.replace('_', ' ').title()}: {value} removed")
+
+    # Review filtered candidates section
+    if 'filtered_out' in st.session_state and st.session_state['filtered_out']:
+        st.divider()
+        st.markdown("### Review Filtered Candidates")
+        st.caption("View candidates removed by each filter and restore selected ones")
+
+        filtered_out = st.session_state['filtered_out']
+        filter_names = [k for k, v in filtered_out.items() if len(v) > 0]
+
+        if filter_names:
+            selected_filter = st.selectbox("Select filter to review:", filter_names)
+
+            if selected_filter and selected_filter in filtered_out:
+                filter_df = filtered_out[selected_filter]
+                st.info(f"**{len(filter_df)}** candidates removed by: {selected_filter}")
+
+                # Show key columns for review
+                display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'education', 'public_url']
+                available_cols = [c for c in display_cols if c in filter_df.columns]
+
+                if available_cols:
+                    st.dataframe(
+                        filter_df[available_cols],
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "public_url": st.column_config.LinkColumn("LinkedIn")
+                        }
+                    )
+
+                # Restore functionality
+                st.markdown("**Restore candidates:**")
+                restore_indices = st.multiselect(
+                    f"Select rows to restore (by index):",
+                    options=list(range(len(filter_df))),
+                    format_func=lambda i: f"{filter_df.iloc[i].get('first_name', '')} {filter_df.iloc[i].get('last_name', '')} - {filter_df.iloc[i].get('current_company', '')}"
+                )
+
+                if st.button("Restore Selected", key="restore_btn"):
+                    if restore_indices:
+                        # Get candidates to restore
+                        to_restore = filter_df.iloc[restore_indices]
+
+                        # Add back to main results
+                        current_df = st.session_state['results_df']
+                        restored_df = pd.concat([current_df, to_restore], ignore_index=True)
+                        st.session_state['results_df'] = restored_df
+                        st.session_state['results'] = restored_df.to_dict('records')
+
+                        # Remove from filtered_out
+                        remaining = filter_df.drop(filter_df.index[restore_indices])
+                        st.session_state['filtered_out'][selected_filter] = remaining
+
+                        st.success(f"Restored {len(restore_indices)} candidates!")
+                        st.rerun()
+                    else:
+                        st.warning("Select candidates to restore first")
+        else:
+            st.info("No candidates were filtered out")
 
 else:
     st.info("Upload data above first to enable filtering.")

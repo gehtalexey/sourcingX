@@ -7,6 +7,8 @@ import streamlit as st
 import pandas as pd
 import json
 import time
+import os
+import io
 import requests
 import winsound
 from pathlib import Path
@@ -31,12 +33,36 @@ def load_config():
     return {}
 
 def load_api_key():
-    config = load_config()
-    return config.get('api_key')
+    # Environment variable takes priority, then config file
+    return os.environ.get('CRUSTDATA_API_KEY') or load_config().get('api_key')
 
 def load_openai_key():
-    config = load_config()
-    return config.get('openai_api_key')
+    # Environment variable takes priority, then config file
+    return os.environ.get('OPENAI_API_KEY') or load_config().get('openai_api_key')
+
+
+# Google Sheet URL for target companies (companies with layoffs to recruit from)
+TARGET_COMPANIES_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSwZW1szbtKb7yYRU5hVE6FdMchLkRNd_jRff2eyYSSpD4R1V0USYsK_6uEBQLzlOdvUFMucJSh2bsv/pub?output=csv"
+
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def load_target_companies() -> set:
+    """Load target companies from Google Sheet."""
+    try:
+        response = requests.get(TARGET_COMPANIES_SHEET_URL, timeout=10)
+        if response.status_code == 200:
+            import io
+            df = pd.read_csv(io.StringIO(response.text), encoding='utf-8')
+            companies = set()
+            # Get all company names from both columns
+            for col in df.columns:
+                companies.update(df[col].dropna().str.strip().str.lower().tolist())
+            # Remove empty strings
+            companies.discard('')
+            return companies
+    except Exception as e:
+        st.warning(f"Could not load target companies from Google Sheet: {e}")
+    return set()
 
 
 def send_notification(title, message):
@@ -60,9 +86,12 @@ def send_notification(title, message):
             pass
 
 
-def extract_urls(uploaded_file) -> list[str]:
-    """Extract LinkedIn URLs from uploaded file."""
-    urls = []
+def extract_profiles(uploaded_file, full_data=False) -> list[dict]:
+    """Extract LinkedIn profiles from uploaded file.
+
+    If full_data=True, preserve all original fields for screening.
+    """
+    profiles = []
 
     if uploaded_file.name.endswith('.json'):
         data = json.load(uploaded_file)
@@ -70,35 +99,97 @@ def extract_urls(uploaded_file) -> list[str]:
             for item in data:
                 if isinstance(item, dict):
                     url = (item.get('url') or item.get('linkedin_url') or
-                           item.get('profile_url') or item.get('linkedinUrl'))
-                    if url:
-                        urls.append(url)
-                elif isinstance(item, str):
-                    urls.append(item)
+                           item.get('profile_url') or item.get('linkedinUrl') or '')
+                    if url and 'linkedin.com' in str(url):
+                        url = normalize_url(url)
+                        if full_data:
+                            # Keep all original data, just normalize URL
+                            profile = dict(item)
+                            profile['linkedin_url'] = url
+                            profiles.append(profile)
+                        else:
+                            profiles.append({
+                                'url': url,
+                                'name': item.get('name') or item.get('full_name') or item.get('fullName') or '',
+                                'title': item.get('title') or item.get('headline') or item.get('jobTitle') or '',
+                                'company': item.get('company') or item.get('company_name') or item.get('companyName') or '',
+                                'university': item.get('university') or item.get('school') or item.get('education') or ''
+                            })
+                elif isinstance(item, str) and 'linkedin.com' in item:
+                    profiles.append({'url': normalize_url(item), 'linkedin_url': normalize_url(item), 'name': '', 'title': '', 'company': '', 'university': ''})
 
     elif uploaded_file.name.endswith('.csv'):
         df = pd.read_csv(uploaded_file)
-        # Try common column names
-        for col in ['url', 'linkedin_url', 'profile_url', 'URL', 'LinkedIn URL', 'linkedinUrl', 'LinkedIn', 'linkedin']:
-            if col in df.columns:
-                urls = df[col].dropna().tolist()
-                break
-        # If no matching column, try first column
-        if not urls and len(df.columns) > 0:
-            urls = df.iloc[:, 0].dropna().tolist()
 
-    # Filter to only LinkedIn URLs and normalize them
-    normalized = []
-    for u in urls:
-        if u and 'linkedin.com' in str(u):
-            u = str(u).strip()
-            # Add https:// if missing
-            if u.startswith('www.'):
-                u = 'https://' + u
-            elif not u.startswith('http'):
-                u = 'https://' + u
-            normalized.append(u)
-    return normalized
+        # Find URL column
+        url_col = None
+        for col in ['url', 'linkedin_url', 'profile_url', 'URL', 'LinkedIn URL', 'linkedinUrl', 'LinkedIn', 'linkedin', 'profileUrl']:
+            if col in df.columns:
+                url_col = col
+                break
+        if not url_col and len(df.columns) > 0:
+            url_col = df.columns[0]
+
+        # Find other columns
+        def find_col(options):
+            for opt in options:
+                for col in df.columns:
+                    if col.lower() == opt.lower():
+                        return col
+            return None
+
+        name_col = find_col(['name', 'full_name', 'fullName', 'full name', 'Full Name'])
+        first_name_col = find_col(['firstName', 'first_name', 'first name', 'First Name', 'firstname'])
+        last_name_col = find_col(['lastName', 'last_name', 'last name', 'Last Name', 'lastname'])
+        title_col = find_col(['title', 'headline', 'jobTitle', 'job_title', 'position'])
+        company_col = find_col(['company', 'company_name', 'companyName', 'organization', 'employer'])
+        university_col = find_col(['university', 'school', 'education', 'college'])
+
+        for _, row in df.iterrows():
+            url = str(row.get(url_col, '')) if url_col else ''
+            if url and 'linkedin.com' in url:
+                # Build name from full name or first + last
+                name = ''
+                if name_col and pd.notna(row.get(name_col)):
+                    name = str(row.get(name_col))
+                elif first_name_col or last_name_col:
+                    first = str(row.get(first_name_col, '')) if first_name_col and pd.notna(row.get(first_name_col)) else ''
+                    last = str(row.get(last_name_col, '')) if last_name_col and pd.notna(row.get(last_name_col)) else ''
+                    name = f"{first} {last}".strip()
+
+                if full_data:
+                    # Keep all columns for screening
+                    profile = {col: (str(row[col]) if pd.notna(row[col]) else '') for col in df.columns}
+                    profile['linkedin_url'] = normalize_url(url)
+                    profile['name'] = name
+                    profile['full_name'] = name
+                    profiles.append(profile)
+                else:
+                    profiles.append({
+                        'url': normalize_url(url),
+                        'name': name,
+                        'title': str(row.get(title_col, '')) if title_col and pd.notna(row.get(title_col)) else '',
+                        'company': str(row.get(company_col, '')) if company_col and pd.notna(row.get(company_col)) else '',
+                        'university': str(row.get(university_col, '')) if university_col and pd.notna(row.get(university_col)) else ''
+                    })
+
+    return profiles
+
+
+def normalize_url(url: str) -> str:
+    """Normalize LinkedIn URL."""
+    url = str(url).strip()
+    if url.startswith('www.'):
+        url = 'https://' + url
+    elif not url.startswith('http'):
+        url = 'https://' + url
+    return url
+
+
+def extract_urls(uploaded_file) -> list[str]:
+    """Extract LinkedIn URLs from uploaded file (legacy wrapper)."""
+    profiles = extract_profiles(uploaded_file)
+    return [p['url'] for p in profiles]
 
 
 def enrich_batch(urls: list[str], api_key: str) -> list[dict]:
@@ -213,20 +304,133 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file:
-    urls = extract_urls(uploaded_file)
+    uploaded_profiles = extract_profiles(uploaded_file)
+    urls = [p['url'] for p in uploaded_profiles]
 
     if urls:
         st.success(f"Found **{len(urls)}** LinkedIn URLs")
 
-        # Preview
-        with st.expander("Preview URLs"):
-            for i, url in enumerate(urls[:20]):
-                st.text(f"{i+1}. {url}")
-            if len(urls) > 20:
-                st.text(f"... and {len(urls) - 20} more")
+        # LinkedIn logo URL
+        LINKEDIN_LOGO = "https://cdn-icons-png.flaticon.com/512/174/174857.png"
 
-        # Enrichment settings
-        st.subheader("2. Settings")
+        # Profile preview table
+        st.markdown("### Uploaded Profiles Preview")
+
+        # Header row
+        header_cols = st.columns([3, 3, 3, 3, 1])
+        with header_cols[0]:
+            st.markdown("**Name**")
+        with header_cols[1]:
+            st.markdown("**Title**")
+        with header_cols[2]:
+            st.markdown("**Company**")
+        with header_cols[3]:
+            st.markdown("**University**")
+        with header_cols[4]:
+            st.markdown("**Link**")
+
+        st.divider()
+
+        for i, profile in enumerate(uploaded_profiles[:20]):
+            col1, col2, col3, col4, col5 = st.columns([3, 3, 3, 3, 1])
+
+            with col1:
+                st.markdown(f"**{profile['name']}**" if profile['name'] else "-")
+            with col2:
+                st.markdown(profile['title'] if profile['title'] else "-")
+            with col3:
+                st.markdown(profile['company'] if profile['company'] else "-")
+            with col4:
+                st.markdown(profile['university'] if profile['university'] else "-")
+            with col5:
+                if profile['url']:
+                    st.markdown(f'<a href="{profile["url"]}" target="_blank"><img src="{LINKEDIN_LOGO}" width="24"></a>', unsafe_allow_html=True)
+
+        if len(uploaded_profiles) > 20:
+            st.caption(f"... and {len(uploaded_profiles) - 20} more profiles")
+
+        # Store uploaded profiles in session for filtering
+        st.session_state['uploaded_profiles'] = uploaded_profiles
+
+        # Mode selection
+        st.subheader("2. Choose Mode")
+
+        mode = st.radio(
+            "What would you like to do?",
+            ["Enrich profiles (fetch full data from API)", "Skip to screening (data already complete)"],
+            horizontal=True
+        )
+
+        if mode == "Skip to screening (data already complete)":
+            # Filter section
+            st.subheader("3. Filter Profiles")
+
+            # Load target companies from Google Sheet
+            target_companies = load_target_companies()
+            if target_companies:
+                st.success(f"Loaded **{len(target_companies)}** target companies from Google Sheet")
+
+            # Target companies filter (quick filter)
+            use_target_filter = st.checkbox(
+                "Only show profiles from Target Companies (Google Sheet)",
+                value=False,
+                help="Filter profiles to only show those from companies in your Google Sheet"
+            )
+
+            # Get unique values for filters
+            all_companies = sorted(set(p['company'] for p in uploaded_profiles if p.get('company')))
+            all_titles = sorted(set(p['title'] for p in uploaded_profiles if p.get('title')))
+            all_universities = sorted(set(p['university'] for p in uploaded_profiles if p.get('university')))
+
+            filter_col1, filter_col2, filter_col3 = st.columns(3)
+
+            with filter_col1:
+                selected_companies = st.multiselect("Filter by Company", all_companies, default=[])
+            with filter_col2:
+                selected_titles = st.multiselect("Filter by Title (contains)", all_titles, default=[])
+            with filter_col3:
+                selected_universities = st.multiselect("Filter by University", all_universities, default=[])
+
+            # Apply filters
+            filtered_profiles = uploaded_profiles.copy()
+
+            # Target companies filter (from Google Sheet)
+            if use_target_filter and target_companies:
+                filtered_profiles = [
+                    p for p in filtered_profiles
+                    if p.get('company', '').strip().lower() in target_companies
+                ]
+
+            if selected_companies:
+                filtered_profiles = [p for p in filtered_profiles if p.get('company') in selected_companies]
+            if selected_titles:
+                filtered_profiles = [p for p in filtered_profiles if any(t.lower() in p.get('title', '').lower() for t in selected_titles)]
+            if selected_universities:
+                filtered_profiles = [p for p in filtered_profiles if p.get('university') in selected_universities]
+
+            # Show match info
+            if use_target_filter and target_companies:
+                st.info(f"**{len(filtered_profiles)}** profiles from target companies (out of {len(uploaded_profiles)} total)")
+            else:
+                st.info(f"**{len(filtered_profiles)}** profiles match your filters (out of {len(uploaded_profiles)} total)")
+
+            if st.button("📋 Use These Profiles for Screening", type="primary"):
+                # Re-read the file with full_data=True to get all fields
+                uploaded_file.seek(0)
+                full_profiles = extract_profiles(uploaded_file, full_data=True)
+
+                # Filter full profiles based on URLs of filtered preview profiles
+                filtered_urls = {p['url'] for p in filtered_profiles}
+                results = [p for p in full_profiles if p.get('linkedin_url') in filtered_urls or p.get('url') in filtered_urls]
+
+                st.session_state['results'] = results
+                st.session_state['results_df'] = flatten_for_csv(results)
+                st.success(f"Loaded **{len(results)}** profiles for screening!")
+                st.rerun()
+
+        else:
+            # Enrichment settings
+            st.subheader("3. Settings")
 
         col1, col2 = st.columns(2)
         with col1:
@@ -239,10 +443,10 @@ if uploaded_file:
             )
         with col2:
             batch_size = st.slider("Batch size", min_value=1, max_value=25, value=10,
-                                   help="Number of profiles per API call")
+                                       help="Number of profiles per API call")
 
-        # Run enrichment
-        st.subheader("3. Run Enrichment")
+            # Run enrichment
+            st.subheader("4. Run Enrichment")
 
         if st.button("🚀 Start Enrichment", type="primary"):
             # Limit to selected number of profiles
@@ -282,6 +486,8 @@ if uploaded_file:
             st.session_state['results'] = results
             st.session_state['results_df'] = flatten_for_csv(results)
 
+st.divider()
+
 # Display results
 if 'results' in st.session_state and st.session_state['results']:
     st.subheader("4. Results")
@@ -291,8 +497,68 @@ if 'results' in st.session_state and st.session_state['results']:
 
     st.success(f"**{len(results)}** profiles enriched")
 
-    # Preview results table
-    st.dataframe(df.head(50), use_container_width=True)
+    # LinkedIn logo URL
+    LINKEDIN_LOGO = "https://cdn-icons-png.flaticon.com/512/174/174857.png"
+
+    # Profile cards preview
+    st.markdown("### Profiles Preview")
+
+    # Header row
+    header_cols = st.columns([3, 3, 3, 3, 1])
+    with header_cols[0]:
+        st.markdown("**Name**")
+    with header_cols[1]:
+        st.markdown("**Title**")
+    with header_cols[2]:
+        st.markdown("**Company**")
+    with header_cols[3]:
+        st.markdown("**University**")
+    with header_cols[4]:
+        st.markdown("**Link**")
+
+    st.divider()
+
+    for i, profile in enumerate(results[:20]):
+        name = profile.get('full_name') or profile.get('name') or 'Unknown'
+        title = profile.get('title') or profile.get('headline') or ''
+        company = profile.get('company') or profile.get('current_company') or profile.get('company_name') or ''
+
+        # Try to get university from education
+        education = profile.get('education') or profile.get('educations') or []
+        university = ''
+        if isinstance(education, list) and len(education) > 0:
+            if isinstance(education[0], dict):
+                university = education[0].get('school') or education[0].get('school_name') or ''
+            elif isinstance(education[0], str):
+                university = education[0]
+        elif isinstance(education, str):
+            university = education
+
+        linkedin_url = profile.get('linkedin_url') or profile.get('linkedin_profile_url') or ''
+
+        # Create card layout
+        col1, col2, col3, col4, col5 = st.columns([3, 3, 3, 3, 1])
+
+        with col1:
+            st.markdown(f"**{name}**")
+        with col2:
+            st.markdown(f"{title}" if title else "-")
+        with col3:
+            st.markdown(f"{company}" if company else "-")
+        with col4:
+            st.markdown(f"{university}" if university else "-")
+        with col5:
+            if linkedin_url:
+                st.markdown(f'<a href="{linkedin_url}" target="_blank"><img src="{LINKEDIN_LOGO}" width="24"></a>', unsafe_allow_html=True)
+
+    if len(results) > 20:
+        st.caption(f"... and {len(results) - 20} more profiles")
+
+    st.divider()
+
+    # Full data table
+    with st.expander("View Full Data Table"):
+        st.dataframe(df.head(50), use_container_width=True)
 
     # Download buttons
     st.subheader("5. Download")

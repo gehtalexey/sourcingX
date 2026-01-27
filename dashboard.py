@@ -69,6 +69,7 @@ GOOGLE_SHEETS = {
     "target_universities": "https://docs.google.com/spreadsheets/d/e/2PACX-1vSwZW1szbtKb7yYRU5hVE6FdMchLkRNd_jRff2eyYSSpD4R1V0USYsK_6uEBQLzlOdvUFMucJSh2bsv/pub?gid=1&single=true&output=csv",
     "tech_alerts": "https://docs.google.com/spreadsheets/d/e/2PACX-1vSwZW1szbtKb7yYRU5hVE6FdMchLkRNd_jRff2eyYSSpD4R1V0USYsK_6uEBQLzlOdvUFMucJSh2bsv/pub?gid=2&single=true&output=csv",
     "blacklist_companies": "https://docs.google.com/spreadsheets/d/e/2PACX-1vSwZW1szbtKb7yYRU5hVE6FdMchLkRNd_jRff2eyYSSpD4R1V0USYsK_6uEBQLzlOdvUFMucJSh2bsv/pub?gid=3&single=true&output=csv",
+    "not_relevant_companies": "https://docs.google.com/spreadsheets/d/e/2PACX-1vSwZW1szbtKb7yYRU5hVE6FdMchLkRNd_jRff2eyYSSpD4R1V0USYsK_6uEBQLzlOdvUFMucJSh2bsv/pub?gid=4&single=true&output=csv",
 }
 
 
@@ -114,37 +115,68 @@ def load_blacklist_companies() -> set:
     return load_sheet_data("blacklist_companies")
 
 
+def load_not_relevant_companies() -> set:
+    """Load not relevant companies from Google Sheet."""
+    return load_sheet_data("not_relevant_companies")
+
+
 def extract_past_candidates(uploaded_file) -> set:
-    """Extract LinkedIn URLs from a past candidates file."""
-    urls = set()
+    """Extract candidate names from a past candidates file."""
+    names = set()
     if uploaded_file is None:
-        return urls
+        return names
 
     try:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
-            # Find URL column
+            # Find name column
+            name_col = None
             for col in df.columns:
-                if 'url' in col.lower() or 'linkedin' in col.lower():
-                    for val in df[col].dropna():
-                        url = normalize_url(str(val))
-                        if 'linkedin.com' in url:
-                            urls.add(url)
+                col_lower = col.lower()
+                if col_lower in ['name', 'full_name', 'fullname', 'full name', 'candidate', 'candidate name']:
+                    name_col = col
                     break
+            # Try first + last name columns
+            first_name_col = None
+            last_name_col = None
+            for col in df.columns:
+                col_lower = col.lower()
+                if col_lower in ['firstname', 'first_name', 'first name', 'first']:
+                    first_name_col = col
+                elif col_lower in ['lastname', 'last_name', 'last name', 'last']:
+                    last_name_col = col
+
+            if name_col:
+                for val in df[name_col].dropna():
+                    name = str(val).strip().lower()
+                    if name:
+                        names.add(name)
+            elif first_name_col or last_name_col:
+                for _, row in df.iterrows():
+                    first = str(row.get(first_name_col, '')).strip() if first_name_col and pd.notna(row.get(first_name_col)) else ''
+                    last = str(row.get(last_name_col, '')).strip() if last_name_col and pd.notna(row.get(last_name_col)) else ''
+                    full_name = f"{first} {last}".strip().lower()
+                    if full_name:
+                        names.add(full_name)
+
         elif uploaded_file.name.endswith('.json'):
             data = json.load(uploaded_file)
             if isinstance(data, list):
                 for item in data:
                     if isinstance(item, dict):
-                        url = item.get('url') or item.get('linkedin_url') or item.get('linkedinUrl') or ''
-                        if url and 'linkedin.com' in str(url):
-                            urls.add(normalize_url(url))
-                    elif isinstance(item, str) and 'linkedin.com' in item:
-                        urls.add(normalize_url(item))
+                        name = item.get('name') or item.get('full_name') or item.get('fullName') or ''
+                        if not name:
+                            first = item.get('firstName') or item.get('first_name') or ''
+                            last = item.get('lastName') or item.get('last_name') or ''
+                            name = f"{first} {last}".strip()
+                        if name:
+                            names.add(name.strip().lower())
+                    elif isinstance(item, str):
+                        names.add(item.strip().lower())
     except Exception as e:
         st.warning(f"Could not parse past candidates file: {e}")
 
-    return urls
+    return names
 
 
 def match_company(profile_company: str, target_set: set) -> bool:
@@ -472,6 +504,7 @@ if uploaded_file:
             target_universities = load_target_universities()
             tech_alerts = load_tech_alerts()
             blacklist_companies = load_blacklist_companies()
+            not_relevant_companies = load_not_relevant_companies()
 
             # Show loaded filters summary
             filter_summary = []
@@ -483,6 +516,8 @@ if uploaded_file:
                 filter_summary.append(f"{len(tech_alerts)} tech alerts")
             if blacklist_companies:
                 filter_summary.append(f"{len(blacklist_companies)} blacklisted companies")
+            if not_relevant_companies:
+                filter_summary.append(f"{len(not_relevant_companies)} not relevant companies")
             if filter_summary:
                 st.success(f"Loaded from Google Sheet: {', '.join(filter_summary)}")
 
@@ -500,27 +535,36 @@ if uploaded_file:
                         help="Remove profiles from companies in your blacklist"
                     )
 
+                    # Not relevant companies (from Google Sheet)
+                    use_not_relevant = st.checkbox(
+                        "Exclude Not Relevant Companies (Google Sheet)",
+                        value=True if not_relevant_companies else False,
+                        help="Remove profiles from companies marked as not relevant"
+                    )
+
                     # Past candidates upload
-                    st.markdown("**Past Candidates (exclude already contacted):**")
+                    st.markdown("**Past Candidates (exclude by name):**")
                     past_candidates_file = st.file_uploader(
                         "Upload past candidates file",
                         type=['csv', 'json'],
                         key="past_candidates",
-                        help="Upload a file with LinkedIn URLs of past candidates to exclude"
+                        help="Upload a file with names of past candidates to exclude"
                     )
-                    past_candidate_urls = set()
+                    past_candidate_names = set()
                     if past_candidates_file:
-                        past_candidate_urls = extract_past_candidates(past_candidates_file)
-                        st.caption(f"Loaded {len(past_candidate_urls)} past candidate URLs")
+                        past_candidate_names = extract_past_candidates(past_candidates_file)
+                        st.caption(f"Loaded {len(past_candidate_names)} past candidate names")
 
                 with exclude_col2:
-                    # Manual company exclusion
+                    # Get unique values for filters
                     all_companies = sorted(set(p['company'] for p in uploaded_profiles if p.get('company')))
+
+                    # Manual company exclusion
                     exclude_companies = st.multiselect(
-                        "Exclude specific companies",
+                        "Exclude specific companies (manual)",
                         all_companies,
                         default=[],
-                        help="Select companies to exclude from results"
+                        help="Select additional companies to exclude"
                     )
 
                     # Title exclusion keywords
@@ -596,15 +640,23 @@ if uploaded_file:
                 ]
                 filter_stats["after_blacklist"] = len(filtered_profiles)
 
-            # Exclude past candidates
-            if past_candidate_urls:
+            # Exclude not relevant companies
+            if use_not_relevant and not_relevant_companies:
                 filtered_profiles = [
                     p for p in filtered_profiles
-                    if normalize_url(p.get('url', '')) not in past_candidate_urls
+                    if not match_company(p.get('company', ''), not_relevant_companies)
+                ]
+                filter_stats["after_not_relevant"] = len(filtered_profiles)
+
+            # Exclude past candidates by name
+            if past_candidate_names:
+                filtered_profiles = [
+                    p for p in filtered_profiles
+                    if p.get('name', '').strip().lower() not in past_candidate_names
                 ]
                 filter_stats["after_past_candidates"] = len(filtered_profiles)
 
-            # Exclude specific companies
+            # Exclude specific companies (manual selection)
             if exclude_companies:
                 filtered_profiles = [
                     p for p in filtered_profiles

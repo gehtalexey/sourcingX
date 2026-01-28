@@ -42,6 +42,150 @@ def load_openai_key():
     return config.get('openai_api_key')
 
 
+def load_phantombuster_key():
+    config = load_config()
+    return config.get('phantombuster_api_key')
+
+
+@st.cache_data(ttl=300)  # Cache for 5 minutes
+def fetch_phantombuster_agents(api_key: str) -> list[dict]:
+    """Fetch list of all PhantomBuster agents."""
+    try:
+        response = requests.get(
+            'https://api.phantombuster.com/api/v2/agents/fetch-all',
+            headers={'X-Phantombuster-Key': api_key},
+            timeout=30
+        )
+        if response.status_code == 200:
+            agents = response.json()
+            # Return list of {id, name} for dropdown
+            return [{'id': a['id'], 'name': a['name']} for a in agents]
+        return []
+    except Exception as e:
+        return []
+
+
+def fetch_phantombuster_results(api_key: str, agent_id: str) -> list[dict]:
+    """Fetch results from PhantomBuster agent."""
+    try:
+        # Get agent output
+        response = requests.get(
+            f'https://api.phantombuster.com/api/v2/agents/fetch-output',
+            params={'id': agent_id},
+            headers={'X-Phantombuster-Key': api_key},
+            timeout=60
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            # PhantomBuster returns results in 'output' or as direct JSON
+            if 'output' in data:
+                # Parse the output if it's a JSON string
+                output = data['output']
+                if isinstance(output, str):
+                    try:
+                        return json.loads(output)
+                    except:
+                        return []
+                return output if isinstance(output, list) else []
+            return []
+        else:
+            return []
+    except Exception as e:
+        st.error(f"PhantomBuster API error: {e}")
+        return []
+
+
+def fetch_phantombuster_result_csv(api_key: str, agent_id: str) -> pd.DataFrame:
+    """Fetch results from PhantomBuster agent using the result object API."""
+    try:
+        # Fetch containers for this agent
+        response = requests.get(
+            'https://api.phantombuster.com/api/v2/containers/fetch-all',
+            params={'agentId': agent_id},
+            headers={'X-Phantombuster-Key': api_key},
+            timeout=60
+        )
+
+        if response.status_code != 200:
+            st.error(f"Failed to fetch containers: {response.status_code}")
+            return pd.DataFrame()
+
+        data = response.json()
+        containers = data.get('containers', [])
+
+        if not containers:
+            st.error("No runs found for this agent. Run the agent first.")
+            return pd.DataFrame()
+
+        # Get the most recent finished container
+        finished_containers = [c for c in containers if c.get('status') == 'finished']
+        if not finished_containers:
+            st.error("No completed runs found. Wait for the agent to finish.")
+            return pd.DataFrame()
+
+        container_id = finished_containers[0]['id']
+
+        # Fetch the result object using the container ID
+        result_response = requests.get(
+            'https://api.phantombuster.com/api/v2/containers/fetch-result-object',
+            params={'id': container_id},
+            headers={'X-Phantombuster-Key': api_key},
+            timeout=60
+        )
+
+        if result_response.status_code != 200:
+            st.error(f"Failed to fetch results: {result_response.status_code}")
+            return pd.DataFrame()
+
+        result_data = result_response.json()
+        result_object = result_data.get('resultObject')
+
+        if not result_object:
+            st.error("No result object found in the response")
+            return pd.DataFrame()
+
+        # Parse the result object (it's a JSON string)
+        if isinstance(result_object, str):
+            profiles = json.loads(result_object)
+        else:
+            profiles = result_object
+
+        if isinstance(profiles, list):
+            return pd.DataFrame(profiles)
+        else:
+            return pd.DataFrame([profiles])
+
+    except json.JSONDecodeError as e:
+        st.error(f"Error parsing PhantomBuster results: {e}")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"PhantomBuster fetch error: {e}")
+        return pd.DataFrame()
+
+
+def extract_urls_from_phantombuster(df: pd.DataFrame) -> list[str]:
+    """Extract LinkedIn URLs from PhantomBuster results."""
+    urls = []
+    # Try different column names PhantomBuster might use
+    url_columns = ['linkedInProfileUrl', 'defaultProfileUrl', 'url', 'profileUrl', 'LinkedIn Sales Navigator profile URL']
+
+    for col in url_columns:
+        if col in df.columns:
+            urls.extend(df[col].dropna().tolist())
+            break
+
+    # Normalize URLs
+    normalized = []
+    for u in urls:
+        if u and 'linkedin.com' in str(u):
+            u = str(u).strip()
+            if not u.startswith('http'):
+                u = 'https://' + u
+            normalized.append(u)
+    return normalized
+
+
 def get_gspread_client():
     """Get authenticated gspread client using service account."""
     config = load_config()
@@ -553,9 +697,45 @@ if pre_enriched_file:
         import traceback
         st.code(traceback.format_exc())
 
-# Show current data status
+# Show current data status and preview
 if 'results' in st.session_state and st.session_state['results']:
     st.success(f"**{len(st.session_state['results'])}** profiles currently loaded")
+
+    # Compact data preview with pagination
+    with st.expander("Preview loaded data (click to expand)", expanded=False):
+        df = st.session_state['results_df']
+        page_size = 10
+        total_pages = (len(df) + page_size - 1) // page_size
+
+        # Initialize page in session state
+        if 'preview_page' not in st.session_state:
+            st.session_state['preview_page'] = 0
+
+        # Navigation
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col1:
+            if st.button("← Previous", disabled=st.session_state['preview_page'] == 0, key="prev_page"):
+                st.session_state['preview_page'] -= 1
+                st.rerun()
+        with col2:
+            st.markdown(f"<center>Page {st.session_state['preview_page'] + 1} of {total_pages}</center>", unsafe_allow_html=True)
+        with col3:
+            if st.button("Next →", disabled=st.session_state['preview_page'] >= total_pages - 1, key="next_page"):
+                st.session_state['preview_page'] += 1
+                st.rerun()
+
+        # Display current page
+        start_idx = st.session_state['preview_page'] * page_size
+        end_idx = min(start_idx + page_size, len(df))
+
+        display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location']
+        available_cols = [c for c in display_cols if c in df.columns]
+        if available_cols:
+            st.dataframe(df[available_cols].iloc[start_idx:end_idx], use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(df.iloc[start_idx:end_idx], use_container_width=True, hide_index=True)
+
+        st.caption(f"Showing {start_idx + 1}-{end_idx} of {len(df)} profiles")
 
 st.divider()
 
@@ -864,74 +1044,132 @@ with st.expander("Enrich New Profiles (requires Crust Data API key)", expanded=F
     else:
         st.success("Crust Data API key loaded")
 
-        uploaded_file = st.file_uploader(
-            "Upload CSV or JSON file with LinkedIn URLs",
-            type=['csv', 'json'],
-            key="enrich_upload"
-        )
+        # Source selection tabs
+        source_tab1, source_tab2 = st.tabs(["Upload File", "PhantomBuster"])
 
-        if uploaded_file:
-            urls = extract_urls(uploaded_file)
+        urls_to_enrich = []
 
-            if urls:
-                st.success(f"Found **{len(urls)}** LinkedIn URLs")
+        with source_tab1:
+            uploaded_file = st.file_uploader(
+                "Upload CSV or JSON file with LinkedIn URLs",
+                type=['csv', 'json'],
+                key="enrich_upload"
+            )
 
-                with st.expander("Preview URLs"):
-                    for i, url in enumerate(urls[:20]):
-                        st.text(f"{i+1}. {url}")
-                    if len(urls) > 20:
-                        st.text(f"... and {len(urls) - 20} more")
+            if uploaded_file:
+                urls = extract_urls(uploaded_file)
+                if urls:
+                    st.success(f"Found **{len(urls)}** LinkedIn URLs")
+                    st.session_state['enrich_urls'] = urls
+                    with st.expander("Preview URLs"):
+                        for i, url in enumerate(urls[:10]):
+                            st.text(f"{i+1}. {url}")
+                        if len(urls) > 10:
+                            st.text(f"... and {len(urls) - 10} more")
+                else:
+                    st.warning("No LinkedIn URLs found in file")
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    max_profiles = st.number_input(
-                        "Number of profiles to process",
-                        min_value=1,
-                        max_value=len(urls),
-                        value=min(5, len(urls)),
-                        help="Start with a few to test"
-                    )
-                with col2:
-                    batch_size = st.slider("Batch size", min_value=1, max_value=25, value=10)
+        with source_tab2:
+            pb_key = load_phantombuster_key()
+            has_pb_key = pb_key and pb_key != "YOUR_PHANTOMBUSTER_API_KEY_HERE"
 
-                if st.button("Start Enrichment", type="primary"):
-                    urls_to_process = urls[:max_profiles]
-                    results = []
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    total_batches = (len(urls_to_process) + batch_size - 1) // batch_size
-
-                    for i in range(0, len(urls_to_process), batch_size):
-                        batch = urls_to_process[i:i + batch_size]
-                        batch_num = i // batch_size + 1
-                        status_text.text(f"Processing batch {batch_num}/{total_batches}...")
-                        batch_results = enrich_batch(batch, api_key)
-                        results.extend(batch_results)
-                        progress_bar.progress(min((i + batch_size) / len(urls_to_process), 1.0))
-                        if i + batch_size < len(urls_to_process):
-                            time.sleep(2)
-
-                    progress_bar.progress(1.0)
-                    status_text.text("Enrichment complete!")
-                    send_notification("Enrichment Complete", f"Processed {len(results)} profiles")
-                    st.session_state['results'] = results
-                    st.session_state['results_df'] = flatten_for_csv(results)
+            if not has_pb_key:
+                st.warning("PhantomBuster API key not configured. Add 'phantombuster_api_key' to config.json")
             else:
-                st.warning("No LinkedIn URLs found in file")
+                st.success("PhantomBuster API key loaded")
+
+                # Fetch agents list
+                agents = fetch_phantombuster_agents(pb_key)
+
+                if agents:
+                    # Create dropdown with agent names
+                    agent_options = {a['name']: a['id'] for a in agents}
+                    selected_agent = st.selectbox(
+                        "Select Phantom",
+                        options=list(agent_options.keys()),
+                        index=0,
+                        help="Select from your PhantomBuster agents"
+                    )
+                    agent_id = agent_options.get(selected_agent, '')
+                else:
+                    st.warning("No agents found or could not fetch agent list")
+                    agent_id = st.text_input(
+                        "PhantomBuster Agent ID",
+                        placeholder="Enter your agent/phantom ID manually",
+                    )
+
+                if agent_id:
+                    if st.button("Fetch from PhantomBuster", key="fetch_pb"):
+                        with st.spinner("Fetching results from PhantomBuster..."):
+                            pb_df = fetch_phantombuster_result_csv(pb_key, agent_id)
+
+                            if not pb_df.empty:
+                                st.success(f"Fetched **{len(pb_df)}** profiles from PhantomBuster")
+                                st.session_state['pb_results'] = pb_df
+
+                                # Show preview
+                                preview_cols = ['fullName', 'title', 'companyName', 'location']
+                                available = [c for c in preview_cols if c in pb_df.columns]
+                                if available:
+                                    st.dataframe(pb_df[available].head(10), use_container_width=True, hide_index=True)
+
+                                # Extract URLs
+                                urls = extract_urls_from_phantombuster(pb_df)
+                                if urls:
+                                    st.info(f"Found **{len(urls)}** LinkedIn URLs to enrich")
+                                    st.session_state['enrich_urls'] = urls
+                                else:
+                                    st.warning("No LinkedIn URLs found in PhantomBuster results")
+                            else:
+                                st.error("No results found. Check agent ID and make sure agent has run.")
+
+        # Enrichment controls (shared between both sources)
+        st.divider()
+        if 'enrich_urls' in st.session_state and st.session_state['enrich_urls']:
+            urls = st.session_state['enrich_urls']
+            st.info(f"**{len(urls)}** URLs ready for enrichment")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                max_profiles = st.number_input(
+                    "Number of profiles to process",
+                    min_value=1,
+                    max_value=len(urls),
+                    value=min(5, len(urls)),
+                    help="Start with a few to test"
+                )
+            with col2:
+                batch_size = st.slider("Batch size", min_value=1, max_value=25, value=10)
+
+            if st.button("Start Enrichment", type="primary", key="start_enrich"):
+                urls_to_process = urls[:max_profiles]
+                results = []
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                total_batches = (len(urls_to_process) + batch_size - 1) // batch_size
+
+                for i in range(0, len(urls_to_process), batch_size):
+                    batch = urls_to_process[i:i + batch_size]
+                    batch_num = i // batch_size + 1
+                    status_text.text(f"Processing batch {batch_num}/{total_batches}...")
+                    batch_results = enrich_batch(batch, api_key)
+                    results.extend(batch_results)
+                    progress_bar.progress(min((i + batch_size) / len(urls_to_process), 1.0))
+                    if i + batch_size < len(urls_to_process):
+                        time.sleep(2)
+
+                progress_bar.progress(1.0)
+                status_text.text("Enrichment complete!")
+                send_notification("Enrichment Complete", f"Processed {len(results)} profiles")
+                st.session_state['results'] = results
+                st.session_state['results_df'] = flatten_for_csv(results)
+                # Clear enrich_urls
+                del st.session_state['enrich_urls']
+                st.rerun()
 
 st.divider()
 
-# ========== SECTION 4: View loaded data ==========
-if 'results' in st.session_state and st.session_state['results']:
-    st.subheader("3. Loaded Data")
-    results = st.session_state['results']
-    df = st.session_state['results_df']
-    st.success(f"**{len(results)}** profiles loaded")
-    st.dataframe(df.head(20), use_container_width=True)
-
-st.divider()
-
-# ========== SECTION 5: AI Screening ==========
+# ========== SECTION 3: AI Screening ==========
 st.subheader("4. AI Screening")
 
 openai_key = load_openai_key()

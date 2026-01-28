@@ -1,6 +1,7 @@
 {
     "api_key": "YOUR_CRUSTDATA_API_KEY_HERE",
     "openai_api_key": "YOUR_OPENAI_API_KEY_HERE",
+    "phantombuster_api_key": "YOUR_PHANTOMBUSTER_API_KEY_HERE",
     "google_credentials_file": "google_credentials.json",
     "filter_sheets": {
         "past_candidates": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit",

@@ -16,6 +16,8 @@ from plyer import notification
 from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 
 # Page config
@@ -45,6 +47,11 @@ def load_openai_key():
 def load_phantombuster_key():
     config = load_config()
     return config.get('phantombuster_api_key')
+
+
+def load_phantombuster_agent_id():
+    config = load_config()
+    return config.get('phantombuster_agent_id')
 
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
@@ -96,10 +103,239 @@ def fetch_phantombuster_results(api_key: str, agent_id: str) -> list[dict]:
         return []
 
 
-def fetch_phantombuster_result_csv(api_key: str, agent_id: str) -> pd.DataFrame:
-    """Fetch results from PhantomBuster agent using the result object API."""
+def fetch_phantombuster_result_csv(api_key: str, agent_id: str, debug: bool = False, filename: str = None) -> pd.DataFrame:
+    """Fetch results from PhantomBuster agent. Tries multiple methods:
+    1. Authenticated API to get output files
+    2. Result object from container
+
+    Args:
+        filename: Optional specific filename to fetch (without .csv extension)
+    """
+    from io import StringIO
+
     try:
-        # Fetch containers for this agent
+        # First, try to get the agent's info
+        agent_response = requests.get(
+            'https://api.phantombuster.com/api/v2/agents/fetch',
+            params={'id': agent_id},
+            headers={'X-Phantombuster-Key': api_key},
+            timeout=30
+        )
+
+        agent_name = 'Unknown'
+        s3_folder = None
+        org_s3_folder = None
+
+        if agent_response.status_code == 200:
+            agent_data = agent_response.json()
+            s3_folder = agent_data.get('s3Folder')
+            org_s3_folder = agent_data.get('orgS3Folder')
+            agent_name = agent_data.get('name', 'Unknown')
+
+            if debug:
+                st.info(f"Agent: {agent_name}")
+                st.info(f"S3 Folder: {s3_folder}")
+                if filename:
+                    st.info(f"Looking for file: {filename}.csv")
+                with st.expander("Agent API Response"):
+                    st.json(agent_data)
+
+        # Method 0: Try direct PhantomBuster cache URL (most reliable for files)
+        if s3_folder and org_s3_folder:
+            for fname in ['result.csv', 'result.json']:
+                try:
+                    cache_url = f'https://cache1.phantombooster.com/{org_s3_folder}/{s3_folder}/{fname}'
+                    if debug:
+                        st.info(f"Trying cache URL: {cache_url}")
+                    cache_response = requests.get(cache_url, timeout=60)
+                    if cache_response.status_code == 200:
+                        if fname.endswith('.csv'):
+                            df = pd.read_csv(StringIO(cache_response.text))
+                            if not df.empty:
+                                if debug:
+                                    st.success(f"Loaded from cache URL!")
+                                return df
+                        elif fname.endswith('.json'):
+                            profiles = cache_response.json()
+                            if isinstance(profiles, list) and profiles:
+                                if debug:
+                                    st.success(f"Loaded from cache URL!")
+                                return pd.DataFrame(profiles)
+                except Exception as e:
+                    if debug:
+                        st.warning(f"Cache URL error: {e}")
+
+        # Method 1: Try fetch-output endpoint (gets last run output/logs)
+        try:
+            output_response = requests.get(
+                'https://api.phantombuster.com/api/v2/agents/fetch-output',
+                params={'id': agent_id},
+                headers={'X-Phantombuster-Key': api_key},
+                timeout=60
+            )
+
+            if debug:
+                st.info(f"Fetch-output API: {output_response.status_code}")
+
+            if output_response.status_code == 200:
+                output_data = output_response.json()
+                if debug:
+                    with st.expander("Fetch-output Response"):
+                        # Truncate output for display
+                        display_data = output_data.copy()
+                        if 'output' in display_data and len(str(display_data['output'])) > 2000:
+                            display_data['output'] = str(display_data['output'])[:2000] + '... (truncated)'
+                        st.json(display_data)
+
+                # Check for resultObject in output
+                if output_data.get('resultObject'):
+                    result_obj = output_data['resultObject']
+                    if isinstance(result_obj, str):
+                        profiles = json.loads(result_obj)
+                    else:
+                        profiles = result_obj
+                    if isinstance(profiles, list) and profiles:
+                        st.success(f"Loaded {len(profiles)} profiles from fetch-output")
+                        return pd.DataFrame(profiles)
+        except Exception as e:
+            if debug:
+                st.warning(f"Fetch-output error: {e}")
+
+        # Method 2: Try the store/fetch API endpoint (authenticated file access)
+        # First, list all files in the agent's storage
+        try:
+            files_response = requests.get(
+                'https://api.phantombuster.com/api/v2/agents/fetch-output',
+                params={'id': agent_id},
+                headers={'X-Phantombuster-Key': api_key},
+                timeout=30
+            )
+            if files_response.status_code == 200:
+                files_data = files_response.json()
+                if debug:
+                    with st.expander("Agent Output Data"):
+                        st.json({k: v for k, v in files_data.items() if k != 'output'})
+        except:
+            pass
+
+        # Try common file patterns - Sales Navigator Export uses these
+        possible_files = []
+        if filename:
+            possible_files.append(f'{filename}.csv')
+            possible_files.append(f'{filename}.json')
+
+        # Add agent name-based files (Sales Navigator Export pattern)
+        if agent_name and agent_name != 'Unknown':
+            possible_files.append(f'{agent_name}.csv')
+            possible_files.append(f'{agent_name}.json')
+
+        # Common PhantomBuster output files - Sales Navigator Export uses database files
+        # Try many variations of database filename patterns
+        possible_files.extend([
+            'result.csv',
+            'result.json',
+            'database-result.csv',
+            'database-linkedin-sales-navigator-search-export.csv',
+            'database-Sales Navigator Search Export.csv',
+            'Sales Navigator Search Export.csv',
+            'database-sales-navigator-search-export.csv',
+            'LinkedIn Sales Navigator Search Export result.csv',
+            'Sales Navigator Search Export result.csv',
+            # Lowercase variations
+            'database-sales navigator search export.csv',
+            'sales navigator search export.csv',
+            # With underscores
+            'database_linkedin_sales_navigator_search_export.csv',
+            'database_result.csv',
+            # Output variations
+            'output.csv',
+            'output.json',
+            'profiles.csv',
+            'leads.csv',
+        ])
+
+        # Also try with s3Folder prefix patterns
+        if s3_folder:
+            possible_files.insert(0, f'database-linkedin-sales-navigator-search-export.csv')
+            possible_files.insert(0, f'result.csv')
+
+        # Try to list all files in agent storage using store API
+        try:
+            # Try listing files with common patterns
+            for pattern in ['database-', 'result', agent_name.replace(' ', '-').lower() if agent_name else '']:
+                if not pattern:
+                    continue
+                list_response = requests.get(
+                    'https://api.phantombuster.com/api/v2/store/fetch',
+                    params={'id': agent_id, 'name': f'{pattern}'},
+                    headers={'X-Phantombuster-Key': api_key},
+                    timeout=10
+                )
+                # 200 means file exists, add it
+                if list_response.status_code == 200:
+                    if debug:
+                        st.success(f"Found file with pattern: {pattern}")
+        except Exception as e:
+            if debug:
+                st.warning(f"List files error: {e}")
+
+        if debug:
+            st.info(f"Trying files: {possible_files[:5]}...")
+
+        for fname in possible_files:
+            try:
+                # Try with agent ID
+                store_response = requests.get(
+                    'https://api.phantombuster.com/api/v2/store/fetch',
+                    params={'id': agent_id, 'name': fname},
+                    headers={'X-Phantombuster-Key': api_key},
+                    timeout=60
+                )
+
+                if debug:
+                    st.info(f"Store API {fname}: {store_response.status_code}")
+
+                # If 404, try with s3Folder path
+                if store_response.status_code == 404 and s3_folder:
+                    store_response = requests.get(
+                        'https://api.phantombuster.com/api/v2/store/fetch',
+                        params={'id': agent_id, 'name': f'{s3_folder}/{fname}'},
+                        headers={'X-Phantombuster-Key': api_key},
+                        timeout=60
+                    )
+                    if debug:
+                        st.info(f"Store API (with folder) {s3_folder}/{fname}: {store_response.status_code}")
+
+                # Also try direct org folder access
+                if store_response.status_code == 404 and org_s3_folder:
+                    store_response = requests.get(
+                        'https://api.phantombuster.com/api/v2/store/fetch',
+                        params={'id': agent_id, 'name': f'{org_s3_folder}/{s3_folder}/{fname}'},
+                        headers={'X-Phantombuster-Key': api_key},
+                        timeout=60
+                    )
+                    if debug:
+                        st.info(f"Store API (full path): {store_response.status_code}")
+
+                if store_response.status_code == 200:
+                    content_type = store_response.headers.get('content-type', '')
+
+                    if 'csv' in fname or 'csv' in content_type:
+                        df = pd.read_csv(StringIO(store_response.text))
+                        if not df.empty:
+                            st.success(f"Loaded {len(df)} profiles from {fname}")
+                            return df
+                    elif 'json' in fname or 'json' in content_type:
+                        profiles = store_response.json()
+                        if isinstance(profiles, list) and profiles:
+                            st.success(f"Loaded {len(profiles)} profiles from {fname}")
+                            return pd.DataFrame(profiles)
+            except Exception as e:
+                if debug:
+                    st.warning(f"Store API {fname}: {e}")
+
+
+        # Try the container result object method
         response = requests.get(
             'https://api.phantombuster.com/api/v2/containers/fetch-all',
             params={'agentId': agent_id},
@@ -114,6 +350,9 @@ def fetch_phantombuster_result_csv(api_key: str, agent_id: str) -> pd.DataFrame:
         data = response.json()
         containers = data.get('containers', [])
 
+        if debug:
+            st.info(f"Found {len(containers)} containers")
+
         if not containers:
             st.error("No runs found for this agent. Run the agent first.")
             return pd.DataFrame()
@@ -124,7 +363,31 @@ def fetch_phantombuster_result_csv(api_key: str, agent_id: str) -> pd.DataFrame:
             st.error("No completed runs found. Wait for the agent to finish.")
             return pd.DataFrame()
 
-        container_id = finished_containers[0]['id']
+        container = finished_containers[0]
+        container_id = container['id']
+
+        if debug:
+            with st.expander("Latest Container"):
+                st.json(container)
+
+        # Check if container has output file URL
+        output_url = container.get('resultObject') or container.get('output')
+        if output_url and isinstance(output_url, str) and output_url.startswith('http'):
+            try:
+                output_response = requests.get(output_url, timeout=60)
+                if output_response.status_code == 200:
+                    if '.csv' in output_url or 'text/csv' in output_response.headers.get('content-type', ''):
+                        df = pd.read_csv(StringIO(output_response.text))
+                        if not df.empty:
+                            st.success(f"Loaded {len(df)} profiles from container output")
+                            return df
+                    else:
+                        profiles = output_response.json()
+                        if isinstance(profiles, list) and profiles:
+                            return pd.DataFrame(profiles)
+            except Exception as e:
+                if debug:
+                    st.warning(f"Container output URL failed: {e}")
 
         # Fetch the result object using the container ID
         result_response = requests.get(
@@ -134,6 +397,10 @@ def fetch_phantombuster_result_csv(api_key: str, agent_id: str) -> pd.DataFrame:
             timeout=60
         )
 
+        if debug:
+            with st.expander("Result Object Response"):
+                st.json(result_response.json() if result_response.status_code == 200 else {"status": result_response.status_code})
+
         if result_response.status_code != 200:
             st.error(f"Failed to fetch results: {result_response.status_code}")
             return pd.DataFrame()
@@ -142,7 +409,44 @@ def fetch_phantombuster_result_csv(api_key: str, agent_id: str) -> pd.DataFrame:
         result_object = result_data.get('resultObject')
 
         if not result_object:
-            st.error("No result object found in the response")
+            # Check if the output says "already been processed"
+            output_text = ""
+            try:
+                out_resp = requests.get(
+                    'https://api.phantombuster.com/api/v2/agents/fetch-output',
+                    params={'id': agent_id},
+                    headers={'X-Phantombuster-Key': api_key},
+                    timeout=30
+                )
+                if out_resp.status_code == 200:
+                    output_text = out_resp.json().get('output', '')
+            except:
+                pass
+
+            if 'already been processed' in output_text:
+                st.warning("""
+**No new profiles found.**
+
+The phantom says "This search has already been processed" - meaning it already scraped these profiles before.
+
+**To get fresh results:**
+1. Go to **Launch Search** section below
+2. Enter your name and a NEW Sales Navigator search URL
+3. Click **Launch** - this will clear old results and start fresh
+                """)
+            else:
+                st.error("No result object found.")
+                st.warning(f"""
+**Troubleshooting:**
+- Agent: {agent_name}
+- Containers found: {len(containers)}
+- Finished runs: {len(finished_containers)}
+- Latest run status: {container.get('status')}
+
+The phantom may not have produced any results. Try:
+1. Running the phantom with a new search URL
+2. Or download CSV directly from PhantomBuster dashboard
+                """)
             return pd.DataFrame()
 
         # Parse the result object (it's a JSON string)
@@ -162,6 +466,352 @@ def fetch_phantombuster_result_csv(api_key: str, agent_id: str) -> pd.DataFrame:
     except Exception as e:
         st.error(f"PhantomBuster fetch error: {e}")
         return pd.DataFrame()
+
+
+def find_user_phantom(api_key: str, user_email: str, agents: list) -> dict:
+    """Find a phantom that belongs to a specific user based on email in the name.
+
+    Returns the agent dict if found, None otherwise.
+    """
+    user_identifier = user_email.split('@')[0].lower()  # Use part before @ for matching
+
+    for agent in agents:
+        agent_name = agent.get('name', '').lower()
+        # Check if agent name contains the user identifier
+        if user_identifier in agent_name or user_email.lower() in agent_name:
+            return agent
+
+    return None
+
+
+def duplicate_phantom_for_user(api_key: str, template_agent_id: str, user_email: str) -> dict:
+    """Duplicate a template phantom for a new user.
+
+    Returns dict with 'id' and 'name' on success, or 'error' on failure.
+    """
+    try:
+        # First fetch the template agent's full config
+        fetch_response = requests.get(
+            'https://api.phantombuster.com/api/v2/agents/fetch',
+            params={'id': template_agent_id},
+            headers={'X-Phantombuster-Key': api_key},
+            timeout=30
+        )
+
+        if fetch_response.status_code != 200:
+            return {'error': f"Failed to fetch template: {fetch_response.status_code}"}
+
+        template = fetch_response.json()
+
+        # Create new agent name with user email
+        user_name = user_email.split('@')[0].title()
+        new_name = f"Sales Nav Export - {user_name}"
+
+        # Prepare the new agent config (copy from template)
+        new_agent = {
+            'name': new_name,
+            'script': template.get('script'),
+            'branch': template.get('branch', 'master'),
+            'environment': template.get('environment', 'release'),
+            'argument': template.get('argument', '{}'),
+        }
+
+        # Create the new agent
+        create_response = requests.post(
+            'https://api.phantombuster.com/api/v2/agents/save',
+            headers={
+                'X-Phantombuster-Key': api_key,
+                'Content-Type': 'application/json'
+            },
+            json=new_agent,
+            timeout=30
+        )
+
+        if create_response.status_code == 200:
+            result = create_response.json()
+            return {'id': result.get('id'), 'name': new_name}
+        else:
+            return {'error': f"Failed to create: {create_response.status_code} - {create_response.text}"}
+
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def update_phantombuster_search_url(api_key: str, agent_id: str, search_url: str, num_profiles: int = 2500) -> dict:
+    """Update the phantom's saved search URL configuration.
+
+    This updates the phantom's saved argument so it uses the new search URL
+    when launched with saved settings.
+
+    Returns dict with 'success': True or 'error': message
+    """
+    try:
+        # First fetch current agent config to preserve other settings
+        fetch_response = requests.get(
+            'https://api.phantombuster.com/api/v2/agents/fetch',
+            params={'id': agent_id},
+            headers={'X-Phantombuster-Key': api_key},
+            timeout=30
+        )
+
+        if fetch_response.status_code != 200:
+            return {'error': f"Failed to fetch agent: {fetch_response.status_code}"}
+
+        agent_data = fetch_response.json()
+        current_argument = agent_data.get('argument', '{}')
+
+        # Parse current argument
+        try:
+            if isinstance(current_argument, str):
+                arg_dict = json.loads(current_argument)
+            else:
+                arg_dict = current_argument
+        except:
+            arg_dict = {}
+
+        # Update search URL and profile count
+        arg_dict['salesNavigatorSearchUrl'] = search_url
+        arg_dict['search'] = search_url
+        arg_dict['numberOfProfiles'] = num_profiles
+        arg_dict['numberOfResultsPerSearch'] = num_profiles
+
+        # Update the agent with new argument
+        update_response = requests.post(
+            'https://api.phantombuster.com/api/v2/agents/save',
+            headers={
+                'X-Phantombuster-Key': api_key,
+                'Content-Type': 'application/json'
+            },
+            json={
+                'id': agent_id,
+                'argument': json.dumps(arg_dict)
+            },
+            timeout=30
+        )
+
+        if update_response.status_code == 200:
+            return {'success': True}
+        else:
+            return {'error': f"Failed to update: {update_response.status_code} - {update_response.text}"}
+
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def delete_phantombuster_file(api_key: str, agent_id: str, filename: str) -> bool:
+    """Delete a file from PhantomBuster agent's storage.
+
+    Returns True if deleted successfully or file didn't exist.
+    """
+    try:
+        response = requests.delete(
+            'https://api.phantombuster.com/api/v2/store/delete',
+            params={'id': agent_id, 'name': filename},
+            headers={'X-Phantombuster-Key': api_key},
+            timeout=30
+        )
+        # 200 = deleted, 404 = didn't exist (both are fine)
+        return response.status_code in [200, 204, 404]
+    except Exception:
+        return False
+
+
+def clear_all_phantombuster_files(api_key: str, agent_id: str) -> int:
+    """Delete ALL files from PhantomBuster agent's storage for a completely fresh start.
+
+    Returns the number of files deleted.
+    """
+    deleted_count = 0
+    try:
+        # First, get the agent info to find storage folders
+        response = requests.get(
+            'https://api.phantombuster.com/api/v2/agents/fetch',
+            params={'id': agent_id},
+            headers={'X-Phantombuster-Key': api_key},
+            timeout=30
+        )
+
+        if response.status_code == 200:
+            agent_data = response.json()
+            s3_folder = agent_data.get('s3Folder', '')
+            org_s3_folder = agent_data.get('orgS3Folder', '')
+
+            if s3_folder and org_s3_folder:
+                # Try to list files from PhantomBuster storage
+                # Use the store/fetch-all endpoint if available, otherwise delete known patterns
+                files_response = requests.get(
+                    f'https://cache1.phantombooster.com/{org_s3_folder}/{s3_folder}/',
+                    timeout=30
+                )
+
+                # Try common file patterns
+                common_files = [
+                    'result.csv', 'result.json',
+                    'database-result.csv', 'database.csv',
+                    'database-linkedin-sales-navigator-search-export.csv',
+                    'database-Sales Navigator Search Export.csv',
+                    'database-sales-navigator-search-export.csv',
+                ]
+
+                for filename in common_files:
+                    if delete_phantombuster_file(api_key, agent_id, filename):
+                        deleted_count += 1
+
+    except Exception:
+        pass
+
+    return deleted_count
+
+
+def launch_phantombuster_agent(api_key: str, agent_id: str, argument: dict = None, clear_results: bool = False) -> dict:
+    """Launch a PhantomBuster agent with the given argument.
+
+    Returns dict with 'containerId' on success, or 'error' on failure.
+    Note: Passing any argument overrides the phantom's saved config including cookie!
+
+    Args:
+        clear_results: If True, delete existing result AND database files before launching for fresh results
+    """
+    try:
+        # Delete existing results AND database for a fresh start
+        if clear_results:
+            # Delete result files
+            delete_phantombuster_file(api_key, agent_id, 'result.csv')
+            delete_phantombuster_file(api_key, agent_id, 'result.json')
+            # Delete ALL possible database files - the phantom stores accumulated profiles here
+            database_files = [
+                'database-result.csv',
+                'database-linkedin-sales-navigator-search-export.csv',
+                'database-Sales Navigator Search Export.csv',
+                'database-sales-navigator-search-export.csv',
+                'database-sales navigator search export.csv',
+                'database_linkedin_sales_navigator_search_export.csv',
+                'database_result.csv',
+                'database.csv',
+            ]
+            for db_file in database_files:
+                delete_phantombuster_file(api_key, agent_id, db_file)
+
+        payload = {'id': agent_id}
+        if argument:
+            # Pass argument as JSON string to merge with saved config rather than replace
+            payload['argument'] = json.dumps(argument)
+
+        response = requests.post(
+            'https://api.phantombuster.com/api/v2/agents/launch',
+            headers={
+                'X-Phantombuster-Key': api_key,
+                'Content-Type': 'application/json'
+            },
+            json=payload,
+            timeout=30
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            return {'containerId': data.get('containerId')}
+        else:
+            return {'error': f"API error {response.status_code}: {response.text}"}
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def fetch_container_status(api_key: str, container_id: str) -> dict:
+    """Fetch the status of a PhantomBuster container.
+
+    Returns dict with 'status' (running, finished, error) and other details.
+    """
+    try:
+        response = requests.get(
+            'https://api.phantombuster.com/api/v2/containers/fetch',
+            params={'id': container_id},
+            headers={'X-Phantombuster-Key': api_key},
+            timeout=30
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            result = {
+                'status': data.get('status', 'unknown'),
+                'exitCode': data.get('exitCode'),
+                'exitMessage': data.get('exitMessage'),
+                'progress': data.get('progress'),
+                'executionTime': data.get('executionTime'),
+                'output': data.get('output', ''),
+            }
+
+            # Try to extract profile count from output (PhantomBuster logs progress)
+            output = data.get('output', '')
+            if output:
+                # Look for patterns like "Scraped 50 profiles" or "50 profiles saved"
+                import re
+                matches = re.findall(r'(\d+)\s*(?:profiles?|leads?|results?)', output.lower())
+                if matches:
+                    result['profiles_count'] = int(matches[-1])  # Get last match
+
+                # Look for progress percentage
+                pct_matches = re.findall(r'(\d+)%', output)
+                if pct_matches:
+                    result['progress_pct'] = int(pct_matches[-1])
+
+            return result
+        else:
+            return {'status': 'error', 'error': f"API error {response.status_code}"}
+    except Exception as e:
+        return {'status': 'error', 'error': str(e)}
+
+
+def normalize_phantombuster_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize PhantomBuster column names to match expected dashboard format."""
+    # Column mapping: PhantomBuster name -> dashboard expected name
+    # Order matters - first match wins for columns mapping to same target
+    column_map = {
+        'firstName': 'first_name',
+        'lastName': 'last_name',
+        'fullName': 'full_name',
+        'title': 'headline',
+        'headline': 'headline',
+        'companyName': 'current_company',
+        'company': 'current_company',
+        'currentCompanyName': 'current_company',
+        'location': 'location',
+        'linkedInProfileUrl': 'public_url',
+        'profileUrl': 'public_url',
+        'linkedinUrl': 'public_url',
+        'defaultProfileUrl': 'public_url',
+        'vmid': 'vmid',
+        'connectionDegree': 'connection_degree',
+        'mutualConnectionsCount': 'mutual_connections',
+        'premium': 'is_premium',
+        'openLink': 'is_open_link',
+        'jobTitle': 'current_title',
+        'currentJobTitle': 'current_title',
+        'summary': 'summary',
+        'query': 'search_query',
+        'timestamp': 'scraped_at',
+    }
+
+    # Rename columns - track which target names are already used to avoid duplicates
+    rename_dict = {}
+    used_targets = set(df.columns)  # Start with existing column names
+
+    for old_name, new_name in column_map.items():
+        if old_name in df.columns and new_name not in used_targets:
+            rename_dict[old_name] = new_name
+            used_targets.add(new_name)
+
+    df = df.rename(columns=rename_dict)
+
+    # Create first_name/last_name from fullName if needed
+    if 'full_name' in df.columns and 'first_name' not in df.columns:
+        df['first_name'] = df['full_name'].apply(lambda x: str(x).split()[0] if pd.notna(x) and str(x).strip() else '')
+        df['last_name'] = df['full_name'].apply(lambda x: ' '.join(str(x).split()[1:]) if pd.notna(x) and len(str(x).split()) > 1 else '')
+
+    # Use headline as current_title if current_title doesn't exist
+    if 'headline' in df.columns and 'current_title' not in df.columns:
+        df['current_title'] = df['headline']
+
+    return df
 
 
 def extract_urls_from_phantombuster(df: pd.DataFrame) -> list[str]:
@@ -597,49 +1247,209 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
     return df, stats, filtered_out
 
 
-def screen_profile(profile: dict, job_description: str, client: OpenAI) -> dict:
+# Screening system prompt based on the /screen skill
+SCREENING_SYSTEM_PROMPT = """You are an expert senior technical recruiter with 15+ years of experience hiring for top tech companies.
+
+## Scoring Rubric
+- **9-10**: Exceptional match. Meets all requirements with bonus qualifications. Rare.
+- **7-8**: Strong match. Meets all core requirements. Top 20% of candidates.
+- **5-6**: Partial match. Missing 1-2 requirements but has potential.
+- **3-4**: Weak match. Missing multiple requirements.
+- **1-2**: Not a fit. Don't waste time.
+
+## Score Boosters (+1 to +2 points)
+Give higher scores when candidate has:
+
+1. **Strong Company Background**: Currently or recently at well-known tech companies:
+   - Top Israeli startups: Wiz, Snyk, Monday, Gong, AppsFlyer, Fireblocks, Rapyd, etc.
+   - Award winners: RSA Innovation Sandbox, Y Combinator, top-tier VC backed
+   - Big tech: Google, Meta, Amazon, Microsoft (in engineering roles)
+   - Acquired startups at good valuations
+
+2. **Relevant Education**: CS/Software Engineering degree from strong universities:
+   - Israel: Technion, Tel Aviv University, Hebrew University, Ben-Gurion, Bar-Ilan, Weizmann
+   - Global: MIT, Stanford, CMU, Berkeley, etc.
+   - MSc/PhD in CS is a plus
+
+**Important**: If candidate is from a strong company with relevant education, skills/description matter less - the company already vetted them.
+
+## Auto-Disqualifiers (Score 3 or below)
+- **Only .NET/C#**: No Node, Python, or modern backend stack
+- **Group Manager/Director+**: Not hands-on (Team Lead is OK)
+- **Embedded/Systems engineer**: Wrong domain (C++, firmware, kernel)
+- **QA/Automation background**: Limited backend development depth
+- **Consulting/project companies**: Tikal, Matrix, Ness, Sela, etc.
+
+## Guidelines
+1. **Be Direct**: Don't sugarcoat. Give honest evaluations.
+2. **Use Evidence**: Reference specific profile data (years, skills, companies).
+3. **Be Calibrated**: A 10/10 should be rare. Most good candidates are 6-8.
+4. **Company > Skills**: Strong company pedigree compensates for skill list gaps."""
+
+
+def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_requirements: str = "") -> dict:
     """Screen a profile against a job description using OpenAI."""
 
-    profile_text = json.dumps(profile, indent=2, ensure_ascii=False)
+    # Build concise profile summary for the prompt (with safe string conversion)
+    def safe_str(value, max_len=500):
+        if value is None:
+            return 'N/A'
+        if isinstance(value, (list, dict)):
+            value = json.dumps(value, ensure_ascii=False)
+        return str(value)[:max_len] if value else 'N/A'
 
-    prompt = f"""You are a recruiter screening candidates. Evaluate this LinkedIn profile against the job description.
+    profile_summary = f"""Name: {safe_str(profile.get('first_name', ''))} {safe_str(profile.get('last_name', ''))}
+Title: {safe_str(profile.get('current_title', profile.get('headline', 'N/A')))}
+Company: {safe_str(profile.get('current_company', 'N/A'))}
+Location: {safe_str(profile.get('location', 'N/A'))}
+Education: {safe_str(profile.get('education', 'N/A'))}
+Skills: {safe_str(profile.get('skills', 'N/A'))}
+Summary: {safe_str(profile.get('summary', 'N/A'))}
+Past Positions: {safe_str(profile.get('past_positions', 'N/A'))}"""
 
-JOB DESCRIPTION:
+    user_prompt = f"""Evaluate this candidate against the job description.
+
+## Job Description:
 {job_description}
 
-CANDIDATE PROFILE:
-{profile_text}
+{f"## Extra Requirements:{chr(10)}{extra_requirements}" if extra_requirements else ""}
 
-Provide your assessment in this exact JSON format:
-{{
-    "score": <1-10 where 10 is perfect match>,
-    "fit": "<Strong Fit / Good Fit / Partial Fit / Not a Fit>",
-    "summary": "<2-3 sentence summary of the candidate>",
-    "strengths": ["<strength 1>", "<strength 2>"],
-    "gaps": ["<gap 1>", "<gap 2>"],
-    "recommendation": "<Brief recommendation>"
-}}
+## Candidate Profile:
+{profile_summary}
 
-Return ONLY the JSON, no other text."""
+Respond with ONLY valid JSON in this exact format:
+{{"score": <1-10>, "fit": "<Strong Fit|Good Fit|Partial Fit|Not a Fit>", "summary": "<2-3 sentences about the candidate>", "why": "<2-3 sentences explaining the score>", "strengths": ["<strength1>", "<strength2>"], "concerns": ["<concern1>", "<concern2>"]}}"""
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3
+            messages=[
+                {"role": "system", "content": SCREENING_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=500
         )
 
-        result = json.loads(response.choices[0].message.content)
+        content = response.choices[0].message.content.strip()
+        # Handle potential markdown code blocks
+        if content.startswith("```"):
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        content = content.strip()
+
+        result = json.loads(content)
         return result
+    except json.JSONDecodeError as e:
+        return {
+            "score": 0,
+            "fit": "Error",
+            "summary": f"JSON parse error",
+            "why": str(e)[:100],
+            "strengths": [],
+            "concerns": []
+        }
     except Exception as e:
         return {
             "score": 0,
             "fit": "Error",
-            "summary": f"Error screening: {str(e)}",
+            "summary": f"API error: {str(e)[:50]}",
+            "why": str(e)[:100],
             "strengths": [],
-            "gaps": [],
-            "recommendation": "Could not screen"
+            "concerns": []
         }
+
+
+def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
+                          extra_requirements: str = "", max_workers: int = 50,
+                          progress_placeholder=None) -> list:
+    """Screen multiple profiles in parallel using ThreadPoolExecutor.
+
+    Args:
+        profiles: List of profile dicts to screen
+        job_description: The job description to screen against
+        openai_api_key: OpenAI API key (we create client per thread for safety)
+        extra_requirements: Additional screening criteria
+        max_workers: Number of concurrent threads (default 50 for Tier 3)
+        progress_placeholder: Streamlit placeholder for progress updates
+
+    Returns:
+        List of screening results with profile info included
+    """
+    results = []
+    completed_count = [0]  # Use list to allow modification in nested function
+    lock = threading.Lock()
+    total = len(profiles)
+
+    def screen_single(profile, index):
+        # Create client per thread to avoid thread-safety issues
+        client = OpenAI(api_key=openai_api_key)
+        try:
+            result = screen_profile(profile, job_description, client, extra_requirements)
+            # Add profile info to result
+            name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
+            if not name:
+                name = profile.get('full_name', '') or profile.get('fullName', '') or f"Profile {index}"
+            result['name'] = name
+            result['current_title'] = profile.get('current_title', '') or profile.get('headline', '') or profile.get('title', '') or ''
+            result['current_company'] = profile.get('current_company', '') or profile.get('companyName', '') or profile.get('company', '') or ''
+            result['linkedin_url'] = profile.get('public_url', '') or profile.get('linkedInProfileUrl', '') or profile.get('profileUrl', '') or ''
+            result['index'] = index
+        except Exception as e:
+            import traceback
+            result = {
+                "score": 0,
+                "fit": "Error",
+                "summary": f"Screen error: {str(e)[:80]}",
+                "why": traceback.format_exc()[:200],
+                "strengths": [],
+                "concerns": [],
+                "name": profile.get('first_name', '') or profile.get('fullName', '') or f"Profile {index}",
+                "current_title": "",
+                "current_company": "",
+                "linkedin_url": "",
+                "index": index
+            }
+
+        with lock:
+            completed_count[0] += 1
+
+        return result
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_index = {
+            executor.submit(screen_single, profile, i): i
+            for i, profile in enumerate(profiles)
+        }
+
+        # Collect results as they complete
+        for future in as_completed(future_to_index):
+            try:
+                result = future.result()
+                results.append(result)
+            except Exception as e:
+                import traceback
+                idx = future_to_index[future]
+                error_msg = str(e) if str(e) else "Unknown error"
+                results.append({
+                    "score": 0,
+                    "fit": "Error",
+                    "summary": f"Thread error: {error_msg[:80]}",
+                    "why": traceback.format_exc()[:200],
+                    "strengths": [],
+                    "concerns": [],
+                    "name": f"Profile {idx}",
+                    "current_title": "",
+                    "current_company": "",
+                    "linkedin_url": "",
+                    "index": idx
+                })
+
+    # Sort by original index to maintain order
+    results.sort(key=lambda x: x.get('index', 0))
+    return results
 
 
 # Main UI
@@ -654,10 +1464,287 @@ if 'results' in st.session_state and st.session_state['results']:
     st.info(f"📊 **{len(st.session_state['results'])}** profiles loaded")
 
 # Create tabs
-tab_upload, tab_filter, tab_results, tab_screening = st.tabs(["📤 Upload", "🔍 Filter", "📋 Results", "🤖 AI Screening"])
+tab_upload, tab_filter, tab_results, tab_screening = st.tabs([
+    "📤 Upload", "🔍 Filter", "📋 Results", "🤖 AI Screening"
+])
 
 # ========== TAB 1: Upload ==========
 with tab_upload:
+    pb_key = load_phantombuster_key()
+    has_pb_key = pb_key and pb_key != "YOUR_PHANTOMBUSTER_API_KEY_HERE"
+
+    if has_pb_key:
+        # Fetch all agents once
+        agents = fetch_phantombuster_agents(pb_key)
+
+        # ===== SECTION 1: Load from PhantomBuster =====
+        st.markdown("### Load from PhantomBuster")
+
+        if agents:
+            agent_names = [a['name'] for a in agents]
+
+            selected_agent_name = st.selectbox(
+                "Select Phantom",
+                options=agent_names,
+                key="pb_agent_select"
+            )
+
+            selected_agent = next((a for a in agents if a['name'] == selected_agent_name), None)
+
+            if selected_agent:
+                if st.button("Load Results", type="primary", key="pb_load_btn", use_container_width=True):
+                    with st.spinner("Loading results..."):
+                        pb_df = fetch_phantombuster_result_csv(pb_key, selected_agent['id'], debug=False)
+                        if not pb_df.empty:
+                            pb_df = normalize_phantombuster_columns(pb_df)
+                            st.session_state['results'] = pb_df.to_dict('records')
+                            st.session_state['results_df'] = pb_df
+                            st.success(f"Loaded **{len(pb_df)}** profiles!")
+                            st.rerun()
+                        else:
+                            st.error("No results found.")
+                            st.info("Use **Launch Search** below to run a new search.")
+        else:
+            st.warning("No phantoms found in your PhantomBuster account")
+
+        st.divider()
+
+        # ===== SECTION 2: Launch Search =====
+        st.markdown("### Launch Search")
+        st.caption("Launch your personal phantom with a Sales Navigator search URL")
+
+        # Initialize session state
+        if 'pb_launch_status' not in st.session_state:
+            st.session_state['pb_launch_status'] = 'idle'
+        if 'pb_launch_agent_id' not in st.session_state:
+            st.session_state['pb_launch_agent_id'] = None
+        if 'pb_launch_container_id' not in st.session_state:
+            st.session_state['pb_launch_container_id'] = None
+        if 'pb_launch_error' not in st.session_state:
+            st.session_state['pb_launch_error'] = None
+        if 'pb_launch_start_time' not in st.session_state:
+            st.session_state['pb_launch_start_time'] = None
+
+        # User name input
+        user_name = st.text_input(
+            "Your name",
+            value=st.session_state.get('pb_user_name', ''),
+            placeholder="e.g., John",
+            key="pb_user_name_input"
+        )
+
+        if user_name:
+            st.session_state['pb_user_name'] = user_name
+
+        # Sales Navigator URL input
+        search_url = st.text_input(
+            "Sales Navigator Search URL",
+            placeholder="https://www.linkedin.com/sales/search/people?...",
+            key="pb_search_url"
+        )
+
+        # Find user's phantom
+        user_phantom = None
+        if user_name and agents:
+            user_name_lower = user_name.lower()
+            for agent in agents:
+                if user_name_lower in agent.get('name', '').lower():
+                    user_phantom = agent
+                    break
+
+            if user_phantom:
+                st.success(f"Found your phantom: **{user_phantom['name']}**")
+            else:
+                st.warning(f"No phantom found with '{user_name}' in the name")
+
+        # Launch status and buttons
+        current_status = st.session_state['pb_launch_status']
+
+        if current_status == 'running':
+            # Auto-fetch latest status
+            container_id = st.session_state['pb_launch_container_id']
+            if container_id:
+                status_result = fetch_container_status(pb_key, container_id)
+                container_status = status_result.get('status', 'unknown')
+
+                # Store progress info
+                st.session_state['pb_progress_info'] = {
+                    'profiles_count': status_result.get('profiles_count', 0),
+                    'progress_pct': status_result.get('progress_pct', 0),
+                    'progress': status_result.get('progress'),
+                }
+
+                # Check if finished or error
+                if container_status == 'finished':
+                    st.session_state['pb_launch_status'] = 'finished'
+                    # Desktop notification
+                    try:
+                        profiles = status_result.get('profiles_count', 0)
+                        msg = f"Extracted {profiles} profiles" if profiles else "Ready to load results"
+                        notification.notify(
+                            title="PhantomBuster Finished",
+                            message=msg,
+                            app_name="LinkedIn Enricher",
+                            timeout=10
+                        )
+                        # Windows sound
+                        try:
+                            winsound.MessageBeep(winsound.MB_OK)
+                        except:
+                            pass
+                    except:
+                        pass
+                    st.rerun()
+                elif container_status == 'error':
+                    st.session_state['pb_launch_status'] = 'error'
+                    st.session_state['pb_launch_error'] = status_result.get('exitMessage', 'Phantom failed')
+                    # Desktop notification for error
+                    try:
+                        notification.notify(
+                            title="PhantomBuster Error",
+                            message=status_result.get('exitMessage', 'Phantom failed'),
+                            app_name="LinkedIn Enricher",
+                            timeout=10
+                        )
+                        try:
+                            winsound.MessageBeep(winsound.MB_ICONHAND)
+                        except:
+                            pass
+                    except:
+                        pass
+                    st.rerun()
+
+            # Show running status with progress
+            elapsed = ""
+            if st.session_state['pb_launch_start_time']:
+                elapsed_seconds = int(time.time() - st.session_state['pb_launch_start_time'])
+                elapsed_min = elapsed_seconds // 60
+                elapsed_sec = elapsed_seconds % 60
+                elapsed = f"{elapsed_min}m {elapsed_sec}s"
+
+            # Display progress info
+            progress_info = st.session_state.get('pb_progress_info', {})
+            profiles_count = progress_info.get('profiles_count', 0)
+            progress_pct = progress_info.get('progress_pct', 0)
+
+            # Progress display
+            st.info(f"**Running** - {elapsed} (auto-refreshing every 10s)")
+            if profiles_count > 0 or progress_pct > 0:
+                col_prog1, col_prog2 = st.columns(2)
+                with col_prog1:
+                    if profiles_count > 0:
+                        st.metric("Profiles extracted", profiles_count)
+                with col_prog2:
+                    if progress_pct > 0:
+                        st.metric("Progress", f"{progress_pct}%")
+
+            # Show progress bar if we have percentage
+            if progress_pct > 0:
+                st.progress(progress_pct / 100)
+
+            # Cancel button
+            if st.button("Cancel", key="pb_cancel_btn"):
+                st.session_state['pb_launch_status'] = 'idle'
+                st.session_state['pb_launch_container_id'] = None
+                st.session_state['pb_launch_start_time'] = None
+                st.session_state['pb_progress_info'] = {}
+                st.rerun()
+
+            # Auto-refresh every 10 seconds
+            time.sleep(10)
+            st.rerun()
+
+        elif current_status == 'finished':
+            progress_info = st.session_state.get('pb_progress_info', {})
+            profiles_count = progress_info.get('profiles_count', 0)
+            if profiles_count > 0:
+                st.success(f"Phantom finished! Extracted **{profiles_count}** profiles")
+            else:
+                st.success("Phantom finished!")
+
+            if st.button("Load Results", type="primary", key="pb_load_results_btn"):
+                agent_id = st.session_state['pb_launch_agent_id']
+                with st.spinner("Loading results..."):
+                    pb_df = fetch_phantombuster_result_csv(pb_key, agent_id)
+                    if not pb_df.empty:
+                        pb_df = normalize_phantombuster_columns(pb_df)
+                        st.session_state['results'] = pb_df.to_dict('records')
+                        st.session_state['results_df'] = pb_df
+                        st.session_state['pb_launch_status'] = 'idle'
+                        st.session_state['pb_launch_container_id'] = None
+                        st.session_state['pb_launch_start_time'] = None
+                        st.session_state['pb_progress_info'] = {}
+                        st.success(f"Loaded **{len(pb_df)}** profiles!")
+                        st.rerun()
+                    else:
+                        st.error("Could not load results.")
+
+        elif current_status == 'error':
+            st.error(f"Error: {st.session_state['pb_launch_error']}")
+            if st.button("Reset", key="pb_reset_btn"):
+                st.session_state['pb_launch_status'] = 'idle'
+                st.session_state['pb_launch_error'] = None
+                st.session_state['pb_progress_info'] = {}
+                st.rerun()
+
+        else:  # idle
+            can_launch = user_phantom and search_url
+            if st.button("Launch", type="primary", key="pb_launch_btn", disabled=not can_launch):
+                st.session_state['pb_launch_status'] = 'launching'
+                st.session_state['pb_launch_agent_id'] = user_phantom['id']
+                st.session_state['pb_launch_error'] = None
+
+                # Update phantom with new search URL and launch
+                update_result = update_phantombuster_search_url(pb_key, user_phantom['id'], search_url, 2500)
+                if update_result.get('success'):
+                    result = launch_phantombuster_agent(pb_key, user_phantom['id'], None, clear_results=True)
+
+                    if 'containerId' in result:
+                        st.session_state['pb_launch_container_id'] = result['containerId']
+                        st.session_state['pb_launch_status'] = 'running'
+                        st.session_state['pb_launch_start_time'] = time.time()
+                    else:
+                        st.session_state['pb_launch_status'] = 'error'
+                        st.session_state['pb_launch_error'] = result.get('error', 'Unknown error')
+                else:
+                    st.session_state['pb_launch_status'] = 'error'
+                    st.session_state['pb_launch_error'] = update_result.get('error', 'Failed to update search URL')
+
+                st.rerun()
+
+            if not user_name:
+                st.info("Enter your name to find your phantom")
+            elif not user_phantom:
+                st.info("No phantom found - ask admin to create one for you")
+            elif not search_url:
+                st.info("Paste a Sales Navigator search URL to launch")
+
+        # ===== Advanced Settings =====
+        with st.expander("Advanced Settings"):
+            st.markdown("**Upload CSV manually**")
+            st.caption("Download CSV from PhantomBuster dashboard and upload here")
+            pb_upload = st.file_uploader(
+                "Upload PhantomBuster CSV",
+                type=['csv'],
+                key="pb_manual_upload"
+            )
+
+            if pb_upload:
+                try:
+                    pb_df = pd.read_csv(pb_upload)
+                    if not pb_df.empty:
+                        pb_df = normalize_phantombuster_columns(pb_df)
+                        st.session_state['results'] = pb_df.to_dict('records')
+                        st.session_state['results_df'] = pb_df
+                        st.success(f"Loaded **{len(pb_df)}** profiles!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Error reading CSV: {e}")
+
+        st.divider()
+
+    # ===== File Upload Section =====
+    st.markdown("### Upload File")
     pre_enriched_file = st.file_uploader(
         "Upload pre-enriched CSV or JSON",
         type=['csv', 'json'],
@@ -681,8 +1768,12 @@ with tab_upload:
         except Exception as e:
             st.error(f"Error: {e}")
 
+    # ===== Data Preview =====
     if 'results' in st.session_state and st.session_state['results']:
+        st.divider()
+        st.markdown("### Loaded Data Preview")
         df = st.session_state['results_df']
+        st.success(f"**{len(df)}** profiles loaded")
         display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'education', 'location']
         available_cols = [c for c in display_cols if c in df.columns]
         st.dataframe(df[available_cols].head(50) if available_cols else df.head(50), use_container_width=True, hide_index=True)
@@ -1219,39 +2310,204 @@ with tab_screening:
     openai_key = load_openai_key()
     if not openai_key:
         st.warning("OpenAI API key not configured. Add 'openai_api_key' to config.json")
-    elif 'passed_candidates_df' not in st.session_state:
-        st.info("Apply filters in the Filter tab first, then come back here to screen candidates.")
+    elif 'results_df' not in st.session_state or st.session_state['results_df'].empty:
+        st.info("Load profiles first (Upload tab or PhantomBuster tab), then come back here to screen.")
     else:
-        results = st.session_state['passed_candidates_df'].to_dict('records')
-        st.success(f"Ready to screen **{len(results)}** candidates")
+        # Use passed_candidates_df if available (filtered), otherwise use results_df (all)
+        if 'passed_candidates_df' in st.session_state and not st.session_state['passed_candidates_df'].empty:
+            profiles_df = st.session_state['passed_candidates_df']
+            st.success(f"**{len(profiles_df)}** filtered candidates ready for screening")
+        else:
+            profiles_df = st.session_state['results_df']
+            st.info(f"**{len(profiles_df)}** profiles loaded (no filters applied)")
 
-        job_description = st.text_area("Paste Job Description", height=150, key="jd_screening")
+        profiles = profiles_df.to_dict('records')
 
+        # Job Description Input
+        st.markdown("### Job Description")
+        job_description = st.text_area(
+            "Paste the job description",
+            height=150,
+            key="jd_screening",
+            placeholder="Paste the full job description here..."
+        )
+
+        # Extra Requirements (optional)
+        extra_requirements = ""  # Default value
+        with st.expander("Extra Requirements (optional)"):
+            extra_requirements = st.text_area(
+                "Additional must-have criteria",
+                height=100,
+                key="extra_requirements",
+                placeholder="e.g., Must have AWS experience, Hebrew speaker preferred, etc."
+            )
+
+        # Screening Configuration
+        st.markdown("### Screening Configuration")
+
+        screen_count = st.number_input(
+            "Number of profiles to screen",
+            min_value=1,
+            max_value=len(profiles),
+            value=min(100, len(profiles)),
+            step=10,
+            key="screen_count"
+        )
+
+        # Fixed concurrent workers (optimal for Tier 3)
+        max_workers = 50
+
+        # Cost estimate
+        est_cost = (screen_count * 2500 * 0.15 / 1_000_000) + (screen_count * 400 * 0.60 / 1_000_000)
+        est_time = (screen_count / max_workers) * 2  # ~2 seconds per batch
+        st.caption(f"Estimated: ~${est_cost:.2f} cost, ~{est_time:.0f} seconds")
+
+        # Debug: Show available fields and test single profile
+        with st.expander("Debug: Profile Fields & Test"):
+            if profiles:
+                st.write("Available fields in profiles:", list(profiles[0].keys()))
+                st.write("Sample profile:", {k: str(v)[:100] for k, v in profiles[0].items()})
+
+                if job_description and st.button("Test Single Profile", key="test_single"):
+                    try:
+                        client = OpenAI(api_key=openai_key)
+                        st.write("Testing with first profile...")
+                        result = screen_profile(profiles[0], job_description, client, extra_requirements)
+                        st.write("Result:", result)
+                    except Exception as e:
+                        import traceback
+                        st.error(f"Error: {e}")
+                        st.code(traceback.format_exc())
+
+        # Screen Button
         if job_description:
-            screen_count = st.number_input("Number to screen", 1, len(results), min(5, len(results)), key="screen_count")
+            if st.button("Start Screening", type="primary", key="start_screening", disabled='screening_in_progress' in st.session_state and st.session_state['screening_in_progress']):
+                st.session_state['screening_in_progress'] = True
 
-            if st.button("Screen Candidates", type="primary", key="start_screening"):
-                client = OpenAI(api_key=openai_key)
-                screening_results = []
-                progress = st.progress(0)
+                profiles_to_screen = profiles[:screen_count]
 
-                for i, profile in enumerate(results[:screen_count]):
-                    screening = screen_profile(profile, job_description, client)
-                    name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip() or f"Profile {i+1}"
-                    screening_results.append({'name': name, 'linkedin_url': profile.get('public_url', ''), **screening})
-                    progress.progress((i + 1) / screen_count)
+                # Progress tracking
+                status_text = st.empty()
+                status_text.info(f"Screening {len(profiles_to_screen)} profiles... This may take a minute.")
+                start_time = time.time()
+
+                # Run batch screening (pass API key, not client)
+                screening_results = screen_profiles_batch(
+                    profiles_to_screen,
+                    job_description,
+                    openai_key,
+                    extra_requirements=extra_requirements if extra_requirements else "",
+                    max_workers=max_workers
+                )
+
+                # Complete
+                elapsed = time.time() - start_time
+                status_text.success(f"Completed {len(screening_results)} profiles in {elapsed:.1f}s")
 
                 st.session_state['screening_results'] = screening_results
+                st.session_state['screening_in_progress'] = False
+
+                # Send notification
+                send_notification("Screening Complete", f"Screened {len(screening_results)} profiles")
                 st.rerun()
+        else:
+            st.warning("Please paste a job description to start screening")
 
         # Show screening results
-        if 'screening_results' in st.session_state:
+        if 'screening_results' in st.session_state and st.session_state['screening_results']:
             st.divider()
-            st.subheader("Screening Results")
-            sr = sorted(st.session_state['screening_results'], key=lambda x: x.get('score', 0), reverse=True)
-            df_sr = pd.DataFrame([{'Name': r['name'], 'Score': f"{r.get('score',0)}/10", 'Fit': r.get('fit',''), 'Summary': r.get('summary','')[:80]} for r in sr])
-            st.dataframe(df_sr, use_container_width=True)
-            st.download_button("Download Results", pd.DataFrame(sr).to_csv(index=False), "screening_results.csv", "text/csv")
+            st.markdown("### Screening Results")
+
+            screening_results = st.session_state['screening_results']
+
+            # Summary stats
+            stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+            strong_fit = sum(1 for r in screening_results if r.get('fit') == 'Strong Fit')
+            good_fit = sum(1 for r in screening_results if r.get('fit') == 'Good Fit')
+            partial_fit = sum(1 for r in screening_results if r.get('fit') == 'Partial Fit')
+            not_fit = sum(1 for r in screening_results if r.get('fit') == 'Not a Fit')
+
+            stats_col1.metric("Strong Fit", strong_fit, delta=None)
+            stats_col2.metric("Good Fit", good_fit, delta=None)
+            stats_col3.metric("Partial Fit", partial_fit, delta=None)
+            stats_col4.metric("Not a Fit", not_fit, delta=None)
+
+            # Filter by fit level
+            fit_filter = st.multiselect(
+                "Filter by fit level",
+                options=["Strong Fit", "Good Fit", "Partial Fit", "Not a Fit", "Error"],
+                default=["Strong Fit", "Good Fit"],
+                key="fit_filter"
+            )
+
+            # Filter and sort results
+            filtered_results = [r for r in screening_results if r.get('fit') in fit_filter]
+            sorted_results = sorted(filtered_results, key=lambda x: x.get('score', 0), reverse=True)
+
+            st.info(f"Showing **{len(sorted_results)}** of {len(screening_results)} screened profiles")
+
+            # Create display dataframe
+            display_data = []
+            for r in sorted_results:
+                display_data.append({
+                    'Score': r.get('score', 0),
+                    'Fit': r.get('fit', ''),
+                    'Name': r.get('name', ''),
+                    'Title': r.get('current_title', '')[:40],
+                    'Company': r.get('current_company', '')[:30],
+                    'Summary': r.get('summary', '')[:100],
+                    'LinkedIn': r.get('linkedin_url', '')
+                })
+
+            df_display = pd.DataFrame(display_data)
+
+            # Display table
+            st.dataframe(
+                df_display,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Score": st.column_config.NumberColumn("Score", format="%d/10", width="small"),
+                    "Fit": st.column_config.TextColumn("Fit", width="medium"),
+                    "Name": st.column_config.TextColumn("Name", width="medium"),
+                    "Title": st.column_config.TextColumn("Title", width="medium"),
+                    "Company": st.column_config.TextColumn("Company", width="medium"),
+                    "Summary": st.column_config.TextColumn("Summary", width="large"),
+                    "LinkedIn": st.column_config.LinkColumn("LinkedIn", width="small")
+                }
+            )
+
+            # Export options
+            st.markdown("### Export Results")
+            export_col1, export_col2, export_col3 = st.columns(3)
+
+            with export_col1:
+                # Full results CSV
+                full_df = pd.DataFrame(sorted_results)
+                st.download_button(
+                    "Download All Results (CSV)",
+                    full_df.to_csv(index=False),
+                    "screening_results_all.csv",
+                    "text/csv"
+                )
+
+            with export_col2:
+                # Strong + Good fit only
+                top_candidates = [r for r in screening_results if r.get('fit') in ['Strong Fit', 'Good Fit']]
+                top_df = pd.DataFrame(top_candidates)
+                st.download_button(
+                    f"Download Top Candidates ({len(top_candidates)})",
+                    top_df.to_csv(index=False) if not top_df.empty else "",
+                    "screening_results_top.csv",
+                    "text/csv",
+                    disabled=len(top_candidates) == 0
+                )
+
+            with export_col3:
+                # Clear results
+                if st.button("Clear Results", key="clear_screening"):
+                    del st.session_state['screening_results']
+                    st.rerun()
 
 # ========== Enrich new profiles (optional) ==========
 with st.expander("Enrich New Profiles (requires Crust Data API key)", expanded=False):
@@ -1320,11 +2576,13 @@ with st.expander("Enrich New Profiles (requires Crust Data API key)", expanded=F
                             pb_df = fetch_phantombuster_result_csv(pb_key, agent_id)
 
                             if not pb_df.empty:
+                                # Normalize column names
+                                pb_df = normalize_phantombuster_columns(pb_df)
                                 st.success(f"Fetched **{len(pb_df)}** profiles from PhantomBuster")
                                 st.session_state['pb_results'] = pb_df
 
                                 # Show preview
-                                preview_cols = ['fullName', 'title', 'companyName', 'location']
+                                preview_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location']
                                 available = [c for c in preview_cols if c in pb_df.columns]
                                 if available:
                                     st.dataframe(pb_df[available].head(10), use_container_width=True, hide_index=True)

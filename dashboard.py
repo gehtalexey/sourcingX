@@ -142,7 +142,14 @@ def fetch_phantombuster_result_csv(api_key: str, agent_id: str, debug: bool = Fa
 
         # Method 0: Try direct PhantomBuster cache URL (most reliable for files)
         if s3_folder and org_s3_folder:
-            for fname in ['result.csv', 'result.json']:
+            # If specific filename provided, try it first
+            files_to_try = []
+            if filename:
+                files_to_try = [f'{filename}.csv', f'{filename}.json']
+            else:
+                files_to_try = ['result.csv', 'result.json']
+
+            for fname in files_to_try:
                 try:
                     cache_url = f'https://cache1.phantombooster.com/{org_s3_folder}/{s3_folder}/{fname}'
                     if debug:
@@ -153,13 +160,13 @@ def fetch_phantombuster_result_csv(api_key: str, agent_id: str, debug: bool = Fa
                             df = pd.read_csv(StringIO(cache_response.text))
                             if not df.empty:
                                 if debug:
-                                    st.success(f"Loaded from cache URL!")
+                                    st.success(f"Loaded from cache URL: {fname}")
                                 return df
                         elif fname.endswith('.json'):
                             profiles = cache_response.json()
                             if isinstance(profiles, list) and profiles:
                                 if debug:
-                                    st.success(f"Loaded from cache URL!")
+                                    st.success(f"Loaded from cache URL: {fname}")
                                 return pd.DataFrame(profiles)
                 except Exception as e:
                     if debug:
@@ -220,44 +227,45 @@ def fetch_phantombuster_result_csv(api_key: str, agent_id: str, debug: bool = Fa
 
         # Try common file patterns - Sales Navigator Export uses these
         possible_files = []
+
+        # If specific filename provided, ONLY try that file (strict mode)
         if filename:
-            possible_files.append(f'{filename}.csv')
-            possible_files.append(f'{filename}.json')
+            possible_files = [f'{filename}.csv', f'{filename}.json']
+        else:
+            # Add agent name-based files (Sales Navigator Export pattern)
+            if agent_name and agent_name != 'Unknown':
+                possible_files.append(f'{agent_name}.csv')
+                possible_files.append(f'{agent_name}.json')
 
-        # Add agent name-based files (Sales Navigator Export pattern)
-        if agent_name and agent_name != 'Unknown':
-            possible_files.append(f'{agent_name}.csv')
-            possible_files.append(f'{agent_name}.json')
+            # Common PhantomBuster output files - Sales Navigator Export uses database files
+            # Try many variations of database filename patterns
+            possible_files.extend([
+                'result.csv',
+                'result.json',
+                'database-result.csv',
+                'database-linkedin-sales-navigator-search-export.csv',
+                'database-Sales Navigator Search Export.csv',
+                'Sales Navigator Search Export.csv',
+                'database-sales-navigator-search-export.csv',
+                'LinkedIn Sales Navigator Search Export result.csv',
+                'Sales Navigator Search Export result.csv',
+                # Lowercase variations
+                'database-sales navigator search export.csv',
+                'sales navigator search export.csv',
+                # With underscores
+                'database_linkedin_sales_navigator_search_export.csv',
+                'database_result.csv',
+                # Output variations
+                'output.csv',
+                'output.json',
+                'profiles.csv',
+                'leads.csv',
+            ])
 
-        # Common PhantomBuster output files - Sales Navigator Export uses database files
-        # Try many variations of database filename patterns
-        possible_files.extend([
-            'result.csv',
-            'result.json',
-            'database-result.csv',
-            'database-linkedin-sales-navigator-search-export.csv',
-            'database-Sales Navigator Search Export.csv',
-            'Sales Navigator Search Export.csv',
-            'database-sales-navigator-search-export.csv',
-            'LinkedIn Sales Navigator Search Export result.csv',
-            'Sales Navigator Search Export result.csv',
-            # Lowercase variations
-            'database-sales navigator search export.csv',
-            'sales navigator search export.csv',
-            # With underscores
-            'database_linkedin_sales_navigator_search_export.csv',
-            'database_result.csv',
-            # Output variations
-            'output.csv',
-            'output.json',
-            'profiles.csv',
-            'leads.csv',
-        ])
-
-        # Also try with s3Folder prefix patterns
-        if s3_folder:
-            possible_files.insert(0, f'database-linkedin-sales-navigator-search-export.csv')
-            possible_files.insert(0, f'result.csv')
+            # Also try with s3Folder prefix patterns
+            if s3_folder:
+                possible_files.insert(0, f'database-linkedin-sales-navigator-search-export.csv')
+                possible_files.insert(0, f'result.csv')
 
         # Try to list all files in agent storage using store API
         try:
@@ -537,14 +545,23 @@ def duplicate_phantom_for_user(api_key: str, template_agent_id: str, user_email:
         return {'error': str(e)}
 
 
-def update_phantombuster_search_url(api_key: str, agent_id: str, search_url: str, num_profiles: int = 2500) -> dict:
+def update_phantombuster_search_url(api_key: str, agent_id: str, search_url: str, num_profiles: int = 2500, csv_name: str = None) -> dict:
     """Update the phantom's saved search URL configuration.
 
     This updates the phantom's saved argument so it uses the new search URL
     when launched with saved settings.
 
-    Returns dict with 'success': True or 'error': message
+    Args:
+        api_key: PhantomBuster API key
+        agent_id: Agent ID
+        search_url: Sales Navigator search URL
+        num_profiles: Number of profiles to scrape
+        csv_name: Custom output filename (without .csv extension). If None, uses timestamp.
+
+    Returns dict with 'success': True, 'csvName': filename or 'error': message
     """
+    from datetime import datetime
+
     try:
         # First fetch current agent config to preserve other settings
         fetch_response = requests.get(
@@ -569,11 +586,17 @@ def update_phantombuster_search_url(api_key: str, agent_id: str, search_url: str
         except:
             arg_dict = {}
 
-        # Update search URL and profile count
+        # Generate timestamped filename if not provided
+        if csv_name is None:
+            timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
+            csv_name = f'search_{timestamp}'
+
+        # Update search URL, profile count, and output filename
         arg_dict['salesNavigatorSearchUrl'] = search_url
         arg_dict['search'] = search_url
         arg_dict['numberOfProfiles'] = num_profiles
         arg_dict['numberOfResultsPerSearch'] = num_profiles
+        arg_dict['csvName'] = csv_name  # PhantomBuster uses this for output file naming
 
         # Update the agent with new argument
         update_response = requests.post(
@@ -590,12 +613,104 @@ def update_phantombuster_search_url(api_key: str, agent_id: str, search_url: str
         )
 
         if update_response.status_code == 200:
-            return {'success': True}
+            return {'success': True, 'csvName': csv_name}
         else:
             return {'error': f"Failed to update: {update_response.status_code} - {update_response.text}"}
 
     except Exception as e:
         return {'error': str(e)}
+
+
+def list_phantombuster_files(api_key: str, agent_id: str) -> list[dict]:
+    """List all files in a PhantomBuster agent's storage.
+
+    Returns list of dicts with 'name', 'size', 'lastModified' for each file.
+    """
+    try:
+        # First get agent info to get S3 folder
+        agent_response = requests.get(
+            'https://api.phantombuster.com/api/v2/agents/fetch',
+            params={'id': agent_id},
+            headers={'X-Phantombuster-Key': api_key},
+            timeout=30
+        )
+
+        if agent_response.status_code != 200:
+            return []
+
+        agent_data = agent_response.json()
+        s3_folder = agent_data.get('s3Folder')
+        org_s3_folder = agent_data.get('orgS3Folder')
+
+        files = []
+
+        # Try to list files from agent's fileMgmt if available
+        file_mgmt = agent_data.get('fileMgmt', {})
+        if file_mgmt:
+            for filename, info in file_mgmt.items():
+                files.append({
+                    'name': filename,
+                    'size': info.get('size', 0),
+                    'lastModified': info.get('lastModified', ''),
+                })
+
+        # Also try common file patterns via store API
+        common_files = [
+            'result.csv', 'result.json',
+            'database-linkedin-sales-navigator-search-export.csv',
+            'database-sales-navigator-search-export.csv',
+        ]
+
+        # Add timestamped patterns (recent dates)
+        from datetime import datetime, timedelta
+        for i in range(30):  # Check last 30 days
+            date = datetime.now() - timedelta(days=i)
+            date_str = date.strftime('%Y-%m-%d')
+            common_files.append(f'result_{date_str}.csv')
+            common_files.append(f'search_{date_str}.csv')
+
+        for fname in common_files:
+            try:
+                check_response = requests.head(
+                    'https://api.phantombuster.com/api/v2/store/fetch',
+                    params={'id': agent_id, 'name': fname},
+                    headers={'X-Phantombuster-Key': api_key},
+                    timeout=5
+                )
+                if check_response.status_code == 200:
+                    # File exists, add if not already in list
+                    if not any(f['name'] == fname for f in files):
+                        files.append({
+                            'name': fname,
+                            'size': int(check_response.headers.get('content-length', 0)),
+                            'lastModified': check_response.headers.get('last-modified', ''),
+                        })
+            except:
+                pass
+
+        # Try cache URL listing if we have S3 info
+        if s3_folder and org_s3_folder:
+            try:
+                cache_base = f'https://cache1.phantombooster.com/{org_s3_folder}/{s3_folder}/'
+                # Check for result files
+                for fname in ['result.csv', 'result.json']:
+                    try:
+                        check = requests.head(cache_base + fname, timeout=5)
+                        if check.status_code == 200:
+                            if not any(f['name'] == fname for f in files):
+                                files.append({
+                                    'name': fname,
+                                    'size': int(check.headers.get('content-length', 0)),
+                                    'lastModified': check.headers.get('last-modified', ''),
+                                })
+                    except:
+                        pass
+            except:
+                pass
+
+        return files
+    except Exception as e:
+        return []
 
 
 def delete_phantombuster_file(api_key: str, agent_id: str, filename: str) -> bool:
@@ -1492,14 +1607,68 @@ with tab_upload:
             selected_agent = next((a for a in agents if a['name'] == selected_agent_name), None)
 
             if selected_agent:
+                # File selection options
+                col_load_mode, col_refresh = st.columns([3, 1])
+
+                with col_load_mode:
+                    load_mode = st.radio(
+                        "Load mode",
+                        options=["Latest results", "Select specific file"],
+                        horizontal=True,
+                        key="pb_load_mode",
+                        help="Choose to load all accumulated results or a specific search file"
+                    )
+
+                # List files if specific file mode selected
+                available_files = []
+                selected_file = None
+
+                if load_mode == "Select specific file":
+                    with col_refresh:
+                        if st.button("🔄", key="pb_refresh_files", help="Refresh file list"):
+                            st.session_state['pb_files_cache'] = None
+
+                    # Cache files list to avoid repeated API calls
+                    cache_key = f"pb_files_{selected_agent['id']}"
+                    if cache_key not in st.session_state or st.session_state.get('pb_files_cache') is None:
+                        with st.spinner("Loading files..."):
+                            available_files = list_phantombuster_files(pb_key, selected_agent['id'])
+                            st.session_state[cache_key] = available_files
+                            st.session_state['pb_files_cache'] = True
+                    else:
+                        available_files = st.session_state.get(cache_key, [])
+
+                    if available_files:
+                        # Sort by name (most recent first for timestamped files)
+                        available_files.sort(key=lambda x: x['name'], reverse=True)
+                        file_names = [f['name'] for f in available_files]
+
+                        selected_file = st.selectbox(
+                            "Select file",
+                            options=file_names,
+                            key="pb_file_select",
+                            help="Select a specific result file to load"
+                        )
+
+                        # Show file info
+                        file_info = next((f for f in available_files if f['name'] == selected_file), None)
+                        if file_info and file_info.get('size'):
+                            size_kb = file_info['size'] / 1024
+                            st.caption(f"Size: {size_kb:.1f} KB")
+                    else:
+                        st.info("No result files found. Run a search first.")
+
                 if st.button("Load Results", type="primary", key="pb_load_btn", use_container_width=True):
                     with st.spinner("Loading results..."):
-                        pb_df = fetch_phantombuster_result_csv(pb_key, selected_agent['id'], debug=False)
+                        # Pass specific filename if selected
+                        filename = selected_file.replace('.csv', '').replace('.json', '') if selected_file else None
+                        pb_df = fetch_phantombuster_result_csv(pb_key, selected_agent['id'], debug=False, filename=filename)
                         if not pb_df.empty:
                             pb_df = normalize_phantombuster_columns(pb_df)
                             st.session_state['results'] = pb_df.to_dict('records')
                             st.session_state['results_df'] = pb_df
-                            st.success(f"Loaded **{len(pb_df)}** profiles!")
+                            file_msg = f" from **{selected_file}**" if selected_file else ""
+                            st.success(f"Loaded **{len(pb_df)}** profiles{file_msg}!")
                             st.rerun()
                         else:
                             st.error("No results found.")
@@ -1657,15 +1826,21 @@ with tab_upload:
         elif current_status == 'finished':
             progress_info = st.session_state.get('pb_progress_info', {})
             profiles_count = progress_info.get('profiles_count', 0)
+            csv_name = st.session_state.get('pb_launch_csv_name')
+
             if profiles_count > 0:
                 st.success(f"Phantom finished! Extracted **{profiles_count}** profiles")
             else:
                 st.success("Phantom finished!")
 
+            if csv_name:
+                st.info(f"Results saved to: **{csv_name}.csv**")
+
             if st.button("Load Results", type="primary", key="pb_load_results_btn"):
                 agent_id = st.session_state['pb_launch_agent_id']
                 with st.spinner("Loading results..."):
-                    pb_df = fetch_phantombuster_result_csv(pb_key, agent_id)
+                    # Load the specific file created during this launch
+                    pb_df = fetch_phantombuster_result_csv(pb_key, agent_id, filename=csv_name)
                     if not pb_df.empty:
                         pb_df = normalize_phantombuster_columns(pb_df)
                         st.session_state['results'] = pb_df.to_dict('records')
@@ -1673,8 +1848,10 @@ with tab_upload:
                         st.session_state['pb_launch_status'] = 'idle'
                         st.session_state['pb_launch_container_id'] = None
                         st.session_state['pb_launch_start_time'] = None
+                        st.session_state['pb_launch_csv_name'] = None
                         st.session_state['pb_progress_info'] = {}
-                        st.success(f"Loaded **{len(pb_df)}** profiles!")
+                        file_msg = f" from **{csv_name}.csv**" if csv_name else ""
+                        st.success(f"Loaded **{len(pb_df)}** profiles{file_msg}!")
                         st.rerun()
                     else:
                         st.error("Could not load results.")
@@ -1684,6 +1861,7 @@ with tab_upload:
             if st.button("Reset", key="pb_reset_btn"):
                 st.session_state['pb_launch_status'] = 'idle'
                 st.session_state['pb_launch_error'] = None
+                st.session_state['pb_launch_csv_name'] = None
                 st.session_state['pb_progress_info'] = {}
                 st.rerun()
 
@@ -1694,10 +1872,14 @@ with tab_upload:
                 st.session_state['pb_launch_agent_id'] = user_phantom['id']
                 st.session_state['pb_launch_error'] = None
 
-                # Update phantom with new search URL and launch
+                # Update phantom with new search URL and timestamped output filename
                 update_result = update_phantombuster_search_url(pb_key, user_phantom['id'], search_url, 2500)
                 if update_result.get('success'):
-                    result = launch_phantombuster_agent(pb_key, user_phantom['id'], None, clear_results=True)
+                    # Store the generated filename for later retrieval
+                    st.session_state['pb_launch_csv_name'] = update_result.get('csvName')
+
+                    # Launch without clearing results - new file will be created with unique name
+                    result = launch_phantombuster_agent(pb_key, user_phantom['id'], None, clear_results=False)
 
                     if 'containerId' in result:
                         st.session_state['pb_launch_container_id'] = result['containerId']

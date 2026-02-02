@@ -9,15 +9,27 @@ import json
 import time
 import re
 import requests
-import winsound
+import os
 from pathlib import Path
 from datetime import datetime
-from plyer import notification
 from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+
+# Platform-specific imports (for sound/notifications on Windows)
+try:
+    import winsound
+    HAS_WINSOUND = True
+except ImportError:
+    HAS_WINSOUND = False
+
+try:
+    from plyer import notification
+    HAS_PLYER = True
+except ImportError:
+    HAS_PLYER = False
 
 
 # Page config
@@ -29,11 +41,35 @@ st.set_page_config(
 
 # Load API keys
 def load_config():
+    """Load config from config.json or Streamlit secrets (for cloud deployment)."""
+    config = {}
+
+    # Try loading from config.json (local development)
     config_path = Path(__file__).parent / 'config.json'
     if config_path.exists():
         with open(config_path, 'r') as f:
-            return json.load(f)
-    return {}
+            config = json.load(f)
+
+    # Override with Streamlit secrets if available (cloud deployment)
+    try:
+        if hasattr(st, 'secrets') and len(st.secrets) > 0:
+            # Map Streamlit secrets to config keys
+            if 'api_key' in st.secrets:
+                config['api_key'] = st.secrets['api_key']
+            if 'openai_api_key' in st.secrets:
+                config['openai_api_key'] = st.secrets['openai_api_key']
+            if 'phantombuster_api_key' in st.secrets:
+                config['phantombuster_api_key'] = st.secrets['phantombuster_api_key']
+            if 'phantombuster_agent_id' in st.secrets:
+                config['phantombuster_agent_id'] = st.secrets['phantombuster_agent_id']
+            if 'google_credentials' in st.secrets:
+                config['google_credentials'] = dict(st.secrets['google_credentials'])
+            if 'filter_sheets' in st.secrets:
+                config['filter_sheets'] = dict(st.secrets['filter_sheets'])
+    except Exception:
+        pass
+
+    return config
 
 def load_api_key():
     config = load_config()
@@ -1088,6 +1124,19 @@ def extract_urls_from_phantombuster(df: pd.DataFrame) -> list[str]:
 def get_gspread_client():
     """Get authenticated gspread client using service account."""
     config = load_config()
+
+    scopes = [
+        'https://www.googleapis.com/auth/spreadsheets.readonly',
+        'https://www.googleapis.com/auth/drive.readonly'
+    ]
+
+    # Try using credentials from Streamlit secrets (cloud deployment)
+    if config.get('google_credentials'):
+        from google.oauth2.service_account import Credentials as SACredentials
+        creds = SACredentials.from_service_account_info(config['google_credentials'], scopes=scopes)
+        return gspread.authorize(creds)
+
+    # Fall back to credentials file (local development)
     creds_file = config.get('google_credentials_file')
     if not creds_file:
         return None
@@ -1095,11 +1144,6 @@ def get_gspread_client():
     creds_path = Path(__file__).parent / creds_file
     if not creds_path.exists():
         return None
-
-    scopes = [
-        'https://www.googleapis.com/auth/spreadsheets.readonly',
-        'https://www.googleapis.com/auth/drive.readonly'
-    ]
 
     creds = Credentials.from_service_account_file(str(creds_path), scopes=scopes)
     return gspread.authorize(creds)
@@ -1134,16 +1178,19 @@ def get_filter_sheets_config():
 def send_notification(title, message):
     """Send desktop notification with sound."""
     try:
-        winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS)
-        notification.notify(
-            title=title,
-            message=message,
-            app_name="LinkedIn Enricher",
-            timeout=10
-        )
+        if HAS_WINSOUND:
+            winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS)
+        if HAS_PLYER:
+            notification.notify(
+                title=title,
+                message=message,
+                app_name="LinkedIn Enricher",
+                timeout=10
+            )
     except Exception:
         try:
-            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            if HAS_WINSOUND:
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
         except:
             pass
 
@@ -2102,17 +2149,19 @@ with tab_upload:
                     try:
                         profiles = status_result.get('profiles_count', 0)
                         msg = f"Extracted {profiles} profiles" if profiles else "Ready to load results"
-                        notification.notify(
-                            title="PhantomBuster Finished",
-                            message=msg,
-                            app_name="LinkedIn Enricher",
-                            timeout=10
-                        )
+                        if HAS_PLYER:
+                            notification.notify(
+                                title="PhantomBuster Finished",
+                                message=msg,
+                                app_name="LinkedIn Enricher",
+                                timeout=10
+                            )
                         # Windows sound
-                        try:
-                            winsound.MessageBeep(winsound.MB_OK)
-                        except:
-                            pass
+                        if HAS_WINSOUND:
+                            try:
+                                winsound.MessageBeep(winsound.MB_OK)
+                            except:
+                                pass
                     except:
                         pass
                     st.rerun()
@@ -2121,16 +2170,18 @@ with tab_upload:
                     st.session_state['pb_launch_error'] = status_result.get('exitMessage', 'Phantom failed')
                     # Desktop notification for error
                     try:
-                        notification.notify(
-                            title="PhantomBuster Error",
-                            message=status_result.get('exitMessage', 'Phantom failed'),
-                            app_name="LinkedIn Enricher",
-                            timeout=10
-                        )
-                        try:
-                            winsound.MessageBeep(winsound.MB_ICONHAND)
-                        except:
-                            pass
+                        if HAS_PLYER:
+                            notification.notify(
+                                title="PhantomBuster Error",
+                                message=status_result.get('exitMessage', 'Phantom failed'),
+                                app_name="LinkedIn Enricher",
+                                timeout=10
+                            )
+                        if HAS_WINSOUND:
+                            try:
+                                winsound.MessageBeep(winsound.MB_ICONHAND)
+                            except:
+                                pass
                     except:
                         pass
                     st.rerun()

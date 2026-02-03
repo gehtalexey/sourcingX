@@ -3079,7 +3079,7 @@ with tab_filter:
     if salesql_key:
         if 'results' in st.session_state and st.session_state['results']:
             current_count = len(st.session_state['results_df'])
-            already_enriched = st.session_state['results_df']['salesql_email'].notna().sum() if 'salesql_email' in st.session_state['results_df'].columns else 0
+            already_enriched = (st.session_state['results_df']['salesql_email'].notna() & (st.session_state['results_df']['salesql_email'] != '')).sum() if 'salesql_email' in st.session_state['results_df'].columns else 0
             not_enriched = current_count - already_enriched
             st.caption(f"{current_count} profiles | {already_enriched} already have emails | {not_enriched} remaining")
 
@@ -3352,7 +3352,7 @@ with tab_filter2:
             email_df = st.session_state.get('passed_candidates_df', display_df)
             if email_df is not None and not email_df.empty:
                 current_count = len(email_df)
-                already_enriched = email_df['salesql_email'].notna().sum() if 'salesql_email' in email_df.columns else 0
+                already_enriched = (email_df['salesql_email'].notna() & (email_df['salesql_email'] != '')).sum() if 'salesql_email' in email_df.columns else 0
                 not_enriched = current_count - already_enriched
                 st.caption(f"{current_count} profiles | {already_enriched} already have emails | {not_enriched} remaining")
 
@@ -3573,7 +3573,7 @@ with tab_screening:
             if salesql_key:
                 screening_df = pd.DataFrame(sorted_results)
                 current_count = len(screening_df)
-                already_enriched = screening_df['salesql_email'].notna().sum() if 'salesql_email' in screening_df.columns else 0
+                already_enriched = (screening_df['salesql_email'].notna() & (screening_df['salesql_email'] != '')).sum() if 'salesql_email' in screening_df.columns else 0
                 not_enriched = current_count - already_enriched
                 st.caption(f"{current_count} profiles | {already_enriched} already have emails | {not_enriched} remaining")
 

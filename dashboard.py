@@ -31,6 +31,30 @@ try:
 except ImportError:
     HAS_PLYER = False
 
+# Authentication (optional - only enabled when auth secrets are configured)
+try:
+    import streamlit_authenticator as stauth
+    HAS_AUTHENTICATOR = True
+except ImportError:
+    HAS_AUTHENTICATOR = False
+
+
+def get_auth_config():
+    """Load authentication config from Streamlit secrets."""
+    try:
+        if hasattr(st, 'secrets') and 'auth' in st.secrets:
+            return {
+                'credentials': dict(st.secrets['auth']['credentials']),
+                'cookie': {
+                    'name': st.secrets['auth']['cookie_name'],
+                    'key': st.secrets['auth']['cookie_key'],
+                    'expiry_days': st.secrets['auth']['cookie_expiry_days']
+                }
+            }
+    except Exception:
+        pass
+    return None
+
 
 # Page config
 st.set_page_config(
@@ -38,6 +62,63 @@ st.set_page_config(
     page_icon="🔍",
     layout="wide"
 )
+
+# Authentication check (only when auth is configured)
+auth_config = get_auth_config()
+if auth_config and HAS_AUTHENTICATOR:
+    authenticator = stauth.Authenticate(
+        auth_config['credentials'],
+        auth_config['cookie']['name'],
+        auth_config['cookie']['key'],
+        auth_config['cookie']['expiry_days']
+    )
+    authenticator.login(location='main')
+
+    if st.session_state.get('authentication_status') is False:
+        st.error('Username/password is incorrect')
+        st.stop()
+    elif st.session_state.get('authentication_status') is None:
+        st.warning('Please enter your username and password')
+        st.stop()
+
+# Professional UI styling
+st.markdown("""
+<style>
+    /* Professional tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: #F0F2F5;
+        padding: 0.5rem;
+        border-radius: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        background-color: white;
+        border-radius: 6px;
+        padding: 0.5rem 1rem;
+        font-weight: 500;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #0077B5 !important;
+        color: white !important;
+    }
+
+    /* Title styling */
+    h1 { color: #0077B5; border-bottom: 3px solid #0077B5; padding-bottom: 0.5rem; }
+
+    /* Metric cards */
+    [data-testid="stMetricValue"] { font-size: 2rem; color: #0077B5; }
+
+    /* Buttons */
+    .stButton > button[kind="primary"] {
+        background-color: #0077B5;
+        border-radius: 24px;
+        font-weight: 600;
+    }
+
+    /* Sidebar */
+    [data-testid="stSidebar"] { background-color: #F8F9FA; }
+</style>
+""", unsafe_allow_html=True)
 
 # Load API keys
 def load_config():

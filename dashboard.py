@@ -3572,8 +3572,23 @@ with tab_screening:
             salesql_key = load_salesql_key()
             if salesql_key:
                 screening_df = pd.DataFrame(sorted_results)
-                current_count = len(screening_df)
-                already_enriched = (screening_df['salesql_email'].notna() & (screening_df['salesql_email'] != '')).sum() if 'salesql_email' in screening_df.columns else 0
+
+                # Choose which candidates to enrich
+                candidate_source = st.radio(
+                    "Which candidates to enrich?",
+                    ["Priority (Strong Fit + Good Fit)", "All candidates"],
+                    key="candidate_source_tab5",
+                    horizontal=True
+                )
+
+                if candidate_source == "Priority (Strong Fit + Good Fit)":
+                    enrich_df = screening_df[screening_df['fit'].isin(['Strong Fit', 'Good Fit'])].copy()
+                    st.caption(f"Priority candidates: {len(enrich_df)} (Strong Fit + Good Fit)")
+                else:
+                    enrich_df = screening_df.copy()
+
+                current_count = len(enrich_df)
+                already_enriched = (enrich_df['salesql_email'].notna() & (enrich_df['salesql_email'] != '')).sum() if 'salesql_email' in enrich_df.columns else 0
                 not_enriched = current_count - already_enriched
                 st.caption(f"{current_count} profiles | {already_enriched} already have emails | {not_enriched} remaining")
 
@@ -3596,14 +3611,41 @@ with tab_screening:
                             progress_bar.progress(current / total)
                             status_text.text(f"Enriching {current}/{total}...")
 
-                        enriched_df = enrich_profiles_with_salesql(screening_df, salesql_key, progress_callback=update_progress, limit=enrich_count)
-                        # Update screening results with emails
-                        st.session_state['screening_results'] = enriched_df.to_dict('records')
-                        new_emails = enriched_df['salesql_email'].notna().sum() if 'salesql_email' in enriched_df.columns else 0
-                        st.success(f"Done! {new_emails} profiles now have emails.")
+                        enriched_df = enrich_profiles_with_salesql(enrich_df, salesql_key, progress_callback=update_progress, limit=enrich_count)
+
+                        # Merge enriched emails back into full screening results
+                        screening_df_updated = screening_df.copy()
+                        if 'salesql_email' not in screening_df_updated.columns:
+                            screening_df_updated['salesql_email'] = ''
+                            screening_df_updated['salesql_email_type'] = ''
+                        for idx, row in enriched_df.iterrows():
+                            if row.get('salesql_email') and row['salesql_email'] != '':
+                                # Find matching row in original df by linkedin_url or name
+                                url_col = 'linkedin_url' if 'linkedin_url' in screening_df_updated.columns else 'public_url'
+                                if url_col in screening_df_updated.columns:
+                                    mask = screening_df_updated[url_col] == row.get(url_col)
+                                    screening_df_updated.loc[mask, 'salesql_email'] = row['salesql_email']
+                                    screening_df_updated.loc[mask, 'salesql_email_type'] = row.get('salesql_email_type', '')
+
+                        st.session_state['screening_results'] = screening_df_updated.to_dict('records')
+                        new_emails = (enriched_df['salesql_email'].notna() & (enriched_df['salesql_email'] != '')).sum() if 'salesql_email' in enriched_df.columns else 0
+                        st.success(f"Done! Found {new_emails} emails.")
                         st.rerun()
                 else:
                     st.success("All profiles already have emails!")
+
+                # Preview enriched profiles with emails
+                if 'salesql_email' in screening_df.columns:
+                    enriched_preview = screening_df[screening_df['salesql_email'].notna() & (screening_df['salesql_email'] != '')].copy()
+                    if len(enriched_preview) > 0:
+                        st.markdown("**Enriched Profiles Preview:**")
+                        preview_cols = ['name', 'fit', 'salesql_email']
+                        if 'current_title' in enriched_preview.columns:
+                            preview_cols.insert(1, 'current_title')
+                        if 'current_company' in enriched_preview.columns:
+                            preview_cols.insert(2, 'current_company')
+                        available_cols = [c for c in preview_cols if c in enriched_preview.columns]
+                        st.dataframe(enriched_preview[available_cols], use_container_width=True, hide_index=True)
             else:
                 st.caption("SalesQL not configured. Add 'salesql_api_key' to secrets.")
 

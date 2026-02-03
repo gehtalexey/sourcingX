@@ -2693,9 +2693,24 @@ with tab_filter:
         with col2:
             st.markdown("**Title Keywords Filter:**")
             st.caption("Exclude profiles with these keywords in title")
+
+            # Predefined exclusion keywords
+            COMMON_EXCLUDE_TITLES = [
+                "vp", "director", "manager", "head of",
+                "cto", "ceo", "coo", "cfo", "owner", "founder", "co-founder",
+                "freelancer", "self employed", "consultant",
+                "student", "intern", "junior",
+                "qa", "automation", "embedded", "low level", "real time", "hardware", "design"
+            ]
+            selected_exclude = st.multiselect(
+                "Common exclusions (select multiple)",
+                options=COMMON_EXCLUDE_TITLES,
+                default=[],
+                key="exclude_title_presets"
+            )
             exclude_title_keywords = st.text_input(
-                "Exclude title keywords (comma-separated)",
-                placeholder="e.g., director, vp, head of, manager",
+                "Additional keywords (comma-separated)",
+                placeholder="e.g., lead, principal",
                 key="exclude_title_keywords"
             )
 
@@ -2753,9 +2768,12 @@ with tab_filter:
                     nr_df = pd.read_csv(not_relevant_file)
                     filters['not_relevant'] = nr_df.iloc[:, 0].dropna().tolist()
 
-                # Title keywords
+                # Title keywords - combine presets and custom
+                all_exclude_titles = list(selected_exclude)  # From multiselect
                 if exclude_title_keywords:
-                    filters['exclude_titles'] = [kw.strip().lower() for kw in exclude_title_keywords.split(',') if kw.strip()]
+                    all_exclude_titles.extend([kw.strip().lower() for kw in exclude_title_keywords.split(',') if kw.strip()])
+                if all_exclude_titles:
+                    filters['exclude_titles'] = all_exclude_titles
                 if include_title_keywords:
                     filters['include_titles'] = [kw.strip().lower() for kw in include_title_keywords.split(',') if kw.strip()]
 

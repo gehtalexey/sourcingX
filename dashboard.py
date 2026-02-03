@@ -43,15 +43,28 @@ def get_auth_config():
     """Load authentication config from Streamlit secrets."""
     try:
         if hasattr(st, 'secrets') and 'auth' in st.secrets:
+            # Deep copy credentials to avoid immutability issues
+            creds = st.secrets['auth']['credentials']
+            credentials = {
+                'usernames': {}
+            }
+            for username in creds['usernames']:
+                user_data = creds['usernames'][username]
+                credentials['usernames'][username] = {
+                    'email': user_data.get('email', ''),
+                    'first_name': user_data.get('first_name', ''),
+                    'last_name': user_data.get('last_name', ''),
+                    'password': user_data.get('password', '')
+                }
             return {
-                'credentials': dict(st.secrets['auth']['credentials']),
+                'credentials': credentials,
                 'cookie': {
                     'name': st.secrets['auth']['cookie_name'],
                     'key': st.secrets['auth']['cookie_key'],
                     'expiry_days': st.secrets['auth']['cookie_expiry_days']
                 }
             }
-    except Exception:
+    except Exception as e:
         pass
     return None
 

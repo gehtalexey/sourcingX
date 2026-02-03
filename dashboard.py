@@ -1911,7 +1911,12 @@ with tab_upload:
 
     # Debug: show if PB key is loaded (remove after debugging)
     if not has_pb_key:
-        st.warning(f"PhantomBuster not configured. Key loaded: {bool(pb_key)}")
+        # Check what secrets are available
+        try:
+            secrets_keys = list(st.secrets.keys()) if hasattr(st, 'secrets') else []
+            st.warning(f"PhantomBuster not configured. Key loaded: {bool(pb_key)}. Secrets available: {secrets_keys}")
+        except Exception as e:
+            st.warning(f"PhantomBuster not configured. Error reading secrets: {e}")
 
     if has_pb_key:
         # Fetch all agents once

@@ -2694,18 +2694,38 @@ with tab_filter:
             st.markdown("**Title Keywords Filter:**")
             st.caption("Exclude profiles with these keywords in title")
 
-            # Predefined exclusion keywords
-            COMMON_EXCLUDE_TITLES = [
-                "vp", "director", "manager", "head of",
-                "cto", "ceo", "coo", "cfo", "owner", "founder", "co-founder",
-                "freelancer", "self employed", "consultant",
-                "student", "intern", "junior",
-                "qa", "automation", "embedded", "low level", "real time", "hardware", "design"
-            ]
+            # Predefined exclusion keywords by category
+            EXCLUDE_CATEGORIES = {
+                "Leadership": ["vp", "director", "manager", "head of"],
+                "C-Level/Founders": ["cto", "ceo", "coo", "cfo", "owner", "founder", "co-founder"],
+                "Non-Employee": ["freelancer", "self employed", "consultant"],
+                "Junior": ["student", "intern", "junior"],
+                "Technical": ["qa", "automation", "embedded", "low level", "real time", "hardware", "design"]
+            }
+            ALL_EXCLUDE_TITLES = [kw for keywords in EXCLUDE_CATEGORIES.values() for kw in keywords]
+
+            # Quick select buttons
+            st.caption("Quick select:")
+            btn_cols = st.columns(len(EXCLUDE_CATEGORIES) + 1)
+            with btn_cols[0]:
+                if st.button("All", key="exc_all", use_container_width=True):
+                    st.session_state['exclude_title_presets'] = ALL_EXCLUDE_TITLES
+                    st.rerun()
+            for i, (cat_name, cat_keywords) in enumerate(EXCLUDE_CATEGORIES.items()):
+                with btn_cols[i + 1]:
+                    if st.button(cat_name, key=f"exc_{cat_name}", use_container_width=True):
+                        current = st.session_state.get('exclude_title_presets', [])
+                        # Toggle: add if not all present, remove if all present
+                        if all(kw in current for kw in cat_keywords):
+                            st.session_state['exclude_title_presets'] = [k for k in current if k not in cat_keywords]
+                        else:
+                            st.session_state['exclude_title_presets'] = list(set(current + cat_keywords))
+                        st.rerun()
+
             selected_exclude = st.multiselect(
-                "Common exclusions (select multiple)",
-                options=COMMON_EXCLUDE_TITLES,
-                default=[],
+                "Selected exclusions",
+                options=ALL_EXCLUDE_TITLES,
+                default=st.session_state.get('exclude_title_presets', []),
                 key="exclude_title_presets"
             )
             exclude_title_keywords = st.text_input(

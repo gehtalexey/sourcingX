@@ -198,9 +198,10 @@ def load_salesql_key():
 
 
 # ===== SalesQL Email Enrichment =====
-# Rate limiting: 60 requests/minute (1 per second to be safe)
-SALESQL_REQUESTS_PER_MINUTE = 60
-SALESQL_DELAY_BETWEEN_REQUESTS = 1.0  # seconds
+# Rate limiting: 180 requests/minute, 5000/day
+SALESQL_REQUESTS_PER_MINUTE = 180
+SALESQL_DAILY_LIMIT = 5000
+SALESQL_DELAY_BETWEEN_REQUESTS = 0.35  # ~170 requests/minute to stay safe
 
 def enrich_with_salesql(linkedin_url: str, api_key: str, personal_only: bool = True) -> dict:
     """Enrich a single profile with SalesQL to get email.

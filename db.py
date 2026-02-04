@@ -67,8 +67,16 @@ class SupabaseClient:
         params = {}
         if on_conflict:
             params['on_conflict'] = on_conflict
-        response = requests.post(url, headers=headers, params=params, json=data, timeout=30)
-        response.raise_for_status()
+        # Pre-serialize JSON to handle NaN values
+        json_str = json.dumps(data, allow_nan=True)
+        json_str = json_str.replace(': NaN', ': null').replace(':NaN', ':null')
+        json_str = json_str.replace(': Infinity', ': null').replace(':Infinity', ':null')
+        json_str = json_str.replace(': -Infinity', ': null').replace(':-Infinity', ':null')
+        response = requests.post(url, headers=headers, params=params, data=json_str, timeout=30)
+        if response.status_code >= 400:
+            # Include error details in the exception
+            error_msg = f"{response.status_code}: {response.text}"
+            raise requests.HTTPError(error_msg)
         if response.text:
             return response.json()
         return []
@@ -185,53 +193,219 @@ def upsert_profile(client: SupabaseClient, profile_data: dict) -> dict:
     return result[0] if result else None
 
 
-def upsert_profiles_from_phantombuster(client: SupabaseClient, profiles: list, search_id: str = None) -> dict:
-    """Bulk upsert profiles from PhantomBuster scrape."""
-    stats = {'inserted': 0, 'updated': 0, 'skipped': 0, 'errors': 0}
-
-    for profile in profiles:
+def is_nan_or_na(v):
+    """Check if value is NaN, None, or pandas NA."""
+    import math
+    if v is None:
+        return True
+    # Check for pandas NA type first (not JSON serializable)
+    if type(v).__name__ == 'NAType':
+        return True
+    # Check pandas isna (handles various NA types)
+    try:
+        if pd.isna(v):
+            return True
+    except (TypeError, ValueError):
+        pass
+    # Check float NaN/Inf
+    if isinstance(v, float):
         try:
-            linkedin_url = normalize_linkedin_url(
-                profile.get('linkedin_url') or profile.get('public_url') or profile.get('defaultProfileUrl')
-            )
-            if not linkedin_url:
-                stats['skipped'] += 1
-                continue
+            if math.isnan(v) or math.isinf(v):
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
 
-            # Check if exists
-            existing = client.select('profiles', 'id,enriched_at,status', {'linkedin_url': f'eq.{linkedin_url}'})
 
-            data = {
-                'linkedin_url': linkedin_url,
-                'first_name': profile.get('first_name') or profile.get('firstName'),
-                'last_name': profile.get('last_name') or profile.get('lastName'),
-                'headline': profile.get('headline'),
-                'location': profile.get('location'),
-                'current_title': profile.get('current_title') or profile.get('title'),
-                'current_company': profile.get('current_company') or profile.get('company'),
-                'current_years_in_role': profile.get('current_years_in_role'),
-                'skills': profile.get('skills'),
-                'summary': profile.get('summary'),
-                'phantombuster_data': profile,
-                'updated_at': datetime.utcnow().isoformat(),
-            }
+def clean_nan_values(obj, keep_keys=False):
+    """Recursively clean NaN/None/NA values from dict for JSON serialization.
 
-            # Remove None values
-            data = {k: v for k, v in data.items() if v is not None}
+    Args:
+        obj: The object to clean
+        keep_keys: If True, keep dict keys but set NaN values to None (for batch upsert)
+    """
+    if isinstance(obj, dict):
+        cleaned = {}
+        for k, v in obj.items():
+            if is_nan_or_na(v):
+                if keep_keys:
+                    cleaned[k] = None
+                # else: skip this key
+            else:
+                cleaned_v = clean_nan_values(v, keep_keys)
+                if keep_keys or (cleaned_v is not None and not is_nan_or_na(cleaned_v)):
+                    cleaned[k] = cleaned_v
+        return cleaned
+    elif isinstance(obj, list):
+        return [clean_nan_values(item, keep_keys) for item in obj if not is_nan_or_na(item)]
+    elif is_nan_or_na(obj):
+        return None
+    return obj
 
-            if existing:
+
+def upsert_profiles_from_phantombuster(client: SupabaseClient, profiles: list, search_id: str = None) -> dict:
+    """Bulk upsert profiles from PhantomBuster scrape - optimized batch version."""
+    stats = {'inserted': 0, 'updated': 0, 'skipped': 0, 'errors': 0, 'debug': []}
+
+    if not profiles:
+        stats['debug'].append('No profiles provided')
+        return stats
+
+    # Step 1: Extract valid LinkedIn URLs and prepare data
+    profiles_to_upsert = []
+
+    stats['debug'].append(f'Processing {len(profiles)} profiles')
+
+    for i, profile in enumerate(profiles):
+        profile = clean_nan_values(profile)
+
+        # Get LinkedIn URL - check linkedin_url first since dashboard normalizes to this
+        linkedin_url = profile.get('linkedin_url')
+
+        # Debug first profile
+        if i == 0:
+            stats['debug'].append(f'First profile linkedin_url: {linkedin_url} (type: {type(linkedin_url).__name__})')
+            stats['debug'].append(f'First profile keys: {list(profile.keys())[:5]}...')
+
+        # Validate the URL
+        if linkedin_url:
+            if 'linkedin.com' in str(linkedin_url) and '/sales/' not in str(linkedin_url):
+                linkedin_url = normalize_linkedin_url(linkedin_url)
+            else:
+                if i == 0:
+                    stats['debug'].append(f'URL validation failed: {linkedin_url}')
+                linkedin_url = None
+
+        # If not found, try other fields
+        if not linkedin_url:
+            url_candidates = [
+                profile.get('defaultProfileUrl'),
+                profile.get('public_url'),
+                profile.get('profileUrl'),
+                profile.get('linkedInProfileUrl'),
+                profile.get('profileLink'),
+            ]
+            for url in url_candidates:
+                if url and 'linkedin.com' in str(url) and '/sales/' not in str(url):
+                    linkedin_url = normalize_linkedin_url(url)
+                    break
+
+        if not linkedin_url:
+            public_id = profile.get('publicIdentifier') or profile.get('public_identifier')
+            if public_id and public_id != 'null':
+                linkedin_url = f"https://www.linkedin.com/in/{public_id}"
+
+        if not linkedin_url:
+            stats['skipped'] += 1
+            if i == 0:
+                stats['debug'].append('First profile SKIPPED - no valid URL')
+            continue
+
+        # Parse duration text to numeric (e.g., "8 months in role" -> 0.67, "2 years" -> 2)
+        def parse_duration(duration_str):
+            if not duration_str or is_nan_or_na(duration_str):
+                return None
+            duration_str = str(duration_str).lower().strip()
+            try:
+                # Try direct number first
+                return float(duration_str)
+            except (ValueError, TypeError):
+                pass
+            # Parse text like "8 months", "2 years", "1 year 3 months"
+            years = 0
+            months = 0
+            import re
+            year_match = re.search(r'(\d+)\s*year', duration_str)
+            month_match = re.search(r'(\d+)\s*month', duration_str)
+            if year_match:
+                years = int(year_match.group(1))
+            if month_match:
+                months = int(month_match.group(1))
+            if years or months:
+                return round(years + months / 12, 2)
+            return None
+
+        duration_in_role = profile.get('current_years_in_role') or profile.get('durationInRole')
+        duration_at_company = profile.get('current_years_at_company') or profile.get('durationInCompany')
+
+        # Prepare data for this profile - use fixed keys for batch upsert compatibility
+        data = {
+            'linkedin_url': linkedin_url,
+            'first_name': profile.get('first_name') or profile.get('firstName') or None,
+            'last_name': profile.get('last_name') or profile.get('lastName') or None,
+            'headline': profile.get('headline') or None,
+            'location': profile.get('location') or None,
+            'current_title': profile.get('current_title') or profile.get('title') or None,
+            'current_company': profile.get('current_company') or profile.get('company') or profile.get('companyName') or None,
+            'current_years_in_role': parse_duration(duration_in_role),
+            'current_years_at_company': parse_duration(duration_at_company),
+            'summary': profile.get('summary') or None,
+            'phantombuster_data': clean_nan_values(profile),
+            'updated_at': datetime.utcnow().isoformat(),
+            'status': 'scraped',
+        }
+
+        # Clean NaN values but keep all keys (replace NaN with None for batch upsert)
+        data = clean_nan_values(data, keep_keys=True)
+        profiles_to_upsert.append(data)
+
+    if not profiles_to_upsert:
+        stats['debug'].append('No profiles to upsert after processing')
+        return stats
+
+    stats['debug'].append(f'Prepared {len(profiles_to_upsert)} profiles for upsert')
+
+    # Step 2: Get existing URLs in ONE query
+    urls_to_check = [p['linkedin_url'] for p in profiles_to_upsert]
+    existing_urls = set()
+    try:
+        # Query in batches of 100 to avoid URL length limits
+        for i in range(0, len(urls_to_check), 100):
+            batch_urls = urls_to_check[i:i+100]
+            url_filter = ','.join([f'"{u}"' for u in batch_urls])
+            existing = client.select('profiles', 'linkedin_url', {'linkedin_url': f'in.({url_filter})'})
+            existing_urls.update(p['linkedin_url'] for p in existing)
+    except Exception as e:
+        print(f"[DB] Error checking existing: {e}")
+
+    # Step 3: Batch upsert all profiles at once
+    try:
+        # Add created_at for ALL profiles (same keys required for batch upsert)
+        new_count = 0
+        now = datetime.utcnow().isoformat()
+        for p in profiles_to_upsert:
+            if p['linkedin_url'] not in existing_urls:
+                p['created_at'] = now
+                new_count += 1
+            else:
+                p['created_at'] = None  # Will be ignored on update but needed for consistent keys
+
+        stats['debug'].append(f'{new_count} new, {len(profiles_to_upsert) - new_count} existing')
+
+        # Serialize and clean for JSON
+        json_str = json.dumps(profiles_to_upsert, allow_nan=True)
+        json_str = json_str.replace(': NaN', ': null').replace(':NaN', ':null')
+        json_str = json_str.replace(': Infinity', ': null').replace(':Infinity', ':null')
+        json_str = json_str.replace(': -Infinity', ': null').replace(':-Infinity', ':null')
+        clean_data = json.loads(json_str)
+
+        stats['debug'].append(f'Calling upsert with {len(clean_data)} profiles')
+
+        # Single batch upsert
+        client.upsert('profiles', clean_data, on_conflict='linkedin_url')
+
+        stats['debug'].append('Upsert completed successfully')
+
+        # Count results
+        for p in profiles_to_upsert:
+            if p['linkedin_url'] in existing_urls:
                 stats['updated'] += 1
-                data['status'] = existing[0].get('status', 'scraped')
             else:
                 stats['inserted'] += 1
-                data['status'] = 'scraped'
-                data['created_at'] = datetime.utcnow().isoformat()
 
-            client.upsert('profiles', data, on_conflict='linkedin_url')
-
-        except Exception as e:
-            stats['errors'] += 1
-            print(f"Error upserting profile: {e}")
+    except Exception as e:
+        stats['debug'].append(f'Batch upsert ERROR: {type(e).__name__}: {e}')
+        stats['errors'] = len(profiles_to_upsert)
 
     return stats
 

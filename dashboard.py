@@ -371,7 +371,7 @@ def load_search_history(agent_id: str = None) -> list[dict]:
         return []
 
 
-def save_search_to_history(agent_id: str, csv_name: str, search_url: str = None, profiles_requested: int = None) -> bool:
+def save_search_to_history(agent_id: str, csv_name: str, search_url: str = None, profiles_requested: int = None, search_name: str = None) -> bool:
     """Save a search to history file.
 
     Returns True if saved successfully.
@@ -393,6 +393,7 @@ def save_search_to_history(agent_id: str, csv_name: str, search_url: str = None,
             'launched_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
             'search_url': search_url,
             'profiles_requested': profiles_requested,
+            'search_name': search_name,
         }
         history.append(entry)
 
@@ -1300,6 +1301,11 @@ def fetch_container_status(api_key: str, container_id: str) -> dict:
 
 def normalize_phantombuster_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize PhantomBuster column names to match expected dashboard format."""
+    # Debug: log all columns to help identify URL fields
+    url_cols = [c for c in df.columns if 'url' in c.lower() or 'link' in c.lower() or 'profile' in c.lower() or 'identifier' in c.lower()]
+    st.session_state['_debug_url_cols'] = url_cols
+    st.session_state['_debug_all_cols'] = list(df.columns)
+
     # Column mapping: PhantomBuster name -> dashboard expected name
     # Order matters - first match wins for columns mapping to same target
     column_map = {
@@ -1313,6 +1319,11 @@ def normalize_phantombuster_columns(df: pd.DataFrame) -> pd.DataFrame:
         'currentCompanyName': 'current_company',
         'location': 'location',
         'defaultProfileUrl': 'linkedin_url',
+        'profileUrl': 'linkedin_url',
+        'linkedInProfileUrl': 'linkedin_url',
+        'linkedinProfileUrl': 'linkedin_url',
+        'publicIdentifier': 'linkedin_url',
+        'profileLink': 'linkedin_url',
         'vmid': 'vmid',
         'connectionDegree': 'connection_degree',
         'mutualConnectionsCount': 'mutual_connections',
@@ -1346,6 +1357,33 @@ def normalize_phantombuster_columns(df: pd.DataFrame) -> pd.DataFrame:
     # Use headline as current_title if current_title doesn't exist
     if 'headline' in df.columns and 'current_title' not in df.columns:
         df['current_title'] = df['headline']
+
+    # Clean linkedin_url - ensure it's a valid regular LinkedIn URL (not Sales Navigator)
+    if 'linkedin_url' in df.columns:
+        def clean_url(url):
+            if pd.isna(url) or not url:
+                return None
+            url = str(url).strip()
+            # Must be linkedin.com, have /in/, and NOT be Sales Navigator
+            if 'linkedin.com' in url and '/in/' in url and '/sales/' not in url:
+                return url
+            return None
+        df['linkedin_url'] = df['linkedin_url'].apply(clean_url)
+
+    # Debug: count valid URLs
+    valid_count = df['linkedin_url'].notna().sum()
+    st.session_state['_debug_valid_urls'] = f"{valid_count}/{len(df)}"
+
+    # Try to get linkedin_url from publicIdentifier if missing
+    if 'publicIdentifier' in df.columns:
+        def fill_from_identifier(row):
+            if pd.notna(row.get('linkedin_url')) and row.get('linkedin_url'):
+                return row['linkedin_url']
+            pub_id = row.get('publicIdentifier')
+            if pd.notna(pub_id) and pub_id and pub_id != 'null':
+                return f"https://www.linkedin.com/in/{pub_id}"
+            return None
+        df['linkedin_url'] = df.apply(fill_from_identifier, axis=1)
 
     return df
 
@@ -2097,9 +2135,13 @@ with tab_upload:
                         csv_name = h.get('csv_name', 'unknown')
                         launched_at = h.get('launched_at', '')
                         profiles = h.get('profiles_requested', '')
+                        search_name = h.get('search_name', '')
                         profile_str = f", {profiles} profiles" if profiles else ""
-                        # Format: "Feb 2, 09:10 - search_2026-02-02_09-10 (2500 profiles)"
-                        display_name = f"{launched_at} - {csv_name}{profile_str}"
+                        # Format: "Search Name - Feb 2, 09:10 (2500 profiles)" or "Feb 2, 09:10 - csv_name (2500 profiles)"
+                        if search_name:
+                            display_name = f"{search_name} - {launched_at}{profile_str}"
+                        else:
+                            display_name = f"{launched_at} - {csv_name}{profile_str}"
                         history_options.append({
                             'display': display_name,
                             'csv_name': csv_name,
@@ -2174,19 +2216,21 @@ with tab_upload:
                                             try:
                                                 db_client = get_supabase_client()
                                                 if db_client and check_connection(db_client):
-                                                    db_stats = upsert_profiles_from_phantombuster(db_client, pb_df.to_dict('records'))
+                                                    records = pb_df.to_dict('records')
+                                                    # Debug: save first record URL for display
+                                                    if records:
+                                                        st.session_state['_debug_first_url'] = records[0].get('linkedin_url', 'NOT FOUND')
+                                                        st.session_state['_debug_record_keys'] = list(records[0].keys())
+                                                    db_stats = upsert_profiles_from_phantombuster(db_client, records)
                                             except Exception as e:
-                                                st.warning(f"Database save failed: {e}")
+                                                db_stats = {'error': str(e)}
 
                                         st.session_state['results'] = pb_df.to_dict('records')
                                         st.session_state['results_df'] = pb_df
                                         st.session_state['preview_page'] = 0  # Reset pagination
-
-                                        # Show success with DB stats
-                                        if db_stats:
-                                            st.success(f"Loaded **{len(pb_df)}** profiles from **{filename}**! (DB: {db_stats.get('inserted', 0)} new, {db_stats.get('updated', 0)} updated)")
-                                        else:
-                                            st.success(f"Loaded **{len(pb_df)}** profiles from **{filename}**!")
+                                        st.session_state['last_load_count'] = len(pb_df)
+                                        st.session_state['last_load_file'] = filename
+                                        st.session_state['last_db_stats'] = db_stats
                                         st.rerun()
                                     else:
                                         st.error("No results found. File may have been deleted from PhantomBuster.")
@@ -2208,7 +2252,7 @@ with tab_upload:
                                                 if db_client and check_connection(db_client):
                                                     db_stats = upsert_profiles_from_phantombuster(db_client, pb_df.to_dict('records'))
                                             except Exception as e:
-                                                st.warning(f"Database save failed: {e}")
+                                                db_stats = {'error': str(e)}
 
                                         # Merge with existing results
                                         if 'results_df' in st.session_state and not st.session_state['results_df'].empty:
@@ -2225,14 +2269,18 @@ with tab_upload:
                                             new_count = len(combined_df) - len(existing_df)
                                             st.session_state['results'] = combined_df.to_dict('records')
                                             st.session_state['results_df'] = combined_df
-                                            db_msg = f" (DB: {db_stats.get('inserted', 0)} new)" if db_stats else ""
-                                            st.success(f"Added **{new_count}** new profiles (total: **{len(combined_df)}**){db_msg}")
+                                            st.session_state['last_load_count'] = new_count
+                                            st.session_state['last_load_file'] = filename
+                                            st.session_state['last_load_mode'] = 'added'
+                                            st.session_state['last_load_total'] = len(combined_df)
                                         else:
                                             st.session_state['results'] = pb_df.to_dict('records')
                                             st.session_state['results_df'] = pb_df
-                                            db_msg = f" (DB: {db_stats.get('inserted', 0)} new)" if db_stats else ""
-                                            st.success(f"Loaded **{len(pb_df)}** profiles from **{filename}**!{db_msg}")
+                                            st.session_state['last_load_count'] = len(pb_df)
+                                            st.session_state['last_load_file'] = filename
+                                            st.session_state['last_load_mode'] = 'loaded'
 
+                                        st.session_state['last_db_stats'] = db_stats
                                         st.session_state['preview_page'] = 0
                                         st.rerun()
                                     else:
@@ -2240,24 +2288,76 @@ with tab_upload:
                 else:
                     st.info("No search history found. Launch a search below to get started.")
 
-                    # Fallback: try to load legacy result.csv
-                    if st.button("Load legacy results (result.csv)", key="pb_load_legacy"):
-                        with st.spinner("Loading..."):
-                            pb_df = fetch_phantombuster_result_csv(pb_key, selected_agent['id'], debug=False, filename=None)
-                            if not pb_df.empty:
-                                pb_df = normalize_phantombuster_columns(pb_df)
-                                st.session_state['results'] = pb_df.to_dict('records')
-                                st.session_state['results_df'] = pb_df
-                                st.session_state['preview_page'] = 0  # Reset pagination
-                                st.success(f"Loaded **{len(pb_df)}** profiles!")
-                                st.rerun()
-                            else:
-                                st.error("No results found.")
-
                 # ===== Results Preview =====
                 if 'results' in st.session_state and st.session_state['results']:
                     st.markdown("---")
                     st.markdown("### Results Preview")
+
+                    # Show last load message
+                    if 'last_load_count' in st.session_state:
+                        load_count = st.session_state['last_load_count']
+                        load_file = st.session_state.get('last_load_file', '')
+                        load_mode = st.session_state.get('last_load_mode', 'loaded')
+                        load_total = st.session_state.get('last_load_total')
+
+                        if load_mode == 'added':
+                            st.success(f"Added **{load_count}** new profiles (total: **{load_total}**) from **{load_file}**")
+                        else:
+                            st.success(f"Loaded **{load_count}** profiles from **{load_file}**")
+
+                        # Show database stats
+                        db_stats = st.session_state.get('last_db_stats')
+                        if db_stats:
+                            if db_stats.get('error'):
+                                st.warning(f"Database save failed: {db_stats['error']}")
+                            else:
+                                inserted = db_stats.get('inserted', 0)
+                                updated = db_stats.get('updated', 0)
+                                skipped = db_stats.get('skipped', 0)
+                                errors = db_stats.get('errors', 0)
+                                if inserted > 0 or updated > 0:
+                                    msg = f"Database: **{inserted}** new, **{updated}** updated"
+                                    if skipped > 0:
+                                        msg += f", {skipped} skipped (no URL)"
+                                    if errors > 0:
+                                        msg += f", {errors} errors"
+                                    st.info(msg)
+                                elif skipped > 0:
+                                    st.warning(f"Database: **{skipped}** profiles skipped (no LinkedIn URL found)")
+                                else:
+                                    st.warning("Database: No profiles saved (no valid LinkedIn URLs)")
+
+                        # Show debug info about columns if skipped profiles
+                        if '_debug_url_cols' in st.session_state:
+                            with st.expander("Debug: URL columns found in data"):
+                                st.write("URL-related columns:", st.session_state.get('_debug_url_cols', []))
+                                st.write("Valid linkedin_url count:", st.session_state.get('_debug_valid_urls', 'N/A'))
+                                st.write("First record linkedin_url:", st.session_state.get('_debug_first_url', 'N/A'))
+                                st.write("Record keys:", st.session_state.get('_debug_record_keys', []))
+                                db_debug = st.session_state.get('last_db_stats', {})
+                                if db_debug and 'debug' in db_debug:
+                                    st.write("DB Debug:", db_debug.get('debug', []))
+                            del st.session_state['_debug_url_cols']
+                            if '_debug_all_cols' in st.session_state:
+                                del st.session_state['_debug_all_cols']
+                            if '_debug_valid_urls' in st.session_state:
+                                del st.session_state['_debug_valid_urls']
+                            if '_debug_first_url' in st.session_state:
+                                del st.session_state['_debug_first_url']
+                            if '_debug_record_keys' in st.session_state:
+                                del st.session_state['_debug_record_keys']
+
+                        # Clear after showing once
+                        del st.session_state['last_load_count']
+                        if 'last_load_file' in st.session_state:
+                            del st.session_state['last_load_file']
+                        if 'last_load_mode' in st.session_state:
+                            del st.session_state['last_load_mode']
+                        if 'last_load_total' in st.session_state:
+                            del st.session_state['last_load_total']
+                        if 'last_db_stats' in st.session_state:
+                            del st.session_state['last_db_stats']
+
                     results_df = st.session_state.get('results_df')
                     if results_df is not None and not results_df.empty:
                         # Column mapping for preview
@@ -2395,6 +2495,14 @@ with tab_upload:
             key="pb_search_url"
         )
 
+        # Optional search name
+        search_name = st.text_input(
+            "Search name (optional)",
+            placeholder="e.g., Senior Engineers SF",
+            key="pb_search_name",
+            help="Give this search a name to easily identify it later"
+        )
+
         # Find user's phantom
         user_phantom = None
         if user_name and agents:
@@ -2530,16 +2638,28 @@ with tab_upload:
                     pb_df = fetch_phantombuster_result_csv(pb_key, agent_id, filename=csv_name)
                     if not pb_df.empty:
                         pb_df = normalize_phantombuster_columns(pb_df)
+
+                        # Save to database
+                        db_stats = None
+                        if HAS_DATABASE:
+                            try:
+                                db_client = get_supabase_client()
+                                if db_client and check_connection(db_client):
+                                    db_stats = upsert_profiles_from_phantombuster(db_client, pb_df.to_dict('records'))
+                            except Exception as e:
+                                db_stats = {'error': str(e)}
+
                         st.session_state['results'] = pb_df.to_dict('records')
                         st.session_state['results_df'] = pb_df
-                        st.session_state['preview_page'] = 0  # Reset pagination
+                        st.session_state['preview_page'] = 0
                         st.session_state['pb_launch_status'] = 'idle'
                         st.session_state['pb_launch_container_id'] = None
                         st.session_state['pb_launch_start_time'] = None
                         st.session_state['pb_launch_csv_name'] = None
                         st.session_state['pb_progress_info'] = {}
-                        file_msg = f" from **{csv_name}.csv**" if csv_name else ""
-                        st.success(f"Loaded **{len(pb_df)}** profiles{file_msg}!")
+                        st.session_state['last_load_count'] = len(pb_df)
+                        st.session_state['last_load_file'] = f"{csv_name}.csv" if csv_name else "results"
+                        st.session_state['last_db_stats'] = db_stats
                         st.rerun()
                     else:
                         st.error("Could not load results.")
@@ -2597,7 +2717,8 @@ with tab_upload:
                                 agent_id=user_phantom['id'],
                                 csv_name=csv_name,
                                 search_url=search_url,
-                                profiles_requested=2500
+                                profiles_requested=2500,
+                                search_name=search_name if search_name else None
                             )
                     else:
                         st.session_state['pb_launch_status'] = 'error'

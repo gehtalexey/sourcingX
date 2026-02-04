@@ -4660,23 +4660,40 @@ with tab_database:
                     if 'first_name' in df.columns and 'last_name' in df.columns:
                         df['name'] = (df['first_name'].fillna('') + ' ' + df['last_name'].fillna('')).str.strip()
 
-                    # Select columns to display - name first for readability
-                    display_cols = ['name', 'current_title', 'current_company',
-                                    'screening_score', 'screening_fit_level', 'email', 'status',
-                                    'enriched_at', 'linkedin_url']
-                    available_cols = [c for c in display_cols if c in df.columns]
+                    # Toggle to show all columns
+                    show_all_db_cols = st.checkbox("Show all columns", value=False, key="db_show_all_cols")
 
-                    st.dataframe(
-                        df[available_cols] if available_cols else df,
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "name": st.column_config.TextColumn("Name"),
-                            "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
-                            "screening_score": st.column_config.NumberColumn("Score", format="%d"),
-                            "enriched_at": st.column_config.DatetimeColumn("Enriched", format="YYYY-MM-DD"),
-                        }
-                    )
+                    if show_all_db_cols:
+                        # Show all columns
+                        st.dataframe(
+                            df,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                                "screening_score": st.column_config.NumberColumn("Score", format="%d"),
+                                "enriched_at": st.column_config.DatetimeColumn("Enriched", format="YYYY-MM-DD"),
+                            }
+                        )
+                        st.caption(f"{len(df.columns)} columns")
+                    else:
+                        # Select columns to display - name first for readability
+                        display_cols = ['name', 'current_title', 'current_company',
+                                        'screening_score', 'screening_fit_level', 'email', 'status',
+                                        'enriched_at', 'linkedin_url']
+                        available_cols = [c for c in display_cols if c in df.columns]
+
+                        st.dataframe(
+                            df[available_cols] if available_cols else df,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "name": st.column_config.TextColumn("Name"),
+                                "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                                "screening_score": st.column_config.NumberColumn("Score", format="%d"),
+                                "enriched_at": st.column_config.DatetimeColumn("Enriched", format="YYYY-MM-DD"),
+                            }
+                        )
 
                     # Export button
                     st.download_button(

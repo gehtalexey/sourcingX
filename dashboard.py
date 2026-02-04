@@ -3890,30 +3890,45 @@ with tab_enrich:
 
             # Create a display dataframe with Name column
             display_df = enriched_df.copy()
+
+            # Debug: show available columns
+            with st.expander("Debug: Available columns", expanded=False):
+                st.write(f"Columns in enriched data: {list(display_df.columns)}")
+
+            # Handle name - check multiple possible column names
             if 'first_name' in display_df.columns and 'last_name' in display_df.columns:
                 display_df['name'] = (display_df['first_name'].fillna('') + ' ' + display_df['last_name'].fillna('')).str.strip()
-            elif 'name' not in display_df.columns:
-                display_df['name'] = display_df.get('first_name', '')
+            elif 'name' in display_df.columns:
+                pass  # Already has name
+            elif 'full_name' in display_df.columns:
+                display_df['name'] = display_df['full_name']
+            else:
+                display_df['name'] = ''
 
-            # Find linkedin URL column and create short version
+            # Find linkedin URL column - check many possible names
             url_col = None
-            for col in ['linkedin_profile_url', 'linkedin_url', 'public_url']:
+            url_candidates = ['linkedin_profile_url', 'linkedin_url', 'public_url', 'profile_url',
+                             'linkedinUrl', 'linkedin', 'url', 'profileUrl']
+            for col in url_candidates:
                 if col in display_df.columns:
                     url_col = col
                     break
 
             # Create short LinkedIn URL for display (linkedin.com/in/username)
+            def shorten_linkedin_url(url):
+                if pd.isna(url) or not url:
+                    return ''
+                url = str(url)
+                # Extract /in/username part
+                if '/in/' in url:
+                    match = url.split('/in/')[-1].split('/')[0].split('?')[0]
+                    return f"linkedin.com/in/{match}"
+                return url[:40] + '...' if len(url) > 40 else url
+
             if url_col and url_col in display_df.columns:
-                def shorten_linkedin_url(url):
-                    if pd.isna(url) or not url:
-                        return ''
-                    url = str(url)
-                    # Extract /in/username part
-                    if '/in/' in url:
-                        match = url.split('/in/')[-1].split('/')[0].split('?')[0]
-                        return f"linkedin.com/in/{match}"
-                    return url[:40] + '...' if len(url) > 40 else url
-                display_df['linkedin'] = display_df[url_col].apply(shorten_linkedin_url)
+                display_df['linkedin_short'] = display_df[url_col].apply(shorten_linkedin_url)
+            else:
+                display_df['linkedin_short'] = ''
 
             if show_all_cols:
                 # Show all columns
@@ -3930,7 +3945,7 @@ with tab_enrich:
                 st.caption(f"Showing {min(20, len(display_df))} of {len(display_df)} profiles | {len(display_df.columns)} columns")
             else:
                 # Show key columns: name, company, title, short linkedin url
-                display_cols = ['name', 'current_company', 'current_title', 'title', 'headline', 'linkedin']
+                display_cols = ['name', 'current_company', 'current_title', 'title', 'headline', 'linkedin_short']
                 available_cols = [c for c in display_cols if c and c in display_df.columns]
                 # Remove duplicates while preserving order
                 available_cols = list(dict.fromkeys(available_cols))
@@ -3941,7 +3956,7 @@ with tab_enrich:
                         use_container_width=True,
                         hide_index=True,
                         column_config={
-                            "linkedin": st.column_config.TextColumn("LinkedIn"),
+                            "linkedin_short": st.column_config.TextColumn("LinkedIn"),
                         }
                     )
 

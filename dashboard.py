@@ -3888,10 +3888,24 @@ with tab_enrich:
             # Toggle to show all columns
             show_all_cols = st.checkbox("Show all columns", value=False, key="enrich_show_all_cols")
 
+            # Create a display dataframe with Name column
+            display_df = enriched_df.copy()
+            if 'first_name' in display_df.columns and 'last_name' in display_df.columns:
+                display_df['name'] = (display_df['first_name'].fillna('') + ' ' + display_df['last_name'].fillna('')).str.strip()
+            elif 'name' not in display_df.columns:
+                display_df['name'] = display_df.get('first_name', '')
+
+            # Find linkedin URL column
+            url_col = None
+            for col in ['linkedin_profile_url', 'linkedin_url', 'public_url']:
+                if col in display_df.columns:
+                    url_col = col
+                    break
+
             if show_all_cols:
                 # Show all columns
                 st.dataframe(
-                    enriched_df.head(20),
+                    display_df.head(20),
                     use_container_width=True,
                     hide_index=True,
                     column_config={
@@ -3900,18 +3914,21 @@ with tab_enrich:
                         "linkedin_profile_url": st.column_config.LinkColumn("LinkedIn"),
                     }
                 )
-                st.caption(f"Showing {min(20, len(enriched_df))} of {len(enriched_df)} profiles | {len(enriched_df.columns)} columns")
+                st.caption(f"Showing {min(20, len(display_df))} of {len(display_df)} profiles | {len(display_df.columns)} columns")
             else:
-                # Show key columns only
-                display_cols = ['first_name', 'last_name', 'headline', 'current_title', 'current_company',
-                               'location', 'summary', 'skills', 'linkedin_url', 'public_url']
-                available_cols = [c for c in display_cols if c in enriched_df.columns]
+                # Show key columns: name, company, title, linkedin url
+                display_cols = ['name', 'current_company', 'current_title', 'title', 'headline', url_col] if url_col else ['name', 'current_company', 'current_title', 'title', 'headline']
+                available_cols = [c for c in display_cols if c and c in display_df.columns]
+                # Remove duplicates while preserving order
+                available_cols = list(dict.fromkeys(available_cols))
+
                 if available_cols:
                     st.dataframe(
-                        enriched_df[available_cols].head(20),
+                        display_df[available_cols].head(20),
                         use_container_width=True,
                         hide_index=True,
                         column_config={
+                            url_col: st.column_config.LinkColumn("LinkedIn") if url_col else None,
                             "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                             "public_url": st.column_config.LinkColumn("LinkedIn")
                         }
@@ -4535,8 +4552,12 @@ with tab_database:
                     st.info(f"Showing **{len(profiles)}** profiles")
                     df = profiles_to_dataframe(profiles)
 
-                    # Select columns to display
-                    display_cols = ['first_name', 'last_name', 'current_title', 'current_company',
+                    # Create combined name column for display
+                    if 'first_name' in df.columns and 'last_name' in df.columns:
+                        df['name'] = (df['first_name'].fillna('') + ' ' + df['last_name'].fillna('')).str.strip()
+
+                    # Select columns to display - name first for readability
+                    display_cols = ['name', 'current_title', 'current_company',
                                     'screening_score', 'screening_fit_level', 'email', 'status',
                                     'enriched_at', 'linkedin_url']
                     available_cols = [c for c in display_cols if c in df.columns]
@@ -4546,6 +4567,7 @@ with tab_database:
                         use_container_width=True,
                         hide_index=True,
                         column_config={
+                            "name": st.column_config.TextColumn("Name"),
                             "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                             "screening_score": st.column_config.NumberColumn("Score", format="%d"),
                             "enriched_at": st.column_config.DatetimeColumn("Enriched", format="YYYY-MM-DD"),

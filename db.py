@@ -427,17 +427,31 @@ def update_profile_enrichment(client: SupabaseClient, linkedin_url: str, crustda
     }
 
     if crustdata_response:
-        data['first_name'] = crustdata_response.get('first_name')
-        data['last_name'] = crustdata_response.get('last_name')
+        # Handle name - Crustdata may return 'name' as full name or first_name/last_name separately
+        first_name = crustdata_response.get('first_name')
+        last_name = crustdata_response.get('last_name')
+
+        # If no first/last name, try to parse from 'name' field
+        if not first_name and not last_name:
+            full_name = crustdata_response.get('name', '')
+            if full_name:
+                name_parts = full_name.strip().split(' ', 1)
+                first_name = name_parts[0] if name_parts else None
+                last_name = name_parts[1] if len(name_parts) > 1 else None
+
+        data['first_name'] = first_name
+        data['last_name'] = last_name
         data['headline'] = crustdata_response.get('headline')
         data['location'] = crustdata_response.get('location')
         data['summary'] = crustdata_response.get('summary')
 
+        # Handle positions - Crustdata returns positions array
         positions = crustdata_response.get('positions', [])
         if positions:
             current = positions[0]
             data['current_title'] = current.get('title')
-            data['current_company'] = current.get('company_name')
+            # company_name or company - Crustdata may use either
+            data['current_company'] = current.get('company_name') or current.get('company')
 
     # Remove None values
     data = {k: v for k, v in data.items() if v is not None}

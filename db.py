@@ -154,6 +154,11 @@ def normalize_linkedin_url(url: str) -> str:
     if not url:
         return url
     url = str(url).strip().rstrip('/')
+    # Add https:// if missing
+    if url.startswith('www.'):
+        url = 'https://' + url
+    elif not url.startswith('http'):
+        url = 'https://' + url
     if '?' in url:
         url = url.split('?')[0]
     return url.lower()

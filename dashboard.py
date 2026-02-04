@@ -31,6 +31,19 @@ try:
 except ImportError:
     HAS_PLYER = False
 
+# Database module (Supabase integration)
+try:
+    from db import (
+        get_supabase_client, check_connection, upsert_profiles_from_phantombuster,
+        update_profile_enrichment, update_profile_screening, get_all_profiles,
+        get_pipeline_stats, get_profiles_by_fit_level, get_all_linkedin_urls,
+        get_dedup_stats, profiles_to_dataframe
+    )
+    from pb_dedup import filter_results_against_database
+    HAS_DATABASE = True
+except ImportError:
+    HAS_DATABASE = False
+
 # Authentication (optional - only enabled when auth secrets are configured)
 try:
     import streamlit_authenticator as stauth
@@ -2041,8 +2054,8 @@ if 'results' in st.session_state and st.session_state['results']:
     st.info(f"📊 **{len(st.session_state['results'])}** profiles loaded")
 
 # Create tabs
-tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening = st.tabs([
-    "1. Load", "2. Filter", "3. Enrich", "4. Filter+", "5. AI Screen"
+tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_database = st.tabs([
+    "1. Load", "2. Filter", "3. Enrich", "4. Filter+", "5. AI Screen", "6. Database"
 ])
 
 # ========== TAB 1: Upload ==========
@@ -2154,10 +2167,26 @@ with tab_upload:
                                     pb_df = fetch_phantombuster_result_csv(pb_key, selected_agent['id'], debug=False, filename=filename)
                                     if not pb_df.empty:
                                         pb_df = normalize_phantombuster_columns(pb_df)
+
+                                        # Auto-save to Supabase database
+                                        db_stats = None
+                                        if HAS_DATABASE:
+                                            try:
+                                                db_client = get_supabase_client()
+                                                if db_client and check_connection(db_client):
+                                                    db_stats = upsert_profiles_from_phantombuster(db_client, pb_df.to_dict('records'))
+                                            except Exception as e:
+                                                st.warning(f"Database save failed: {e}")
+
                                         st.session_state['results'] = pb_df.to_dict('records')
                                         st.session_state['results_df'] = pb_df
                                         st.session_state['preview_page'] = 0  # Reset pagination
-                                        st.success(f"Loaded **{len(pb_df)}** profiles from **{filename}**!")
+
+                                        # Show success with DB stats
+                                        if db_stats:
+                                            st.success(f"Loaded **{len(pb_df)}** profiles from **{filename}**! (DB: {db_stats.get('inserted', 0)} new, {db_stats.get('updated', 0)} updated)")
+                                        else:
+                                            st.success(f"Loaded **{len(pb_df)}** profiles from **{filename}**!")
                                         st.rerun()
                                     else:
                                         st.error("No results found. File may have been deleted from PhantomBuster.")
@@ -2170,6 +2199,16 @@ with tab_upload:
                                     pb_df = fetch_phantombuster_result_csv(pb_key, selected_agent['id'], debug=False, filename=filename)
                                     if not pb_df.empty:
                                         pb_df = normalize_phantombuster_columns(pb_df)
+
+                                        # Auto-save to Supabase database
+                                        db_stats = None
+                                        if HAS_DATABASE:
+                                            try:
+                                                db_client = get_supabase_client()
+                                                if db_client and check_connection(db_client):
+                                                    db_stats = upsert_profiles_from_phantombuster(db_client, pb_df.to_dict('records'))
+                                            except Exception as e:
+                                                st.warning(f"Database save failed: {e}")
 
                                         # Merge with existing results
                                         if 'results_df' in st.session_state and not st.session_state['results_df'].empty:
@@ -2186,11 +2225,13 @@ with tab_upload:
                                             new_count = len(combined_df) - len(existing_df)
                                             st.session_state['results'] = combined_df.to_dict('records')
                                             st.session_state['results_df'] = combined_df
-                                            st.success(f"Added **{new_count}** new profiles (total: **{len(combined_df)}**)")
+                                            db_msg = f" (DB: {db_stats.get('inserted', 0)} new)" if db_stats else ""
+                                            st.success(f"Added **{new_count}** new profiles (total: **{len(combined_df)}**){db_msg}")
                                         else:
                                             st.session_state['results'] = pb_df.to_dict('records')
                                             st.session_state['results_df'] = pb_df
-                                            st.success(f"Loaded **{len(pb_df)}** profiles from **{filename}**!")
+                                            db_msg = f" (DB: {db_stats.get('inserted', 0)} new)" if db_stats else ""
+                                            st.success(f"Loaded **{len(pb_df)}** profiles from **{filename}**!{db_msg}")
 
                                         st.session_state['preview_page'] = 0
                                         st.rerun()
@@ -2513,6 +2554,17 @@ with tab_upload:
                 st.rerun()
 
         else:  # idle
+            # Database deduplication info
+            if HAS_DATABASE:
+                try:
+                    db_client = get_supabase_client()
+                    if db_client and check_connection(db_client):
+                        dedup_stats = get_dedup_stats(db_client)
+                        if dedup_stats.get('total_profiles', 0) > 0:
+                            st.info(f"Database: **{dedup_stats.get('total_profiles', 0)}** profiles stored, **{dedup_stats.get('recently_enriched', 0)}** recently enriched")
+                except:
+                    pass
+
             # Button is enabled when phantom is found, validates URL on click
             if st.button("Launch", type="primary", key="pb_launch_btn", disabled=not user_phantom):
                 # Validate URL on click
@@ -3217,11 +3269,27 @@ with tab_enrich:
                         # Save enriched data separately - don't overwrite original loaded data
                         st.session_state['enriched_results'] = successful
                         st.session_state['enriched_df'] = flatten_for_csv(successful)
+
+                        # Auto-save enrichment to Supabase database
+                        db_saved = 0
+                        if HAS_DATABASE:
+                            try:
+                                db_client = get_supabase_client()
+                                if db_client and check_connection(db_client):
+                                    for profile in successful:
+                                        linkedin_url = profile.get('linkedin_profile_url') or profile.get('linkedin_url')
+                                        if linkedin_url:
+                                            update_profile_enrichment(db_client, linkedin_url, profile)
+                                            db_saved += 1
+                            except Exception as e:
+                                st.warning(f"Database save failed: {e}")
+
                         # Store message to show after rerun
+                        db_msg = f" (DB: {db_saved} saved)" if db_saved > 0 else ""
                         if errors:
-                            st.session_state['enrichment_message'] = f"warning:Enriched {len(successful)} profiles. {len(errors)} failed: {errors[0].get('error', 'Unknown')[:150]}"
+                            st.session_state['enrichment_message'] = f"warning:Enriched {len(successful)} profiles{db_msg}. {len(errors)} failed: {errors[0].get('error', 'Unknown')[:150]}"
                         else:
-                            st.session_state['enrichment_message'] = f"success:Enriched {len(successful)} profiles successfully!"
+                            st.session_state['enrichment_message'] = f"success:Enriched {len(successful)} profiles successfully!{db_msg}"
                         st.rerun()
                     elif errors:
                         # All failed - show error, original data stays intact
@@ -3492,7 +3560,30 @@ with tab_screening:
 
                 # Complete
                 elapsed = time.time() - start_time
-                status_text.success(f"Completed {len(screening_results)} profiles in {elapsed:.1f}s")
+
+                # Auto-save screening results to Supabase database
+                db_saved = 0
+                if HAS_DATABASE:
+                    try:
+                        db_client = get_supabase_client()
+                        if db_client and check_connection(db_client):
+                            for result in screening_results:
+                                linkedin_url = result.get('linkedin_url') or result.get('public_url')
+                                if linkedin_url and 'error' not in result:
+                                    update_profile_screening(
+                                        db_client,
+                                        linkedin_url,
+                                        score=result.get('score', 0),
+                                        fit_level=result.get('fit', ''),
+                                        summary=result.get('summary', ''),
+                                        reasoning=result.get('reasoning', '')
+                                    )
+                                    db_saved += 1
+                    except Exception as e:
+                        pass  # Don't interrupt flow for DB errors
+
+                db_msg = f" (DB: {db_saved} saved)" if db_saved > 0 else ""
+                status_text.success(f"Completed {len(screening_results)} profiles in {elapsed:.1f}s{db_msg}")
 
                 st.session_state['screening_results'] = screening_results
                 st.session_state['screening_in_progress'] = False
@@ -3681,3 +3772,117 @@ with tab_screening:
                     del st.session_state['screening_results']
                     st.rerun()
 
+# ========== TAB 6: Database ==========
+with tab_database:
+    st.markdown("### Profile Database")
+    st.caption("View and manage all profiles stored in Supabase")
+
+    if not HAS_DATABASE:
+        st.warning("Database module not available. Check db.py import.")
+    else:
+        try:
+            db_client = get_supabase_client()
+            if not db_client:
+                st.warning("Supabase not configured. Add 'supabase_url' and 'supabase_key' to secrets.")
+            elif not check_connection(db_client):
+                st.error("Cannot connect to Supabase. Check your credentials.")
+            else:
+                # Connection successful - show stats
+                st.success("Connected to Supabase")
+
+                # Pipeline stats
+                stats = get_pipeline_stats(db_client)
+                if stats:
+                    st.markdown("#### Pipeline Overview")
+                    stat_cols = st.columns(6)
+                    stat_cols[0].metric("Total", stats.get('total', 0))
+                    stat_cols[1].metric("Scraped", stats.get('scraped', 0))
+                    stat_cols[2].metric("Enriched", stats.get('enriched', 0))
+                    stat_cols[3].metric("Screened", stats.get('screened', 0))
+                    stat_cols[4].metric("Contacted", stats.get('contacted', 0))
+                    stat_cols[5].metric("Stale (>6mo)", stats.get('stale_profiles', 0))
+
+                st.divider()
+
+                # View profiles by fit level
+                st.markdown("#### Browse Profiles")
+
+                view_options = ["All Profiles", "Strong Fit", "Good Fit", "Partial Fit", "Not a Fit", "Needs Enrichment", "Needs Screening"]
+                selected_view = st.selectbox("View", view_options, key="db_view_select")
+
+                # Fetch profiles based on selection
+                profiles = []
+                if selected_view == "All Profiles":
+                    profiles = get_all_profiles(db_client, limit=500)
+                elif selected_view in ["Strong Fit", "Good Fit", "Partial Fit", "Not a Fit"]:
+                    profiles = get_profiles_by_fit_level(db_client, selected_view, limit=500)
+                elif selected_view == "Needs Enrichment":
+                    from db import get_profiles_needing_enrichment
+                    profiles = get_profiles_needing_enrichment(db_client, limit=500)
+                elif selected_view == "Needs Screening":
+                    from db import get_profiles_needing_screening
+                    profiles = get_profiles_needing_screening(db_client, limit=500)
+
+                if profiles:
+                    st.info(f"Showing **{len(profiles)}** profiles")
+                    df = profiles_to_dataframe(profiles)
+
+                    # Select columns to display
+                    display_cols = ['first_name', 'last_name', 'current_title', 'current_company',
+                                    'screening_score', 'screening_fit_level', 'email', 'status',
+                                    'enriched_at', 'linkedin_url']
+                    available_cols = [c for c in display_cols if c in df.columns]
+
+                    st.dataframe(
+                        df[available_cols] if available_cols else df,
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config={
+                            "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                            "screening_score": st.column_config.NumberColumn("Score", format="%d"),
+                            "enriched_at": st.column_config.DatetimeColumn("Enriched", format="YYYY-MM-DD"),
+                        }
+                    )
+
+                    # Export button
+                    st.download_button(
+                        f"Download {selected_view} (CSV)",
+                        df.to_csv(index=False),
+                        f"database_{selected_view.lower().replace(' ', '_')}.csv",
+                        "text/csv"
+                    )
+                else:
+                    st.info(f"No profiles found for '{selected_view}'")
+
+                # Load from database to session
+                st.divider()
+                st.markdown("#### Load from Database")
+                st.caption("Load profiles from database into the current session for processing")
+
+                load_options = ["Strong Fit", "Good Fit", "All Screened", "All Enriched"]
+                load_selection = st.selectbox("Load profiles", load_options, key="db_load_select")
+
+                if st.button("Load to Session", key="db_load_btn"):
+                    load_profiles = []
+                    if load_selection == "Strong Fit":
+                        load_profiles = get_profiles_by_fit_level(db_client, "Strong Fit", limit=1000)
+                    elif load_selection == "Good Fit":
+                        load_profiles = get_profiles_by_fit_level(db_client, "Good Fit", limit=1000)
+                    elif load_selection == "All Screened":
+                        from db import get_profiles_by_status
+                        load_profiles = get_profiles_by_status(db_client, "screened", limit=1000)
+                    elif load_selection == "All Enriched":
+                        from db import get_profiles_by_status
+                        load_profiles = get_profiles_by_status(db_client, "enriched", limit=1000)
+
+                    if load_profiles:
+                        load_df = profiles_to_dataframe(load_profiles)
+                        st.session_state['results'] = load_profiles
+                        st.session_state['results_df'] = load_df
+                        st.success(f"Loaded **{len(load_profiles)}** profiles from database!")
+                        st.rerun()
+                    else:
+                        st.warning("No profiles found to load")
+
+        except Exception as e:
+            st.error(f"Database error: {e}")

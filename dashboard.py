@@ -1869,26 +1869,98 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
         return [{'error': str(e), 'linkedin_url': u} for u in urls]
 
 
+def normalize_crustdata_profile(record: dict) -> dict:
+    """Normalize a single Crustdata profile to consistent column names."""
+    normalized = {}
+
+    # Keep original linkedin URL
+    normalized['linkedin_url'] = record.get('_original_linkedin_url') or record.get('linkedin_profile_url') or record.get('linkedin_url')
+
+    # Name handling
+    first_name = record.get('first_name')
+    last_name = record.get('last_name')
+    if not first_name and not last_name:
+        full_name = record.get('name', '')
+        if full_name:
+            parts = str(full_name).strip().split(' ', 1)
+            first_name = parts[0] if parts else ''
+            last_name = parts[1] if len(parts) > 1 else ''
+    normalized['first_name'] = first_name or ''
+    normalized['last_name'] = last_name or ''
+    normalized['name'] = f"{first_name or ''} {last_name or ''}".strip()
+
+    # Basic fields
+    normalized['headline'] = record.get('headline') or ''
+    normalized['location'] = record.get('location') or ''
+    normalized['summary'] = record.get('summary') or ''
+
+    # Extract current position from positions array
+    positions = record.get('positions', [])
+    if isinstance(positions, str):
+        try:
+            positions = json.loads(positions)
+        except:
+            positions = []
+
+    if positions and isinstance(positions, list) and len(positions) > 0:
+        current_pos = positions[0]
+        if isinstance(current_pos, dict):
+            normalized['current_title'] = current_pos.get('title') or current_pos.get('job_title') or ''
+            normalized['current_company'] = current_pos.get('company_name') or current_pos.get('company') or current_pos.get('organization') or ''
+            normalized['current_years_in_role'] = current_pos.get('duration_in_role') or current_pos.get('years_in_role') or ''
+            normalized['current_years_at_company'] = current_pos.get('duration_at_company') or current_pos.get('years_at_company') or ''
+    else:
+        # Fallback to top-level fields
+        normalized['current_title'] = record.get('current_title') or record.get('title') or record.get('job_title') or ''
+        normalized['current_company'] = record.get('current_company') or record.get('company') or record.get('company_name') or ''
+        normalized['current_years_in_role'] = record.get('current_years_in_role') or ''
+        normalized['current_years_at_company'] = record.get('current_years_at_company') or ''
+
+    # Skills
+    skills = record.get('skills', [])
+    if isinstance(skills, list):
+        normalized['skills'] = ', '.join(str(s) for s in skills[:50])
+    elif skills:
+        normalized['skills'] = str(skills)
+    else:
+        normalized['skills'] = ''
+
+    # Education
+    education = record.get('education', [])
+    if isinstance(education, str):
+        try:
+            education = json.loads(education)
+        except:
+            pass
+    if isinstance(education, list) and len(education) > 0:
+        edu = education[0]
+        if isinstance(edu, dict):
+            normalized['education'] = edu.get('school') or edu.get('school_name') or ''
+        else:
+            normalized['education'] = str(edu)
+    else:
+        normalized['education'] = ''
+
+    # Other useful fields
+    normalized['connections_count'] = record.get('connections_count') or record.get('connections') or ''
+    normalized['followers_count'] = record.get('followers_count') or record.get('followers') or ''
+
+    # Keep full positions/education as JSON for reference
+    normalized['positions_json'] = json.dumps(record.get('positions', [])) if record.get('positions') else ''
+    normalized['education_json'] = json.dumps(record.get('education', [])) if record.get('education') else ''
+
+    return normalized
+
+
 def flatten_for_csv(data: list[dict]) -> pd.DataFrame:
-    """Flatten nested data for CSV export."""
-    flat_records = []
+    """Flatten and normalize Crustdata profiles for display and CSV export."""
+    normalized_records = []
 
     for record in data:
-        flat = {}
-        for key, value in record.items():
-            if isinstance(value, dict):
-                for sub_key, sub_value in value.items():
-                    if isinstance(sub_value, (list, dict)):
-                        flat[f"{key}_{sub_key}"] = json.dumps(sub_value)
-                    else:
-                        flat[f"{key}_{sub_key}"] = sub_value
-            elif isinstance(value, list):
-                flat[key] = json.dumps(value)
-            else:
-                flat[key] = value
-        flat_records.append(flat)
+        normalized = normalize_crustdata_profile(record)
+        normalized_records.append(normalized)
 
-    return pd.DataFrame(flat_records)
+    return pd.DataFrame(normalized_records)
 
 
 # ========== PRE-FILTERING FUNCTIONS ==========
@@ -3888,72 +3960,20 @@ with tab_enrich:
             # Toggle to show all columns
             show_all_cols = st.checkbox("Show all columns", value=False, key="enrich_show_all_cols")
 
-            # Create a display dataframe with Name column
+            # Data is already normalized by flatten_for_csv with consistent column names:
+            # name, first_name, last_name, current_company, current_title, linkedin_url, etc.
             display_df = enriched_df.copy()
 
             # Debug: show available columns
             with st.expander("Debug: Available columns", expanded=False):
                 st.write(f"Columns in enriched data: {list(display_df.columns)}")
-
-            # Handle name - check multiple possible column names
-            if 'first_name' in display_df.columns and 'last_name' in display_df.columns:
-                display_df['name'] = (display_df['first_name'].fillna('') + ' ' + display_df['last_name'].fillna('')).str.strip()
-            elif 'name' in display_df.columns:
-                pass  # Already has name
-            elif 'full_name' in display_df.columns:
-                display_df['name'] = display_df['full_name']
-            else:
-                display_df['name'] = ''
-
-            # Handle company - check multiple possible column names
-            company_candidates = ['current_company', 'company', 'companyName', 'company_name',
-                                 'current_company_name', 'employer', 'organization']
-            company_col = None
-            for col in company_candidates:
-                if col in display_df.columns:
-                    company_col = col
-                    break
-            if company_col and company_col != 'company':
-                display_df['company'] = display_df[company_col]
-            elif 'company' not in display_df.columns:
-                display_df['company'] = ''
-
-            # Handle title - check multiple possible column names
-            title_candidates = ['current_title', 'title', 'job_title', 'position', 'jobTitle']
-            title_col = None
-            for col in title_candidates:
-                if col in display_df.columns:
-                    title_col = col
-                    break
-            if title_col and title_col != 'current_title':
-                display_df['current_title'] = display_df[title_col]
-            elif 'current_title' not in display_df.columns:
-                display_df['current_title'] = ''
-
-            # Find linkedin URL column - prefer original URL, then check other names
-            url_col = None
-            url_candidates = ['_original_linkedin_url', 'linkedin_profile_url', 'linkedin_url', 'public_url',
-                             'profile_url', 'linkedinUrl', 'linkedin', 'url', 'profileUrl']
-            for col in url_candidates:
-                if col in display_df.columns:
-                    url_col = col
-                    break
-
-            # Create clean LinkedIn URL for display (https://linkedin.com/in/username)
-            def clean_linkedin_url(url):
-                if pd.isna(url) or not url:
-                    return ''
-                url = str(url)
-                # Extract /in/username part and create clean URL
-                if '/in/' in url:
-                    username = url.split('/in/')[-1].split('/')[0].split('?')[0]
-                    return f"https://linkedin.com/in/{username}"
-                return url
-
-            if url_col and url_col in display_df.columns:
-                display_df['linkedin'] = display_df[url_col].apply(clean_linkedin_url)
-            else:
-                display_df['linkedin'] = ''
+                # Show sample values for key columns
+                if len(display_df) > 0:
+                    st.write("Sample row:")
+                    sample = display_df.iloc[0]
+                    for col in ['name', 'current_company', 'current_title', 'linkedin_url']:
+                        if col in display_df.columns:
+                            st.write(f"  {col}: {sample.get(col, 'N/A')}")
 
             if show_all_cols:
                 # Show all columns
@@ -3963,17 +3983,14 @@ with tab_enrich:
                     hide_index=True,
                     column_config={
                         "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
-                        "public_url": st.column_config.LinkColumn("LinkedIn"),
-                        "linkedin_profile_url": st.column_config.LinkColumn("LinkedIn"),
                     }
                 )
                 st.caption(f"Showing {min(20, len(display_df))} of {len(display_df)} profiles | {len(display_df.columns)} columns")
             else:
                 # Show key columns: name, company, title, linkedin url
-                display_cols = ['name', 'company', 'current_title', 'linkedin']
-                available_cols = [c for c in display_cols if c and c in display_df.columns]
-                # Remove duplicates while preserving order
-                available_cols = list(dict.fromkeys(available_cols))
+                # These are normalized column names from flatten_for_csv
+                display_cols = ['name', 'current_company', 'current_title', 'linkedin_url']
+                available_cols = [c for c in display_cols if c in display_df.columns]
 
                 if available_cols:
                     st.dataframe(
@@ -3981,9 +3998,13 @@ with tab_enrich:
                         use_container_width=True,
                         hide_index=True,
                         column_config={
-                            "linkedin": st.column_config.LinkColumn("LinkedIn"),
+                            "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                            "current_company": st.column_config.TextColumn("Company"),
+                            "current_title": st.column_config.TextColumn("Title"),
                         }
                     )
+                else:
+                    st.warning("No data columns available. Check Debug expander for column names.")
 
             # Download full enriched data
             st.download_button(

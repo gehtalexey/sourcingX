@@ -2905,22 +2905,47 @@ with tab_upload:
         st.markdown("### Preview")
         preview_df = st.session_state['results_df']
 
+        # Pagination
+        page_size = 20
+        total_profiles = len(preview_df)
+        total_pages = max(1, (total_profiles + page_size - 1) // page_size)
+
+        if 'upload_preview_page' not in st.session_state:
+            st.session_state['upload_preview_page'] = 0
+
+        current_page = st.session_state['upload_preview_page']
+        start_idx = current_page * page_size
+        end_idx = min(start_idx + page_size, total_profiles)
+
         # Show key columns
         preview_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'linkedin_url', 'email']
         available_cols = [c for c in preview_cols if c in preview_df.columns]
 
+        page_df = preview_df.iloc[start_idx:end_idx]
         if available_cols:
             st.dataframe(
-                preview_df[available_cols].head(20),
+                page_df[available_cols],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
                     "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                 }
             )
-            st.caption(f"Showing first 20 of {len(preview_df)} profiles")
         else:
-            st.dataframe(preview_df.head(20), use_container_width=True, hide_index=True)
+            st.dataframe(page_df, use_container_width=True, hide_index=True)
+
+        # Pagination controls
+        col_prev, col_info, col_next = st.columns([1, 2, 1])
+        with col_prev:
+            if st.button("← Previous", key="upload_prev", disabled=current_page == 0):
+                st.session_state['upload_preview_page'] = current_page - 1
+                st.rerun()
+        with col_info:
+            st.caption(f"Showing {start_idx + 1}-{end_idx} of {total_profiles} profiles (Page {current_page + 1}/{total_pages})")
+        with col_next:
+            if st.button("Next →", key="upload_next", disabled=current_page >= total_pages - 1):
+                st.session_state['upload_preview_page'] = current_page + 1
+                st.rerun()
 
         st.divider()
         st.info("**Next step:** Click on **2. Filter** tab to filter profiles (optional) or **3. Enrich** to enrich directly")

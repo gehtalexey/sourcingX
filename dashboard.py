@@ -3895,12 +3895,25 @@ with tab_enrich:
             elif 'name' not in display_df.columns:
                 display_df['name'] = display_df.get('first_name', '')
 
-            # Find linkedin URL column
+            # Find linkedin URL column and create short version
             url_col = None
             for col in ['linkedin_profile_url', 'linkedin_url', 'public_url']:
                 if col in display_df.columns:
                     url_col = col
                     break
+
+            # Create short LinkedIn URL for display (linkedin.com/in/username)
+            if url_col and url_col in display_df.columns:
+                def shorten_linkedin_url(url):
+                    if pd.isna(url) or not url:
+                        return ''
+                    url = str(url)
+                    # Extract /in/username part
+                    if '/in/' in url:
+                        match = url.split('/in/')[-1].split('/')[0].split('?')[0]
+                        return f"linkedin.com/in/{match}"
+                    return url[:40] + '...' if len(url) > 40 else url
+                display_df['linkedin'] = display_df[url_col].apply(shorten_linkedin_url)
 
             if show_all_cols:
                 # Show all columns
@@ -3916,8 +3929,8 @@ with tab_enrich:
                 )
                 st.caption(f"Showing {min(20, len(display_df))} of {len(display_df)} profiles | {len(display_df.columns)} columns")
             else:
-                # Show key columns: name, company, title, linkedin url
-                display_cols = ['name', 'current_company', 'current_title', 'title', 'headline', url_col] if url_col else ['name', 'current_company', 'current_title', 'title', 'headline']
+                # Show key columns: name, company, title, short linkedin url
+                display_cols = ['name', 'current_company', 'current_title', 'title', 'headline', 'linkedin']
                 available_cols = [c for c in display_cols if c and c in display_df.columns]
                 # Remove duplicates while preserving order
                 available_cols = list(dict.fromkeys(available_cols))
@@ -3928,9 +3941,7 @@ with tab_enrich:
                         use_container_width=True,
                         hide_index=True,
                         column_config={
-                            url_col: st.column_config.LinkColumn("LinkedIn") if url_col else None,
-                            "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
-                            "public_url": st.column_config.LinkColumn("LinkedIn")
+                            "linkedin": st.column_config.TextColumn("LinkedIn"),
                         }
                     )
 
@@ -3949,13 +3960,14 @@ with tab_enrich:
                 # Check for already enriched profiles in database
                 already_enriched = set()
                 skip_enriched = False
+                db_check_error = None
                 if HAS_DATABASE:
                     try:
                         db_client = get_supabase_client()
                         if db_client and check_connection(db_client):
                             already_enriched = get_enriched_urls(db_client)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        db_check_error = str(e)
 
                 # Filter out already enriched URLs
                 new_urls = []
@@ -3966,6 +3978,19 @@ with tab_enrich:
                         skipped_urls.append(url)
                     else:
                         new_urls.append(url)
+
+                # Debug info
+                with st.expander("Debug: Enrichment check", expanded=False):
+                    st.write(f"URLs in loaded data: {len(urls)}")
+                    st.write(f"Enriched URLs in DB: {len(already_enriched)}")
+                    st.write(f"New (not enriched): {len(new_urls)}")
+                    st.write(f"Already enriched: {len(skipped_urls)}")
+                    if db_check_error:
+                        st.error(f"DB check error: {db_check_error}")
+                    if already_enriched:
+                        st.write("Sample enriched URLs from DB:", list(already_enriched)[:3])
+                    if urls:
+                        st.write("Sample URLs from loaded data (normalized):", [normalize_linkedin_url(u) for u in urls[:3]])
 
                 # Show stats
                 if skipped_urls:

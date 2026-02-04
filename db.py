@@ -618,8 +618,9 @@ def get_all_linkedin_urls(client: SupabaseClient) -> list:
 
 
 def get_enriched_urls(client: SupabaseClient) -> set:
-    """Get all LinkedIn URLs that have been enriched (status='enriched' or 'screened')."""
-    result = client.select('profiles', 'linkedin_url', {'status': 'in.(enriched,screened)'}, limit=50000)
+    """Get all LinkedIn URLs that have been enriched (have enriched_at timestamp)."""
+    # Use enriched_at not null as the indicator - more reliable than status
+    result = client.select('profiles', 'linkedin_url', {'enriched_at': 'not.is.null'}, limit=50000)
     # Normalize URLs for comparison
     urls = set()
     for p in result:

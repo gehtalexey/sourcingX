@@ -1441,6 +1441,33 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.rename(columns=rename_dict)
 
+    # Fallback: auto-detect LinkedIn URL column if not found
+    if 'linkedin_url' not in df.columns:
+        def is_regular_linkedin_url(url):
+            """Check if URL is a regular LinkedIn profile URL (not Sales Nav, company, etc.)"""
+            if not url or pd.isna(url):
+                return False
+            url = str(url).lower()
+            # Must have linkedin.com and /in/ (profile URL)
+            # Exclude: /sales/, /company/, /jobs/, /school/, /groups/
+            if 'linkedin.com' in url and '/in/' in url:
+                if '/sales/' not in url:
+                    return True
+            return False
+
+        # Find columns with "linkedin" in the name
+        linkedin_cols = [c for c in df.columns if 'linkedin' in c.lower()]
+
+        for col in linkedin_cols:
+            # Check first 5 non-empty values to verify it contains regular LinkedIn URLs
+            sample_values = df[col].dropna().head(5).tolist()
+            if sample_values:
+                valid_count = sum(1 for v in sample_values if is_regular_linkedin_url(v))
+                # If at least 60% of samples are valid LinkedIn profile URLs, use this column
+                if valid_count >= len(sample_values) * 0.6:
+                    df = df.rename(columns={col: 'linkedin_url'})
+                    break
+
     # Use headline as current_title if current_title doesn't exist
     if 'headline' in df.columns and 'current_title' not in df.columns:
         df['current_title'] = df['headline']

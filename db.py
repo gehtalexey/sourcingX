@@ -617,6 +617,18 @@ def get_all_linkedin_urls(client: SupabaseClient) -> list:
     return [p['linkedin_url'] for p in result if p.get('linkedin_url')]
 
 
+def get_enriched_urls(client: SupabaseClient) -> set:
+    """Get all LinkedIn URLs that have been enriched (status='enriched' or 'screened')."""
+    result = client.select('profiles', 'linkedin_url', {'status': 'in.(enriched,screened)'}, limit=50000)
+    # Normalize URLs for comparison
+    urls = set()
+    for p in result:
+        url = p.get('linkedin_url')
+        if url:
+            urls.add(normalize_linkedin_url(url))
+    return urls
+
+
 def get_recently_enriched_urls(client: SupabaseClient, months: int = 6) -> list:
     """Get LinkedIn URLs enriched within the last N months."""
     cutoff_date = (datetime.utcnow() - timedelta(days=months * 30)).isoformat()

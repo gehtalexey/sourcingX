@@ -38,7 +38,7 @@ try:
         update_profile_enrichment, update_profile_screening, get_all_profiles,
         get_pipeline_stats, get_profiles_by_fit_level, get_all_linkedin_urls,
         get_dedup_stats, profiles_to_dataframe, get_usage_summary, get_usage_logs,
-        get_usage_by_date
+        get_usage_by_date, get_enriched_urls, normalize_linkedin_url
     )
     from pb_dedup import filter_results_against_database, update_phantombuster_with_skip_list, get_skip_list_from_database
     HAS_DATABASE = True
@@ -3946,81 +3946,112 @@ with tab_enrich:
             urls = extract_urls_from_phantombuster(results_df)
 
             if urls:
-                st.info(f"**{len(urls)}** profiles ready for enrichment")
+                # Check for already enriched profiles in database
+                already_enriched = set()
+                skip_enriched = False
+                if HAS_DATABASE:
+                    try:
+                        db_client = get_supabase_client()
+                        if db_client and check_connection(db_client):
+                            already_enriched = get_enriched_urls(db_client)
+                    except Exception:
+                        pass
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    max_profiles = st.number_input(
-                        "Number of profiles to enrich",
-                        min_value=1,
-                        max_value=len(urls),
-                        value=min(10, len(urls)),
-                        help="Start with a few to test, then increase"
-                    )
-                with col2:
-                    batch_size = st.slider("Batch size", min_value=1, max_value=25, value=10, key="enrich_batch")
-
-                st.caption("Each profile costs 1 Crust Data credit")
-
-                if st.button("Start Enrichment", type="primary", key="start_enrich_tab"):
-                    urls_to_process = urls[:max_profiles]
-                    results = []
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    total_batches = (len(urls_to_process) + batch_size - 1) // batch_size
-
-                    # Get usage tracker for logging
-                    tracker = get_usage_tracker()
-
-                    for i in range(0, len(urls_to_process), batch_size):
-                        batch = urls_to_process[i:i + batch_size]
-                        batch_num = i // batch_size + 1
-                        status_text.text(f"Processing batch {batch_num}/{total_batches}...")
-                        batch_results = enrich_batch(batch, api_key, tracker=tracker)
-                        results.extend(batch_results)
-                        progress_bar.progress(min((i + batch_size) / len(urls_to_process), 1.0))
-                        if i + batch_size < len(urls_to_process):
-                            time.sleep(2)
-
-                    progress_bar.progress(1.0)
-                    status_text.text("Enrichment complete!")
-                    send_notification("Enrichment Complete", f"Processed {len(results)} profiles")
-
-                    # Check for errors in results
-                    errors = [r for r in results if 'error' in r]
-                    successful = [r for r in results if 'error' not in r]
-
-                    if successful:
-                        # Save enriched data separately - don't overwrite original loaded data
-                        st.session_state['enriched_results'] = successful
-                        st.session_state['enriched_df'] = flatten_for_csv(successful)
-
-                        # Auto-save enrichment to Supabase database
-                        db_saved = 0
-                        if HAS_DATABASE:
-                            try:
-                                db_client = get_supabase_client()
-                                if db_client and check_connection(db_client):
-                                    for profile in successful:
-                                        linkedin_url = profile.get('linkedin_profile_url') or profile.get('linkedin_url')
-                                        if linkedin_url:
-                                            update_profile_enrichment(db_client, linkedin_url, profile)
-                                            db_saved += 1
-                            except Exception as e:
-                                st.warning(f"Database save failed: {e}")
-
-                        # Store message to show after rerun
-                        db_msg = f" (DB: {db_saved} saved)" if db_saved > 0 else ""
-                        if errors:
-                            st.session_state['enrichment_message'] = f"warning:Enriched {len(successful)} profiles{db_msg}. {len(errors)} failed: {errors[0].get('error', 'Unknown')[:150]}"
-                        else:
-                            st.session_state['enrichment_message'] = f"success:Enriched {len(successful)} profiles successfully!{db_msg}"
-                        st.rerun()
-                    elif errors:
-                        # All failed - show error, original data stays intact
-                        st.error(f"Enrichment failed for all profiles. Error: {errors[0].get('error', 'Unknown')[:200]}")
+                # Filter out already enriched URLs
+                new_urls = []
+                skipped_urls = []
+                for url in urls:
+                    normalized = normalize_linkedin_url(url) if HAS_DATABASE else url
+                    if normalized in already_enriched:
+                        skipped_urls.append(url)
                     else:
-                        st.error("No results returned from API. Check your API key and credits.")
+                        new_urls.append(url)
+
+                # Show stats
+                if skipped_urls:
+                    st.info(f"**{len(new_urls)}** new profiles to enrich | **{len(skipped_urls)}** already enriched (will be skipped)")
+                    skip_enriched = st.checkbox("Skip already-enriched profiles", value=True, key="skip_enriched_cb")
+                    urls_for_enrichment = new_urls if skip_enriched else urls
+                else:
+                    st.info(f"**{len(urls)}** profiles ready for enrichment")
+                    urls_for_enrichment = urls
+
+                if not urls_for_enrichment:
+                    st.warning("All profiles have already been enriched. Uncheck 'Skip already-enriched' to re-enrich them.")
+                else:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        max_profiles = st.number_input(
+                            "Number of profiles to enrich",
+                            min_value=1,
+                            max_value=len(urls_for_enrichment),
+                            value=min(10, len(urls_for_enrichment)),
+                            help="Start with a few to test, then increase"
+                        )
+                    with col2:
+                        batch_size = st.slider("Batch size", min_value=1, max_value=25, value=10, key="enrich_batch")
+
+                    st.caption("Each profile costs 1 Crust Data credit")
+
+                    if st.button("Start Enrichment", type="primary", key="start_enrich_tab"):
+                        urls_to_process = urls_for_enrichment[:max_profiles]
+                        results = []
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
+                        total_batches = (len(urls_to_process) + batch_size - 1) // batch_size
+
+                        # Get usage tracker for logging
+                        tracker = get_usage_tracker()
+
+                        for i in range(0, len(urls_to_process), batch_size):
+                            batch = urls_to_process[i:i + batch_size]
+                            batch_num = i // batch_size + 1
+                            status_text.text(f"Processing batch {batch_num}/{total_batches}...")
+                            batch_results = enrich_batch(batch, api_key, tracker=tracker)
+                            results.extend(batch_results)
+                            progress_bar.progress(min((i + batch_size) / len(urls_to_process), 1.0))
+                            if i + batch_size < len(urls_to_process):
+                                time.sleep(2)
+
+                        progress_bar.progress(1.0)
+                        status_text.text("Enrichment complete!")
+                        send_notification("Enrichment Complete", f"Processed {len(results)} profiles")
+
+                        # Check for errors in results
+                        errors = [r for r in results if 'error' in r]
+                        successful = [r for r in results if 'error' not in r]
+
+                        if successful:
+                            # Save enriched data separately - don't overwrite original loaded data
+                            st.session_state['enriched_results'] = successful
+                            st.session_state['enriched_df'] = flatten_for_csv(successful)
+
+                            # Auto-save enrichment to Supabase database
+                            db_saved = 0
+                            if HAS_DATABASE:
+                                try:
+                                    db_client = get_supabase_client()
+                                    if db_client and check_connection(db_client):
+                                        for profile in successful:
+                                            linkedin_url = profile.get('linkedin_profile_url') or profile.get('linkedin_url')
+                                            if linkedin_url:
+                                                update_profile_enrichment(db_client, linkedin_url, profile)
+                                                db_saved += 1
+                                except Exception as e:
+                                    st.warning(f"Database save failed: {e}")
+
+                            # Store message to show after rerun
+                            db_msg = f" (DB: {db_saved} saved)" if db_saved > 0 else ""
+                            if errors:
+                                st.session_state['enrichment_message'] = f"warning:Enriched {len(successful)} profiles{db_msg}. {len(errors)} failed: {errors[0].get('error', 'Unknown')[:150]}"
+                            else:
+                                st.session_state['enrichment_message'] = f"success:Enriched {len(successful)} profiles successfully!{db_msg}"
+                            st.rerun()
+                        elif errors:
+                            # All failed - show error, original data stays intact
+                            st.error(f"Enrichment failed for all profiles. Error: {errors[0].get('error', 'Unknown')[:200]}")
+                        else:
+                            st.error("No results returned from API. Check your API key and credits.")
             else:
                 st.warning("No LinkedIn URLs found in loaded profiles.")
 

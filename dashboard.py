@@ -3905,6 +3905,31 @@ with tab_enrich:
             else:
                 display_df['name'] = ''
 
+            # Handle company - check multiple possible column names
+            company_candidates = ['current_company', 'company', 'companyName', 'company_name',
+                                 'current_company_name', 'employer', 'organization']
+            company_col = None
+            for col in company_candidates:
+                if col in display_df.columns:
+                    company_col = col
+                    break
+            if company_col and company_col != 'company':
+                display_df['company'] = display_df[company_col]
+            elif 'company' not in display_df.columns:
+                display_df['company'] = ''
+
+            # Handle title - check multiple possible column names
+            title_candidates = ['current_title', 'title', 'job_title', 'position', 'jobTitle']
+            title_col = None
+            for col in title_candidates:
+                if col in display_df.columns:
+                    title_col = col
+                    break
+            if title_col and title_col != 'current_title':
+                display_df['current_title'] = display_df[title_col]
+            elif 'current_title' not in display_df.columns:
+                display_df['current_title'] = ''
+
             # Find linkedin URL column - prefer original URL, then check other names
             url_col = None
             url_candidates = ['_original_linkedin_url', 'linkedin_profile_url', 'linkedin_url', 'public_url',
@@ -3945,7 +3970,7 @@ with tab_enrich:
                 st.caption(f"Showing {min(20, len(display_df))} of {len(display_df)} profiles | {len(display_df.columns)} columns")
             else:
                 # Show key columns: name, company, title, linkedin url
-                display_cols = ['name', 'current_company', 'current_title', 'title', 'headline', 'linkedin']
+                display_cols = ['name', 'company', 'current_title', 'linkedin']
                 available_cols = [c for c in display_cols if c and c in display_df.columns]
                 # Remove duplicates while preserving order
                 available_cols = list(dict.fromkeys(available_cols))

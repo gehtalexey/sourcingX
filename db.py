@@ -452,6 +452,34 @@ def update_profile_enrichment(client: SupabaseClient, linkedin_url: str, crustda
             data['current_title'] = current.get('title')
             # company_name or company - Crustdata may use either
             data['current_company'] = current.get('company_name') or current.get('company')
+            # Duration in current role
+            data['current_years_in_role'] = current.get('duration_in_role') or current.get('years_in_role')
+            data['current_years_at_company'] = current.get('duration_at_company') or current.get('years_at_company')
+
+        # Skills - may be array or comma-separated string
+        skills = crustdata_response.get('skills', [])
+        if skills:
+            if isinstance(skills, list):
+                data['skills'] = ', '.join(str(s) for s in skills[:50])  # Limit to 50 skills
+            else:
+                data['skills'] = str(skills)
+
+        # Education - extract most recent
+        education = crustdata_response.get('education', [])
+        if education:
+            if isinstance(education, list) and len(education) > 0:
+                latest_edu = education[0]
+                if isinstance(latest_edu, dict):
+                    data['education'] = latest_edu.get('school') or latest_edu.get('school_name')
+                else:
+                    data['education'] = str(latest_edu)
+            else:
+                data['education'] = str(education)
+
+        # Additional fields that Crustdata may return
+        data['connections_count'] = crustdata_response.get('connections_count') or crustdata_response.get('connections')
+        data['followers_count'] = crustdata_response.get('followers_count') or crustdata_response.get('followers')
+        data['profile_picture_url'] = crustdata_response.get('profile_picture_url') or crustdata_response.get('profile_pic_url')
 
     # Remove None values
     data = {k: v for k, v in data.items() if v is not None}

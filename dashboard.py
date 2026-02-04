@@ -4036,6 +4036,7 @@ with tab_enrich:
                     if st.button("Start Enrichment", type="primary", key="start_enrich_tab"):
                         urls_to_process = urls_for_enrichment[:max_profiles]
                         results = []
+                        original_urls = []  # Track original URLs in order
                         progress_bar = st.progress(0)
                         status_text = st.empty()
                         total_batches = (len(urls_to_process) + batch_size - 1) // batch_size
@@ -4049,6 +4050,7 @@ with tab_enrich:
                             status_text.text(f"Processing batch {batch_num}/{total_batches}...")
                             batch_results = enrich_batch(batch, api_key, tracker=tracker)
                             results.extend(batch_results)
+                            original_urls.extend(batch)  # Keep track of original URLs
                             progress_bar.progress(min((i + batch_size) / len(urls_to_process), 1.0))
                             if i + batch_size < len(urls_to_process):
                                 time.sleep(2)
@@ -4056,6 +4058,11 @@ with tab_enrich:
                         progress_bar.progress(1.0)
                         status_text.text("Enrichment complete!")
                         send_notification("Enrichment Complete", f"Processed {len(results)} profiles")
+
+                        # Pair results with original URLs
+                        for idx, profile in enumerate(results):
+                            if idx < len(original_urls):
+                                profile['_original_linkedin_url'] = original_urls[idx]
 
                         # Check for errors in results
                         errors = [r for r in results if 'error' in r]
@@ -4073,7 +4080,8 @@ with tab_enrich:
                                     db_client = get_supabase_client()
                                     if db_client and check_connection(db_client):
                                         for profile in successful:
-                                            linkedin_url = profile.get('linkedin_profile_url') or profile.get('linkedin_url')
+                                            # Use original URL (what we sent to Crustdata), not the one in response
+                                            linkedin_url = profile.get('_original_linkedin_url') or profile.get('linkedin_profile_url') or profile.get('linkedin_url')
                                             if linkedin_url:
                                                 update_profile_enrichment(db_client, linkedin_url, profile)
                                                 db_saved += 1

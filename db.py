@@ -1,5 +1,7 @@
 """
-Supabase Database Module for LinkedIn Enricher
+Supabase Database Module for LinkedIn Enricher (v2 - Crustdata Only)
+
+Stores only Crustdata-enriched profiles. PhantomBuster data stays in UI session state.
 Uses REST API directly - no supabase package required.
 """
 
@@ -11,7 +13,9 @@ from typing import Optional
 from pathlib import Path
 import pandas as pd
 
-# Refresh threshold for stale profiles
+from normalizers import normalize_linkedin_url
+
+# Refresh threshold for re-enriching stale profiles
 ENRICHMENT_REFRESH_MONTHS = 6
 
 
@@ -74,7 +78,6 @@ class SupabaseClient:
         json_str = json_str.replace(': -Infinity', ': null').replace(':-Infinity', ':null')
         response = requests.post(url, headers=headers, params=params, data=json_str, timeout=30)
         if response.status_code >= 400:
-            # Include error details in the exception
             error_msg = f"{response.status_code}: {response.text}"
             raise requests.HTTPError(error_msg)
         if response.text:
@@ -149,343 +152,96 @@ def get_supabase_client() -> Optional[SupabaseClient]:
     return None
 
 
-def normalize_linkedin_url(url: str) -> str:
-    """Normalize LinkedIn URL for consistent matching."""
-    if not url:
-        return url
-    url = str(url).strip().rstrip('/')
-    # Add https:// if missing
-    if url.startswith('www.'):
-        url = 'https://' + url
-    elif not url.startswith('http'):
-        url = 'https://' + url
-    if '?' in url:
-        url = url.split('?')[0]
-    return url.lower()
+# ============================================================================
+# PROFILE OPERATIONS (Crustdata Enriched Profiles Only)
+# ============================================================================
 
+def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_response: dict) -> dict:
+    """Save a Crustdata-enriched profile to the database.
 
-# ===== Profile Operations =====
-
-def upsert_profile(client: SupabaseClient, profile_data: dict) -> dict:
-    """Insert or update a profile. Returns the upserted record."""
-    linkedin_url = normalize_linkedin_url(profile_data.get('linkedin_url') or profile_data.get('public_url'))
-    if not linkedin_url:
-        raise ValueError("linkedin_url is required")
-
-    data = {
-        'linkedin_url': linkedin_url,
-        'updated_at': datetime.utcnow().isoformat(),
-    }
-
-    field_mapping = {
-        'first_name': 'first_name',
-        'last_name': 'last_name',
-        'headline': 'headline',
-        'location': 'location',
-        'current_title': 'current_title',
-        'current_company': 'current_company',
-        'current_years_in_role': 'current_years_in_role',
-        'skills': 'skills',
-        'summary': 'summary',
-        'email': 'email',
-    }
-
-    for source_key, db_key in field_mapping.items():
-        if source_key in profile_data and profile_data[source_key]:
-            data[db_key] = profile_data[source_key]
-
-    result = client.upsert('profiles', data, on_conflict='linkedin_url')
-    return result[0] if result else None
-
-
-def is_nan_or_na(v):
-    """Check if value is NaN, None, or pandas NA."""
-    import math
-    if v is None:
-        return True
-    # Check for pandas NA type first (not JSON serializable)
-    if type(v).__name__ == 'NAType':
-        return True
-    # Check pandas isna (handles various NA types)
-    try:
-        if pd.isna(v):
-            return True
-    except (TypeError, ValueError):
-        pass
-    # Check float NaN/Inf
-    if isinstance(v, float):
-        try:
-            if math.isnan(v) or math.isinf(v):
-                return True
-        except (TypeError, ValueError):
-            pass
-    return False
-
-
-def clean_nan_values(obj, keep_keys=False):
-    """Recursively clean NaN/None/NA values from dict for JSON serialization.
+    Simplified approach: Store raw_data as-is, extract only title/company for indexing.
+    All other fields are extracted at display time from raw_data.
 
     Args:
-        obj: The object to clean
-        keep_keys: If True, keep dict keys but set NaN values to None (for batch upsert)
+        client: SupabaseClient instance
+        linkedin_url: The LinkedIn URL (used as primary key)
+        crustdata_response: Raw response from Crustdata API
+
+    Returns:
+        The saved profile record
     """
-    if isinstance(obj, dict):
-        cleaned = {}
-        for k, v in obj.items():
-            if is_nan_or_na(v):
-                if keep_keys:
-                    cleaned[k] = None
-                # else: skip this key
-            else:
-                cleaned_v = clean_nan_values(v, keep_keys)
-                if keep_keys or (cleaned_v is not None and not is_nan_or_na(cleaned_v)):
-                    cleaned[k] = cleaned_v
-        return cleaned
-    elif isinstance(obj, list):
-        return [clean_nan_values(item, keep_keys) for item in obj if not is_nan_or_na(item)]
-    elif is_nan_or_na(obj):
-        return None
-    return obj
-
-
-def upsert_profiles_from_phantombuster(client: SupabaseClient, profiles: list, search_id: str = None) -> dict:
-    """Bulk upsert profiles from PhantomBuster scrape - optimized batch version."""
-    stats = {'inserted': 0, 'updated': 0, 'skipped': 0, 'errors': 0, 'debug': []}
-
-    if not profiles:
-        stats['debug'].append('No profiles provided')
-        return stats
-
-    # Step 1: Extract valid LinkedIn URLs and prepare data
-    profiles_to_upsert = []
-
-    stats['debug'].append(f'Processing {len(profiles)} profiles')
-
-    for i, profile in enumerate(profiles):
-        profile = clean_nan_values(profile)
-
-        # Get LinkedIn URL - check linkedin_url first since dashboard normalizes to this
-        linkedin_url = profile.get('linkedin_url')
-
-        # Debug first profile
-        if i == 0:
-            stats['debug'].append(f'First profile linkedin_url: {linkedin_url} (type: {type(linkedin_url).__name__})')
-            stats['debug'].append(f'First profile keys: {list(profile.keys())[:5]}...')
-
-        # Validate the URL
-        if linkedin_url:
-            if 'linkedin.com' in str(linkedin_url) and '/sales/' not in str(linkedin_url):
-                linkedin_url = normalize_linkedin_url(linkedin_url)
-            else:
-                if i == 0:
-                    stats['debug'].append(f'URL validation failed: {linkedin_url}')
-                linkedin_url = None
-
-        # If not found, try other fields
-        if not linkedin_url:
-            url_candidates = [
-                profile.get('defaultProfileUrl'),
-                profile.get('public_url'),
-                profile.get('profileUrl'),
-                profile.get('linkedInProfileUrl'),
-                profile.get('profileLink'),
-            ]
-            for url in url_candidates:
-                if url and 'linkedin.com' in str(url) and '/sales/' not in str(url):
-                    linkedin_url = normalize_linkedin_url(url)
-                    break
-
-        if not linkedin_url:
-            public_id = profile.get('publicIdentifier') or profile.get('public_identifier')
-            if public_id and public_id != 'null':
-                linkedin_url = f"https://www.linkedin.com/in/{public_id}"
-
-        if not linkedin_url:
-            stats['skipped'] += 1
-            if i == 0:
-                stats['debug'].append('First profile SKIPPED - no valid URL')
-            continue
-
-        # Parse duration text to numeric (e.g., "8 months in role" -> 0.67, "2 years" -> 2)
-        def parse_duration(duration_str):
-            if not duration_str or is_nan_or_na(duration_str):
-                return None
-            duration_str = str(duration_str).lower().strip()
-            try:
-                # Try direct number first
-                return float(duration_str)
-            except (ValueError, TypeError):
-                pass
-            # Parse text like "8 months", "2 years", "1 year 3 months"
-            years = 0
-            months = 0
-            import re
-            year_match = re.search(r'(\d+)\s*year', duration_str)
-            month_match = re.search(r'(\d+)\s*month', duration_str)
-            if year_match:
-                years = int(year_match.group(1))
-            if month_match:
-                months = int(month_match.group(1))
-            if years or months:
-                return round(years + months / 12, 2)
-            return None
-
-        duration_in_role = profile.get('current_years_in_role') or profile.get('durationInRole')
-        duration_at_company = profile.get('current_years_at_company') or profile.get('durationInCompany')
-
-        # Prepare data for this profile - use fixed keys for batch upsert compatibility
-        data = {
-            'linkedin_url': linkedin_url,
-            'first_name': profile.get('first_name') or profile.get('firstName') or None,
-            'last_name': profile.get('last_name') or profile.get('lastName') or None,
-            'headline': profile.get('headline') or None,
-            'location': profile.get('location') or None,
-            'current_title': profile.get('current_title') or profile.get('title') or None,
-            'current_company': profile.get('current_company') or profile.get('company') or profile.get('companyName') or None,
-            'current_years_in_role': parse_duration(duration_in_role),
-            'current_years_at_company': parse_duration(duration_at_company),
-            'summary': profile.get('summary') or None,
-            'phantombuster_data': clean_nan_values(profile),
-            'updated_at': datetime.utcnow().isoformat(),
-            'status': 'scraped',
-        }
-
-        # Clean NaN values but keep all keys (replace NaN with None for batch upsert)
-        data = clean_nan_values(data, keep_keys=True)
-        profiles_to_upsert.append(data)
-
-    if not profiles_to_upsert:
-        stats['debug'].append('No profiles to upsert after processing')
-        return stats
-
-    stats['debug'].append(f'Prepared {len(profiles_to_upsert)} profiles for upsert')
-
-    # Step 2: Get existing URLs in ONE query
-    urls_to_check = [p['linkedin_url'] for p in profiles_to_upsert]
-    existing_urls = set()
-    try:
-        # Query in batches of 100 to avoid URL length limits
-        for i in range(0, len(urls_to_check), 100):
-            batch_urls = urls_to_check[i:i+100]
-            url_filter = ','.join([f'"{u}"' for u in batch_urls])
-            existing = client.select('profiles', 'linkedin_url', {'linkedin_url': f'in.({url_filter})'})
-            existing_urls.update(p['linkedin_url'] for p in existing)
-    except Exception as e:
-        print(f"[DB] Error checking existing: {e}")
-
-    # Step 3: Batch upsert all profiles at once
-    try:
-        # Add created_at for ALL profiles (same keys required for batch upsert)
-        new_count = 0
-        now = datetime.utcnow().isoformat()
-        for p in profiles_to_upsert:
-            if p['linkedin_url'] not in existing_urls:
-                p['created_at'] = now
-                new_count += 1
-            else:
-                p['created_at'] = None  # Will be ignored on update but needed for consistent keys
-
-        stats['debug'].append(f'{new_count} new, {len(profiles_to_upsert) - new_count} existing')
-
-        # Serialize and clean for JSON
-        json_str = json.dumps(profiles_to_upsert, allow_nan=True)
-        json_str = json_str.replace(': NaN', ': null').replace(':NaN', ':null')
-        json_str = json_str.replace(': Infinity', ': null').replace(':Infinity', ':null')
-        json_str = json_str.replace(': -Infinity', ': null').replace(':-Infinity', ':null')
-        clean_data = json.loads(json_str)
-
-        stats['debug'].append(f'Calling upsert with {len(clean_data)} profiles')
-
-        # Single batch upsert
-        client.upsert('profiles', clean_data, on_conflict='linkedin_url')
-
-        stats['debug'].append('Upsert completed successfully')
-
-        # Count results
-        for p in profiles_to_upsert:
-            if p['linkedin_url'] in existing_urls:
-                stats['updated'] += 1
-            else:
-                stats['inserted'] += 1
-
-    except Exception as e:
-        stats['debug'].append(f'Batch upsert ERROR: {type(e).__name__}: {e}')
-        stats['errors'] = len(profiles_to_upsert)
-
-    return stats
-
-
-def update_profile_enrichment(client: SupabaseClient, linkedin_url: str, crustdata_response: dict) -> dict:
-    """Update profile with Crustdata enrichment data."""
     linkedin_url = normalize_linkedin_url(linkedin_url)
+    if not linkedin_url:
+        raise ValueError("Valid linkedin_url is required")
 
+    cd = crustdata_response or {}
+
+    # Extract only title/company for indexed filtering
+    current_title = None
+    current_company = None
+
+    # Try current_employers first (Crustdata format)
+    current_employers = cd.get('current_employers') or []
+    if current_employers and isinstance(current_employers, list):
+        emp = current_employers[0] if current_employers else {}
+        if isinstance(emp, dict):
+            current_title = emp.get('employee_title') or emp.get('title')
+            current_company = emp.get('employer_name') or emp.get('company_name')
+
+    # Fallback: extract from headline (e.g., "CEO at Company")
+    if not current_title or not current_company:
+        headline = cd.get('headline', '')
+        if headline and ' at ' in headline:
+            parts = headline.split(' at ', 1)
+            if not current_title:
+                current_title = parts[0].strip()
+            if not current_company and len(parts) > 1:
+                current_company = parts[1].split('/')[0].strip()
+
+    # Minimal data - everything else comes from raw_data at display time
     data = {
         'linkedin_url': linkedin_url,
-        'crustdata_data': crustdata_response,
-        'enriched_at': datetime.utcnow().isoformat(),
+        'raw_data': crustdata_response,
+        'current_title': current_title,
+        'current_company': current_company,
         'status': 'enriched',
+        'enriched_at': datetime.utcnow().isoformat(),
     }
-
-    if crustdata_response:
-        # Handle name - Crustdata may return 'name' as full name or first_name/last_name separately
-        first_name = crustdata_response.get('first_name')
-        last_name = crustdata_response.get('last_name')
-
-        # If no first/last name, try to parse from 'name' field
-        if not first_name and not last_name:
-            full_name = crustdata_response.get('name', '')
-            if full_name:
-                name_parts = full_name.strip().split(' ', 1)
-                first_name = name_parts[0] if name_parts else None
-                last_name = name_parts[1] if len(name_parts) > 1 else None
-
-        data['first_name'] = first_name
-        data['last_name'] = last_name
-        data['headline'] = crustdata_response.get('headline')
-        data['location'] = crustdata_response.get('location')
-        data['summary'] = crustdata_response.get('summary')
-
-        # Handle positions - Crustdata returns positions array
-        positions = crustdata_response.get('positions', [])
-        if positions:
-            current = positions[0]
-            data['current_title'] = current.get('title')
-            # company_name or company - Crustdata may use either
-            data['current_company'] = current.get('company_name') or current.get('company')
-            # Duration in current role
-            data['current_years_in_role'] = current.get('duration_in_role') or current.get('years_in_role')
-            data['current_years_at_company'] = current.get('duration_at_company') or current.get('years_at_company')
-
-        # Skills - may be array or comma-separated string
-        skills = crustdata_response.get('skills', [])
-        if skills:
-            if isinstance(skills, list):
-                data['skills'] = ', '.join(str(s) for s in skills[:50])  # Limit to 50 skills
-            else:
-                data['skills'] = str(skills)
-
-        # Education - extract most recent
-        education = crustdata_response.get('education', [])
-        if education:
-            if isinstance(education, list) and len(education) > 0:
-                latest_edu = education[0]
-                if isinstance(latest_edu, dict):
-                    data['education'] = latest_edu.get('school') or latest_edu.get('school_name')
-                else:
-                    data['education'] = str(latest_edu)
-            else:
-                data['education'] = str(education)
-
-        # Additional fields that Crustdata may return
-        data['connections_count'] = crustdata_response.get('connections_count') or crustdata_response.get('connections')
-        data['followers_count'] = crustdata_response.get('followers_count') or crustdata_response.get('followers')
-        data['profile_picture_url'] = crustdata_response.get('profile_picture_url') or crustdata_response.get('profile_pic_url')
 
     # Remove None values
     data = {k: v for k, v in data.items() if v is not None}
 
     result = client.upsert('profiles', data, on_conflict='linkedin_url')
     return result[0] if result else None
+
+
+def save_enriched_profiles_batch(client: SupabaseClient, profiles: list[tuple[str, dict]]) -> dict:
+    """Save multiple enriched profiles in a batch.
+
+    Args:
+        client: SupabaseClient instance
+        profiles: List of (linkedin_url, crustdata_response) tuples
+
+    Returns:
+        Stats dict with 'saved' and 'errors' counts
+    """
+    stats = {'saved': 0, 'errors': 0}
+
+    for linkedin_url, crustdata_response in profiles:
+        try:
+            save_enriched_profile(client, linkedin_url, crustdata_response)
+            stats['saved'] += 1
+        except Exception as e:
+            print(f"[DB] Error saving {linkedin_url}: {e}")
+            stats['errors'] += 1
+
+    return stats
+
+
+# Backwards compatibility alias
+def update_profile_enrichment(client: SupabaseClient, linkedin_url: str, crustdata_response: dict) -> dict:
+    """Alias for save_enriched_profile (backwards compatibility)."""
+    return save_enriched_profile(client, linkedin_url, crustdata_response)
 
 
 def update_profile_screening(client: SupabaseClient, linkedin_url: str, score: int, fit_level: str,
@@ -514,28 +270,15 @@ def update_profile_email(client: SupabaseClient, linkedin_url: str, email: str, 
     return {'linkedin_url': linkedin_url, 'email': email}
 
 
-# ===== Query Operations =====
+# ============================================================================
+# QUERY OPERATIONS
+# ============================================================================
 
 def get_profile(client: SupabaseClient, linkedin_url: str) -> Optional[dict]:
     """Get a single profile by LinkedIn URL."""
     linkedin_url = normalize_linkedin_url(linkedin_url)
     result = client.select('profiles', '*', {'linkedin_url': f'eq.{linkedin_url}'})
     return result[0] if result else None
-
-
-def get_profiles_needing_enrichment(client: SupabaseClient, limit: int = 100) -> list:
-    """Get profiles needing enrichment (never enriched OR older than 6 months)."""
-    cutoff_date = (datetime.utcnow() - timedelta(days=ENRICHMENT_REFRESH_MONTHS * 30)).isoformat()
-
-    # Get profiles where enriched_at is null
-    never_enriched = client.select('profiles', '*', {'enriched_at': 'is.null'}, limit=limit)
-
-    remaining = limit - len(never_enriched)
-    stale = []
-    if remaining > 0:
-        stale = client.select('profiles', '*', {'enriched_at': f'lt.{cutoff_date}'}, limit=remaining)
-
-    return never_enriched + stale
 
 
 def get_profiles_needing_screening(client: SupabaseClient, limit: int = 100) -> list:
@@ -571,8 +314,6 @@ def get_pipeline_stats(client: SupabaseClient) -> dict:
 
 def search_profiles(client: SupabaseClient, query: str, limit: int = 100) -> list:
     """Search profiles by name, company, or title."""
-    # Simple search - Supabase REST API has limited OR support
-    # Search in current_company first
     results = client.select('profiles', '*', {'current_company': f'ilike.%{query}%'}, limit=limit)
     if len(results) < limit:
         more = client.select('profiles', '*', {'first_name': f'ilike.%{query}%'}, limit=limit - len(results))
@@ -580,82 +321,28 @@ def search_profiles(client: SupabaseClient, query: str, limit: int = 100) -> lis
     return results
 
 
-# ===== Search/Batch Operations =====
-
-def create_search(client: SupabaseClient, name: str, agent_id: str = None, search_url: str = None) -> dict:
-    """Create a new search record."""
-    result = client.insert('searches', {
-        'name': name,
-        'phantombuster_agent_id': agent_id,
-        'search_url': search_url,
-    })
-    return result[0] if result else None
-
-
-def update_search_count(client: SupabaseClient, search_id: str, count: int) -> None:
-    """Update the profiles_found count for a search."""
-    client.update('searches', {'profiles_found': count}, {'id': search_id})
-
-
-# ===== DataFrame Conversion =====
-
-def profiles_to_dataframe(profiles: list) -> pd.DataFrame:
-    """Convert list of profile dicts to DataFrame."""
-    if not profiles:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(profiles)
-
-    priority_cols = [
-        'first_name', 'last_name', 'current_title', 'current_company',
-        'screening_score', 'screening_fit_level', 'email', 'linkedin_url',
-        'location', 'status', 'enriched_at', 'screened_at'
-    ]
-
-    existing_priority = [c for c in priority_cols if c in df.columns]
-    other_cols = [c for c in df.columns if c not in priority_cols]
-    df = df[existing_priority + other_cols]
-
-    return df
-
-
-def dataframe_to_profiles(df: pd.DataFrame) -> list:
-    """Convert DataFrame back to list of profile dicts."""
-    return df.to_dict('records')
-
-
-# ===== Utility =====
-
-def check_connection(client: SupabaseClient) -> bool:
-    """Check if Supabase connection is working."""
-    if not client:
-        return False
-    try:
-        client.select('profiles', 'id', limit=1)
-        return True
-    except Exception:
-        return False
-
-
-# ===== PhantomBuster Deduplication =====
-
-def get_all_linkedin_urls(client: SupabaseClient) -> list:
-    """Get all LinkedIn URLs from database for PhantomBuster skip list."""
-    result = client.select('profiles', 'linkedin_url', limit=50000)
-    return [p['linkedin_url'] for p in result if p.get('linkedin_url')]
-
+# ============================================================================
+# DEDUPLICATION (for skipping already-enriched URLs)
+# ============================================================================
 
 def get_enriched_urls(client: SupabaseClient) -> set:
-    """Get all LinkedIn URLs that have been enriched (have enriched_at timestamp)."""
-    # Use enriched_at not null as the indicator - more reliable than status
-    result = client.select('profiles', 'linkedin_url', {'enriched_at': 'not.is.null'}, limit=50000)
-    # Normalize URLs for comparison
+    """Get all LinkedIn URLs that have been enriched.
+
+    Used to skip profiles that are already in the database when enriching.
+    """
+    result = client.select('profiles', 'linkedin_url', limit=50000)
     urls = set()
     for p in result:
         url = p.get('linkedin_url')
         if url:
             urls.add(normalize_linkedin_url(url))
     return urls
+
+
+def get_all_linkedin_urls(client: SupabaseClient) -> list:
+    """Get all LinkedIn URLs from database."""
+    result = client.select('profiles', 'linkedin_url', limit=50000)
+    return [p['linkedin_url'] for p in result if p.get('linkedin_url')]
 
 
 def get_recently_enriched_urls(client: SupabaseClient, months: int = 6) -> list:
@@ -678,20 +365,45 @@ def get_dedup_stats(client: SupabaseClient) -> dict:
     }
 
 
-# ===== API Usage Tracking =====
+# ============================================================================
+# DATAFRAME CONVERSION
+# ============================================================================
+
+def profiles_to_dataframe(profiles: list) -> pd.DataFrame:
+    """Convert list of profile dicts to DataFrame.
+
+    Uses helpers.profiles_to_display_df to extract fields from raw_data.
+    """
+    from helpers import profiles_to_display_df
+    return profiles_to_display_df(profiles)
+
+
+def dataframe_to_profiles(df: pd.DataFrame) -> list:
+    """Convert DataFrame back to list of profile dicts."""
+    return df.to_dict('records')
+
+
+# ============================================================================
+# UTILITY
+# ============================================================================
+
+def check_connection(client: SupabaseClient) -> bool:
+    """Check if Supabase connection is working."""
+    if not client:
+        return False
+    try:
+        client.select('profiles', 'linkedin_url', limit=1)
+        return True
+    except Exception:
+        return False
+
+
+# ============================================================================
+# API USAGE TRACKING
+# ============================================================================
 
 def log_api_usage(client: SupabaseClient, data: dict) -> Optional[dict]:
-    """Insert a usage record into api_usage_logs table.
-
-    Args:
-        client: SupabaseClient instance
-        data: Dict with keys: provider, operation, request_count, credits_used,
-              tokens_input, tokens_output, cost_usd, status, error_message,
-              response_time_ms, metadata
-
-    Returns:
-        The inserted record or None on error
-    """
+    """Insert a usage record into api_usage_logs table."""
     try:
         result = client.insert('api_usage_logs', data)
         return result[0] if result else None
@@ -701,33 +413,18 @@ def log_api_usage(client: SupabaseClient, data: dict) -> Optional[dict]:
 
 
 def get_usage_summary(client: SupabaseClient, days: int = None) -> dict:
-    """Get aggregated usage stats by provider.
-
-    Args:
-        client: SupabaseClient instance
-        days: Number of days to look back (None = all time)
-
-    Returns:
-        Dict with provider stats: {
-            'crustdata': {'credits': X, 'requests': Y},
-            'salesql': {'lookups': X, 'requests': Y},
-            'openai': {'cost_usd': X, 'tokens_input': Y, 'tokens_output': Z, 'requests': W},
-            'phantombuster': {'runs': X}
-        }
-    """
+    """Get aggregated usage stats by provider."""
     filters = {}
     if days:
         cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
         filters['created_at'] = f'gte.{cutoff}'
 
     try:
-        # Fetch all usage logs for the period
         logs = client.select('api_usage_logs', '*', filters, limit=10000)
     except Exception as e:
         print(f"[DB] Failed to fetch usage logs: {e}")
         return {}
 
-    # Aggregate by provider
     summary = {
         'crustdata': {'credits': 0, 'requests': 0, 'errors': 0},
         'salesql': {'lookups': 0, 'requests': 0, 'errors': 0},
@@ -747,15 +444,12 @@ def get_usage_summary(client: SupabaseClient, days: int = None) -> dict:
 
         if provider == 'crustdata':
             summary[provider]['credits'] += log.get('credits_used') or 0
-
         elif provider == 'salesql':
             summary[provider]['lookups'] += log.get('credits_used') or 0
-
         elif provider == 'openai':
             summary[provider]['cost_usd'] += log.get('cost_usd') or 0
             summary[provider]['tokens_input'] += log.get('tokens_input') or 0
             summary[provider]['tokens_output'] += log.get('tokens_output') or 0
-
         elif provider == 'phantombuster':
             summary[provider]['runs'] += 1
             metadata = log.get('metadata') or {}
@@ -766,18 +460,7 @@ def get_usage_summary(client: SupabaseClient, days: int = None) -> dict:
 
 def get_usage_logs(client: SupabaseClient, provider: str = None, days: int = None,
                    limit: int = 100, offset: int = 0) -> list:
-    """Get detailed usage logs with optional filtering.
-
-    Args:
-        client: SupabaseClient instance
-        provider: Filter by provider name (optional)
-        days: Number of days to look back (None = all time)
-        limit: Max records to return
-        offset: Number of records to skip (for pagination)
-
-    Returns:
-        List of usage log records
-    """
+    """Get detailed usage logs with optional filtering."""
     filters = {}
 
     if provider:
@@ -788,7 +471,6 @@ def get_usage_logs(client: SupabaseClient, provider: str = None, days: int = Non
         filters['created_at'] = f'gte.{cutoff}'
 
     try:
-        # Build params for pagination and ordering
         params = {'select': '*', 'order': 'created_at.desc'}
         if filters:
             params.update(filters)
@@ -807,15 +489,7 @@ def get_usage_logs(client: SupabaseClient, provider: str = None, days: int = Non
 
 
 def get_usage_by_date(client: SupabaseClient, days: int = 30) -> list:
-    """Get usage aggregated by date for charting.
-
-    Args:
-        client: SupabaseClient instance
-        days: Number of days to look back
-
-    Returns:
-        List of dicts: [{'date': '2024-01-15', 'crustdata': X, 'salesql': Y, ...}, ...]
-    """
+    """Get usage aggregated by date for charting."""
     cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
 
     try:
@@ -824,13 +498,11 @@ def get_usage_by_date(client: SupabaseClient, days: int = 30) -> list:
         print(f"[DB] Failed to fetch usage logs: {e}")
         return []
 
-    # Group by date and provider
     by_date = {}
     for log in logs:
         created_at = log.get('created_at', '')
         if not created_at:
             continue
-        # Extract date part
         date_str = created_at[:10]
         provider = log.get('provider', '').lower()
 
@@ -846,6 +518,19 @@ def get_usage_by_date(client: SupabaseClient, days: int = 30) -> list:
         elif provider == 'phantombuster':
             by_date[date_str]['phantombuster'] += 1
 
-    # Sort by date
     result = sorted(by_date.values(), key=lambda x: x['date'])
     return result
+
+
+# ============================================================================
+# BACKWARDS COMPATIBILITY - Deprecated functions
+# ============================================================================
+
+def upsert_profiles_from_phantombuster(client: SupabaseClient, profiles: list, search_id: str = None) -> dict:
+    """DEPRECATED: PhantomBuster data is no longer stored in DB.
+
+    This function is kept for backwards compatibility but does nothing.
+    PhantomBuster data should only be used in UI session state.
+    """
+    print("[DB] WARNING: upsert_profiles_from_phantombuster is deprecated. PB data is no longer stored in DB.")
+    return {'inserted': 0, 'updated': 0, 'skipped': len(profiles), 'errors': 0, 'debug': ['DEPRECATED - PB data not stored']}

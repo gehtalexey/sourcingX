@@ -31,14 +31,28 @@ try:
 except ImportError:
     HAS_PLYER = False
 
+# Unified normalizers (single source of truth for field mappings)
+from normalizers import (
+    normalize_linkedin_url,
+    normalize_phantombuster_profile,
+    normalize_crustdata_profile as normalize_crustdata_record,
+    normalize_phantombuster_batch,
+    normalize_crustdata_batch,
+    profile_to_display_dict,
+    profiles_to_display_df,
+    parse_duration,
+    clean_dict,
+)
+
 # Database module (Supabase integration)
+# Note: PhantomBuster data is NOT stored in DB - only Crustdata enriched profiles
 try:
     from db import (
-        get_supabase_client, check_connection, upsert_profiles_from_phantombuster,
+        get_supabase_client, check_connection, save_enriched_profile,
         update_profile_enrichment, update_profile_screening, get_all_profiles,
         get_pipeline_stats, get_profiles_by_fit_level, get_all_linkedin_urls,
         get_dedup_stats, profiles_to_dataframe, get_usage_summary, get_usage_logs,
-        get_usage_by_date, get_enriched_urls, normalize_linkedin_url
+        get_usage_by_date, get_enriched_urls,
     )
     from pb_dedup import filter_results_against_database, update_phantombuster_with_skip_list, get_skip_list_from_database
     HAS_DATABASE = True
@@ -1486,92 +1500,42 @@ def fetch_container_status(api_key: str, container_id: str) -> dict:
 
 
 def normalize_phantombuster_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize PhantomBuster column names to match expected dashboard format."""
+    """Normalize PhantomBuster column names using shared normalizers.
+
+    Uses normalizers.py for consistent field mapping across dashboard and db.
+    """
     # Debug: log all columns to help identify URL fields
     url_cols = [c for c in df.columns if 'url' in c.lower() or 'link' in c.lower() or 'profile' in c.lower() or 'identifier' in c.lower()]
     st.session_state['_debug_url_cols'] = url_cols
     st.session_state['_debug_all_cols'] = list(df.columns)
 
-    # Column mapping: PhantomBuster name -> dashboard expected name
-    # Order matters - first match wins for columns mapping to same target
-    column_map = {
-        'firstName': 'first_name',
-        'lastName': 'last_name',
-        'fullName': 'full_name',
-        'title': 'headline',
-        'headline': 'headline',
-        'companyName': 'current_company',
-        'company': 'current_company',
-        'currentCompanyName': 'current_company',
-        'location': 'location',
-        'defaultProfileUrl': 'linkedin_url',
-        'profileUrl': 'linkedin_url',
-        'linkedInProfileUrl': 'linkedin_url',
-        'linkedinProfileUrl': 'linkedin_url',
-        'publicIdentifier': 'linkedin_url',
-        'profileLink': 'linkedin_url',
-        'vmid': 'vmid',
-        'connectionDegree': 'connection_degree',
-        'mutualConnectionsCount': 'mutual_connections',
-        'premium': 'is_premium',
-        'openLink': 'is_open_link',
-        'jobTitle': 'current_title',
-        'currentJobTitle': 'current_title',
-        'summary': 'summary',
-        'query': 'search_query',
-        'timestamp': 'scraped_at',
-        'durationInRole': 'current_years_in_role',
-        'durationInCompany': 'current_years_at_company',
-    }
+    # Convert DataFrame to list of dicts, normalize each, convert back
+    records = df.to_dict('records')
+    normalized_records = []
 
-    # Rename columns - track which target names are already used to avoid duplicates
-    rename_dict = {}
-    used_targets = set(df.columns)  # Start with existing column names
+    for raw in records:
+        normalized = normalize_phantombuster_profile(raw)
+        if normalized:
+            # For display, we want the display dict format
+            display_record = profile_to_display_dict(normalized)
+            # But also keep the raw data for db save
+            display_record['raw_phantombuster'] = normalized.get('raw_phantombuster')
+            normalized_records.append(display_record)
+        else:
+            # Keep original record but mark as invalid (no URL)
+            raw['linkedin_url'] = None
+            normalized_records.append(raw)
 
-    for old_name, new_name in column_map.items():
-        if old_name in df.columns and new_name not in used_targets:
-            rename_dict[old_name] = new_name
-            used_targets.add(new_name)
-
-    df = df.rename(columns=rename_dict)
-
-    # Create first_name/last_name from fullName if needed
-    if 'full_name' in df.columns and 'first_name' not in df.columns:
-        df['first_name'] = df['full_name'].apply(lambda x: str(x).split()[0] if pd.notna(x) and str(x).strip() else '')
-        df['last_name'] = df['full_name'].apply(lambda x: ' '.join(str(x).split()[1:]) if pd.notna(x) and len(str(x).split()) > 1 else '')
-
-    # Use headline as current_title if current_title doesn't exist
-    if 'headline' in df.columns and 'current_title' not in df.columns:
-        df['current_title'] = df['headline']
-
-    # Clean linkedin_url - ensure it's a valid regular LinkedIn URL (not Sales Navigator)
-    if 'linkedin_url' in df.columns:
-        def clean_url(url):
-            if pd.isna(url) or not url:
-                return None
-            url = str(url).strip()
-            # Must be linkedin.com, have /in/, and NOT be Sales Navigator
-            if 'linkedin.com' in url and '/in/' in url and '/sales/' not in url:
-                return url
-            return None
-        df['linkedin_url'] = df['linkedin_url'].apply(clean_url)
+    result_df = pd.DataFrame(normalized_records)
 
     # Debug: count valid URLs
-    valid_count = df['linkedin_url'].notna().sum()
-    st.session_state['_debug_valid_urls'] = f"{valid_count}/{len(df)}"
+    if 'linkedin_url' in result_df.columns:
+        valid_count = result_df['linkedin_url'].notna().sum()
+        st.session_state['_debug_valid_urls'] = f"{valid_count}/{len(result_df)}"
+    else:
+        st.session_state['_debug_valid_urls'] = "0/0"
 
-    # Try to get linkedin_url from publicIdentifier if missing
-    if 'publicIdentifier' in df.columns:
-        def fill_from_identifier(row):
-            if pd.notna(row.get('linkedin_url')) and row.get('linkedin_url'):
-                return row['linkedin_url']
-            pub_id = row.get('publicIdentifier')
-            if pd.notna(pub_id) and pub_id and pub_id != 'null':
-                return f"https://www.linkedin.com/in/{pub_id}"
-            return None
-        df['linkedin_url'] = df.apply(fill_from_identifier, axis=1)
-
-    return df
+    return result_df
 
 
 def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
@@ -1870,90 +1834,47 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
 
 
 def normalize_crustdata_profile(record: dict) -> dict:
-    """Normalize a single Crustdata profile to consistent column names."""
-    normalized = {}
+    """Normalize a single Crustdata profile using shared normalizers.
 
-    # Keep original linkedin URL
-    normalized['linkedin_url'] = record.get('_original_linkedin_url') or record.get('linkedin_profile_url') or record.get('linkedin_url')
+    This is a wrapper around normalizers.normalize_crustdata_record for backwards compatibility.
+    """
+    original_url = record.get('_original_linkedin_url')
+    normalized = normalize_crustdata_record(record, original_url)
 
-    # Name handling
-    first_name = record.get('first_name')
-    last_name = record.get('last_name')
-    if not first_name and not last_name:
-        full_name = record.get('name', '')
-        if full_name:
-            parts = str(full_name).strip().split(' ', 1)
-            first_name = parts[0] if parts else ''
-            last_name = parts[1] if len(parts) > 1 else ''
-    normalized['first_name'] = first_name or ''
-    normalized['last_name'] = last_name or ''
-    normalized['name'] = f"{first_name or ''} {last_name or ''}".strip()
+    if not normalized:
+        # Return minimal dict for failed records
+        return {
+            'linkedin_url': original_url or record.get('linkedin_profile_url') or record.get('linkedin_url') or '',
+            'name': '',
+            'first_name': '',
+            'last_name': '',
+            'current_company': '',
+            'current_title': '',
+            'headline': '',
+            'location': '',
+            'summary': '',
+            'skills': '',
+            'education': '',
+        }
 
-    # Basic fields
-    normalized['headline'] = record.get('headline') or ''
-    normalized['location'] = record.get('location') or ''
-    normalized['summary'] = record.get('summary') or ''
+    # Convert to display format
+    display = profile_to_display_dict(normalized)
 
-    # Extract current position from positions array
-    positions = record.get('positions', [])
-    if isinstance(positions, str):
-        try:
-            positions = json.loads(positions)
-        except:
-            positions = []
+    # Add JSON fields for reference (backwards compatibility)
+    raw = normalized.get('raw_crustdata', record)
+    display['positions_json'] = json.dumps(raw.get('positions', [])) if raw.get('positions') else ''
+    display['education_json'] = json.dumps(raw.get('education', [])) if raw.get('education') else ''
+    display['connections_count'] = normalized.get('connections_count') or ''
+    display['followers_count'] = normalized.get('followers_count') or ''
 
-    if positions and isinstance(positions, list) and len(positions) > 0:
-        current_pos = positions[0]
-        if isinstance(current_pos, dict):
-            normalized['current_title'] = current_pos.get('title') or current_pos.get('job_title') or ''
-            normalized['current_company'] = current_pos.get('company_name') or current_pos.get('company') or current_pos.get('organization') or ''
-            normalized['current_years_in_role'] = current_pos.get('duration_in_role') or current_pos.get('years_in_role') or ''
-            normalized['current_years_at_company'] = current_pos.get('duration_at_company') or current_pos.get('years_at_company') or ''
-    else:
-        # Fallback to top-level fields
-        normalized['current_title'] = record.get('current_title') or record.get('title') or record.get('job_title') or ''
-        normalized['current_company'] = record.get('current_company') or record.get('company') or record.get('company_name') or ''
-        normalized['current_years_in_role'] = record.get('current_years_in_role') or ''
-        normalized['current_years_at_company'] = record.get('current_years_at_company') or ''
-
-    # Skills
-    skills = record.get('skills', [])
-    if isinstance(skills, list):
-        normalized['skills'] = ', '.join(str(s) for s in skills[:50])
-    elif skills:
-        normalized['skills'] = str(skills)
-    else:
-        normalized['skills'] = ''
-
-    # Education
-    education = record.get('education', [])
-    if isinstance(education, str):
-        try:
-            education = json.loads(education)
-        except:
-            pass
-    if isinstance(education, list) and len(education) > 0:
-        edu = education[0]
-        if isinstance(edu, dict):
-            normalized['education'] = edu.get('school') or edu.get('school_name') or ''
-        else:
-            normalized['education'] = str(edu)
-    else:
-        normalized['education'] = ''
-
-    # Other useful fields
-    normalized['connections_count'] = record.get('connections_count') or record.get('connections') or ''
-    normalized['followers_count'] = record.get('followers_count') or record.get('followers') or ''
-
-    # Keep full positions/education as JSON for reference
-    normalized['positions_json'] = json.dumps(record.get('positions', [])) if record.get('positions') else ''
-    normalized['education_json'] = json.dumps(record.get('education', [])) if record.get('education') else ''
-
-    return normalized
+    return display
 
 
 def flatten_for_csv(data: list[dict]) -> pd.DataFrame:
-    """Flatten and normalize Crustdata profiles for display and CSV export."""
+    """Flatten and normalize Crustdata profiles for display and CSV export.
+
+    Uses shared normalizers for consistent field mapping.
+    """
     normalized_records = []
 
     for record in data:
@@ -2723,27 +2644,13 @@ with tab_upload:
                                     if not pb_df.empty:
                                         pb_df = normalize_phantombuster_columns(pb_df)
 
-                                        # Auto-save to Supabase database
-                                        db_stats = None
-                                        if HAS_DATABASE:
-                                            try:
-                                                db_client = get_supabase_client()
-                                                if db_client and check_connection(db_client):
-                                                    records = pb_df.to_dict('records')
-                                                    # Debug: save first record URL for display
-                                                    if records:
-                                                        st.session_state['_debug_first_url'] = records[0].get('linkedin_url', 'NOT FOUND')
-                                                        st.session_state['_debug_record_keys'] = list(records[0].keys())
-                                                    db_stats = upsert_profiles_from_phantombuster(db_client, records)
-                                            except Exception as e:
-                                                db_stats = {'error': str(e)}
-
+                                        # PhantomBuster data stays in session state only (not saved to DB)
+                                        # DB save happens after Crustdata enrichment
                                         st.session_state['results'] = pb_df.to_dict('records')
                                         st.session_state['results_df'] = pb_df
                                         st.session_state['preview_page'] = 0  # Reset pagination
                                         st.session_state['last_load_count'] = len(pb_df)
                                         st.session_state['last_load_file'] = filename
-                                        st.session_state['last_db_stats'] = db_stats
                                         st.rerun()
                                     else:
                                         st.error("No results found. File may have been deleted from PhantomBuster.")
@@ -2757,16 +2664,7 @@ with tab_upload:
                                     if not pb_df.empty:
                                         pb_df = normalize_phantombuster_columns(pb_df)
 
-                                        # Auto-save to Supabase database
-                                        db_stats = None
-                                        if HAS_DATABASE:
-                                            try:
-                                                db_client = get_supabase_client()
-                                                if db_client and check_connection(db_client):
-                                                    db_stats = upsert_profiles_from_phantombuster(db_client, pb_df.to_dict('records'))
-                                            except Exception as e:
-                                                db_stats = {'error': str(e)}
-
+                                        # PhantomBuster data stays in session state only (not saved to DB)
                                         # Merge with existing results
                                         if 'results_df' in st.session_state and not st.session_state['results_df'].empty:
                                             existing_df = st.session_state['results_df']
@@ -2793,7 +2691,6 @@ with tab_upload:
                                             st.session_state['last_load_file'] = filename
                                             st.session_state['last_load_mode'] = 'loaded'
 
-                                        st.session_state['last_db_stats'] = db_stats
                                         st.session_state['preview_page'] = 0
                                         st.rerun()
                                     else:
@@ -2816,49 +2713,7 @@ with tab_upload:
                         if load_mode == 'added':
                             st.success(f"Added **{load_count}** new profiles (total: **{load_total}**) from **{load_file}**")
                         else:
-                            st.success(f"Loaded **{load_count}** profiles from **{load_file}**")
-
-                        # Show database stats
-                        db_stats = st.session_state.get('last_db_stats')
-                        if db_stats:
-                            if db_stats.get('error'):
-                                st.warning(f"Database save failed: {db_stats['error']}")
-                            else:
-                                inserted = db_stats.get('inserted', 0)
-                                updated = db_stats.get('updated', 0)
-                                skipped = db_stats.get('skipped', 0)
-                                errors = db_stats.get('errors', 0)
-                                if inserted > 0 or updated > 0:
-                                    msg = f"Database: **{inserted}** new, **{updated}** updated"
-                                    if skipped > 0:
-                                        msg += f", {skipped} skipped (no URL)"
-                                    if errors > 0:
-                                        msg += f", {errors} errors"
-                                    st.info(msg)
-                                elif skipped > 0:
-                                    st.warning(f"Database: **{skipped}** profiles skipped (no LinkedIn URL found)")
-                                else:
-                                    st.warning("Database: No profiles saved (no valid LinkedIn URLs)")
-
-                        # Show debug info about columns if skipped profiles
-                        if '_debug_url_cols' in st.session_state:
-                            with st.expander("Debug: URL columns found in data"):
-                                st.write("URL-related columns:", st.session_state.get('_debug_url_cols', []))
-                                st.write("Valid linkedin_url count:", st.session_state.get('_debug_valid_urls', 'N/A'))
-                                st.write("First record linkedin_url:", st.session_state.get('_debug_first_url', 'N/A'))
-                                st.write("Record keys:", st.session_state.get('_debug_record_keys', []))
-                                db_debug = st.session_state.get('last_db_stats', {})
-                                if db_debug and 'debug' in db_debug:
-                                    st.write("DB Debug:", db_debug.get('debug', []))
-                            del st.session_state['_debug_url_cols']
-                            if '_debug_all_cols' in st.session_state:
-                                del st.session_state['_debug_all_cols']
-                            if '_debug_valid_urls' in st.session_state:
-                                del st.session_state['_debug_valid_urls']
-                            if '_debug_first_url' in st.session_state:
-                                del st.session_state['_debug_first_url']
-                            if '_debug_record_keys' in st.session_state:
-                                del st.session_state['_debug_record_keys']
+                            st.success(f"Loaded **{load_count}** profiles from **{load_file}** - ready for enrichment")
 
                         # Clear after showing once
                         del st.session_state['last_load_count']
@@ -2868,8 +2723,6 @@ with tab_upload:
                             del st.session_state['last_load_mode']
                         if 'last_load_total' in st.session_state:
                             del st.session_state['last_load_total']
-                        if 'last_db_stats' in st.session_state:
-                            del st.session_state['last_db_stats']
 
                     results_df = st.session_state.get('results_df')
                     if results_df is not None and not results_df.empty:
@@ -3172,16 +3025,8 @@ with tab_upload:
                                 container_id=st.session_state.get('pb_launch_container_id')
                             )
 
-                        # Save to database
-                        db_stats = None
-                        if HAS_DATABASE:
-                            try:
-                                db_client = get_supabase_client()
-                                if db_client and check_connection(db_client):
-                                    db_stats = upsert_profiles_from_phantombuster(db_client, pb_df.to_dict('records'))
-                            except Exception as e:
-                                db_stats = {'error': str(e)}
-
+                        # PhantomBuster data stays in session state only (not saved to DB)
+                        # DB save happens after Crustdata enrichment
                         st.session_state['results'] = pb_df.to_dict('records')
                         st.session_state['results_df'] = pb_df
                         st.session_state['preview_page'] = 0
@@ -3193,7 +3038,6 @@ with tab_upload:
                         st.session_state['pb_launch_skip_count'] = 0
                         st.session_state['last_load_count'] = len(pb_df)
                         st.session_state['last_load_file'] = f"{csv_name}.csv" if csv_name else "results"
-                        st.session_state['last_db_stats'] = db_stats
                         st.rerun()
                     else:
                         st.error("Could not load results.")
@@ -3313,34 +3157,16 @@ with tab_upload:
                 # Count valid LinkedIn URLs
                 valid_urls = df_uploaded['linkedin_url'].notna().sum() if 'linkedin_url' in df_uploaded.columns else 0
 
-                # Save to database if available
-                db_stats = {}
-                if HAS_DATABASE and valid_urls > 0:
-                    try:
-                        client = get_supabase_client()
-                        if client:
-                            # Convert DataFrame to list of dicts for the function
-                            profiles_list = df_uploaded.to_dict('records')
-                            db_stats = upsert_profiles_from_phantombuster(client, profiles_list)
-                    except Exception as e:
-                        db_stats = {'error': str(e)}
-
+                # PhantomBuster/CSV data stays in session state only (not saved to DB)
+                # DB save happens after Crustdata enrichment
                 st.session_state['results'] = df_uploaded.to_dict('records')
                 st.session_state['results_df'] = df_uploaded
 
                 # Show success message with details
                 msg = f"Loaded **{len(df_uploaded)}** profiles"
                 if valid_urls > 0:
-                    msg += f" ({valid_urls} with LinkedIn URLs)"
+                    msg += f" ({valid_urls} with LinkedIn URLs ready for enrichment)"
                 st.success(msg)
-
-                # Show database save status
-                if db_stats.get('error'):
-                    st.warning(f"Database error: {db_stats.get('error')}")
-                elif db_stats.get('new', 0) > 0 or db_stats.get('updated', 0) > 0:
-                    st.info(f"Saved to database: {db_stats.get('new', 0)} new, {db_stats.get('updated', 0)} updated")
-                elif valid_urls > 0:
-                    st.warning("No profiles saved to database")
 
         except Exception as e:
             st.error(f"Error: {e}")

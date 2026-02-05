@@ -3956,75 +3956,220 @@ with tab_filter2:
         if user_sheet_url:
             st.session_state['user_sheet_url'] = user_sheet_url
             filter_sheets['url'] = user_sheet_url
+            # Set default tab names if not already set
+            if 'past_candidates' not in filter_sheets:
+                filter_sheets['past_candidates'] = 'Past Candidates'
+            if 'blacklist' not in filter_sheets:
+                filter_sheets['blacklist'] = 'Blacklist'
+            if 'not_relevant' not in filter_sheets:
+                filter_sheets['not_relevant'] = 'NotRelevant Companies'
+            if 'universities' not in filter_sheets:
+                filter_sheets['universities'] = 'Universities'
 
         has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
 
         if has_sheets:
-            st.success("Filter sheet connected")
+            # Try to show sheet name and available tabs
+            try:
+                spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
+                tabs = [ws.title for ws in spreadsheet.worksheets()]
+                st.success(f"📊 **{spreadsheet.title}** connected")
+                with st.expander("Sheet tabs", expanded=False):
+                    st.write(f"Available tabs: {', '.join(tabs)}")
+                    st.caption("Expected tabs: Past Candidates, Blacklist, NotRelevant Companies, Universities")
+            except Exception:
+                st.success("Filter sheet connected")
 
-            if st.button("Apply Filters", type="primary", key="apply_filters_enriched"):
-                with st.spinner("Applying filters..."):
-                    # Use same filtering logic as Filter tab
-                    df = enriched_df.copy()
-                    original_count = len(df)
-                    removed = {}
+        st.divider()
+        st.markdown("**Filter Options:**")
 
-                    # Load filter lists from sheets
-                    sheet_url = filter_sheets.get('url', '')
+        col1, col2 = st.columns(2)
 
-                    # Determine URL column name
-                    url_col = 'linkedin_url' if 'linkedin_url' in df.columns else 'public_url' if 'public_url' in df.columns else None
+        with col1:
+            # Sheet-based filters
+            st.markdown("**From Google Sheet:**")
+            use_past_candidates = st.checkbox("Exclude Past Candidates", value=True, key="f2_past_candidates")
+            use_blacklist = st.checkbox("Exclude Blacklist", value=True, key="f2_blacklist")
+            use_not_relevant = st.checkbox("Exclude Not Relevant Companies (all employers)", value=True, key="f2_not_relevant",
+                                          help="Check against ALL past employers, not just current")
+            uni_filter_mode = st.radio("Target Universities:",
+                                       ["Off", "Prioritize (move to top)", "Require (filter others out)"],
+                                       key="f2_uni_mode", horizontal=True)
 
-                    # Past candidates filter
-                    if filter_sheets.get('past_candidates') and url_col:
-                        pc_df = load_sheet_as_df(sheet_url, filter_sheets['past_candidates'])
-                        if pc_df is not None:
-                            past_urls = set()
-                            for col in pc_df.columns:
-                                if 'url' in col.lower() or 'linkedin' in col.lower():
-                                    past_urls.update(pc_df[col].dropna().str.lower().tolist())
+        with col2:
+            # Keyword filters (job titles only)
+            st.markdown("**Job Title Keywords:**")
+            include_keywords = st.text_input("Include keywords (comma-separated)", key="f2_include_kw",
+                                            placeholder="e.g., backend, senior, lead",
+                                            help="Profile must have at least one of these in job titles")
+            exclude_keywords = st.text_input("Exclude keywords (comma-separated)", key="f2_exclude_kw",
+                                            placeholder="e.g., intern, student, freelance",
+                                            help="Exclude profiles with these in job titles")
+
+        # Required skills
+        required_skills = st.text_input("Required skills (comma-separated)", key="f2_required_skills",
+                                       placeholder="e.g., Python, AWS, Kubernetes",
+                                       help="Profile must have ALL of these skills")
+
+        if st.button("Apply Filters", type="primary", key="apply_filters_enriched"):
+            with st.spinner("Applying filters..."):
+                df = enriched_df.copy()
+                original_count = len(df)
+                removed = {}
+                priority_matches = []
+
+                sheet_url = filter_sheets.get('url', '') if has_sheets else ''
+                url_col = 'linkedin_url' if 'linkedin_url' in df.columns else 'public_url' if 'public_url' in df.columns else None
+
+                # Past candidates filter
+                if use_past_candidates and has_sheets and filter_sheets.get('past_candidates') and url_col:
+                    pc_df = load_sheet_as_df(sheet_url, filter_sheets['past_candidates'])
+                    if pc_df is not None:
+                        past_urls = set()
+                        for col in pc_df.columns:
+                            if 'url' in col.lower() or 'linkedin' in col.lower():
+                                past_urls.update(pc_df[col].dropna().str.lower().tolist())
+                        before = len(df)
+                        df = df[~df[url_col].str.lower().isin(past_urls)]
+                        removed['Past Candidates'] = before - len(df)
+
+                # Blacklist filter
+                if use_blacklist and has_sheets and filter_sheets.get('blacklist') and url_col:
+                    bl_df = load_sheet_as_df(sheet_url, filter_sheets['blacklist'])
+                    if bl_df is not None:
+                        bl_urls = set()
+                        for col in bl_df.columns:
+                            if 'url' in col.lower() or 'linkedin' in col.lower():
+                                bl_urls.update(bl_df[col].dropna().str.lower().tolist())
+                        before = len(df)
+                        df = df[~df[url_col].str.lower().isin(bl_urls)]
+                        removed['Blacklist'] = before - len(df)
+
+                # Not relevant companies filter (checks ALL employers)
+                if use_not_relevant and has_sheets and filter_sheets.get('not_relevant'):
+                    nr_df = load_sheet_as_df(sheet_url, filter_sheets['not_relevant'])
+                    if nr_df is not None and not nr_df.empty:
+                        not_relevant_companies = set()
+                        for col in nr_df.columns:
+                            not_relevant_companies.update(nr_df[col].dropna().str.lower().str.strip().tolist())
+                        # Check against all_employers column
+                        if 'all_employers' in df.columns:
+                            def has_not_relevant_employer(employers_str):
+                                if pd.isna(employers_str) or not employers_str:
+                                    return False
+                                employers = [e.strip().lower() for e in str(employers_str).split(',')]
+                                return any(emp in not_relevant_companies for emp in employers)
                             before = len(df)
-                            df = df[~df[url_col].str.lower().isin(past_urls)]
-                            removed['Past Candidates'] = before - len(df)
+                            df = df[~df['all_employers'].apply(has_not_relevant_employer)]
+                            removed['Not Relevant Companies'] = before - len(df)
 
-                    # Blacklist filter
-                    if filter_sheets.get('blacklist') and url_col:
-                        bl_df = load_sheet_as_df(sheet_url, filter_sheets['blacklist'])
-                        if bl_df is not None:
-                            bl_urls = set()
-                            for col in bl_df.columns:
-                                if 'url' in col.lower() or 'linkedin' in col.lower():
-                                    bl_urls.update(bl_df[col].dropna().str.lower().tolist())
-                            before = len(df)
-                            df = df[~df[url_col].str.lower().isin(bl_urls)]
-                            removed['Blacklist'] = before - len(df)
+                # Target universities filter
+                if uni_filter_mode != "Off" and has_sheets and filter_sheets.get('universities'):
+                    uni_df = load_sheet_as_df(sheet_url, filter_sheets['universities'])
+                    if uni_df is not None and not uni_df.empty:
+                        target_unis = set()
+                        for col in uni_df.columns:
+                            target_unis.update(uni_df[col].dropna().str.lower().str.strip().tolist())
+                        if 'all_schools' in df.columns:
+                            def has_target_university(schools_str):
+                                if pd.isna(schools_str) or not schools_str:
+                                    return False
+                                schools = [s.strip().lower() for s in str(schools_str).split(',')]
+                                return any(any(target in school for target in target_unis) for school in schools)
+                            df['_target_uni'] = df['all_schools'].apply(has_target_university)
+                            priority_matches = df[df['_target_uni']].index.tolist()
 
-                    # Store results
-                    st.session_state['passed_candidates_df'] = df
-                    st.session_state['filter_stats'] = {
-                        'original': original_count,
-                        'total_removed': original_count - len(df),
-                        'final': len(df),
-                        'removed_by': removed
-                    }
+                            if uni_filter_mode == "Require (filter others out)":
+                                # Filter out non-target universities
+                                before = len(df)
+                                df = df[df['_target_uni']]
+                                df = df.drop(columns=['_target_uni'])
+                                removed['Non-Target Universities'] = before - len(df)
+                            else:
+                                # Prioritize: sort target universities first
+                                df = pd.concat([df[df['_target_uni']], df[~df['_target_uni']]])
+                                df = df.drop(columns=['_target_uni'])
 
-                    st.success(f"Filtered: {original_count} → {len(df)} profiles")
-                    for reason, count in removed.items():
-                        if count > 0:
-                            st.caption(f"  - {reason}: {count} removed")
+                # Include keywords filter (job titles only)
+                if include_keywords and include_keywords.strip():
+                    keywords = [k.strip().lower() for k in include_keywords.split(',') if k.strip()]
+                    if keywords:
+                        search_cols = ['past_positions', 'current_title']
+                        available_search_cols = [c for c in search_cols if c in df.columns]
+                        def has_include_keyword(row):
+                            text = ' '.join(str(row[c]) for c in available_search_cols if pd.notna(row[c])).lower()
+                            return any(kw in text for kw in keywords)
+                        before = len(df)
+                        df = df[df.apply(has_include_keyword, axis=1)]
+                        removed['Missing Title Keywords'] = before - len(df)
+
+                # Exclude keywords filter (job titles only)
+                if exclude_keywords and exclude_keywords.strip():
+                    keywords = [k.strip().lower() for k in exclude_keywords.split(',') if k.strip()]
+                    if keywords:
+                        search_cols = ['past_positions', 'current_title']
+                        available_search_cols = [c for c in search_cols if c in df.columns]
+                        def has_exclude_keyword(row):
+                            text = ' '.join(str(row[c]) for c in available_search_cols if pd.notna(row[c])).lower()
+                            return any(kw in text for kw in keywords)
+                        before = len(df)
+                        df = df[~df.apply(has_exclude_keyword, axis=1)]
+                        removed['Excluded Title Keywords'] = before - len(df)
+
+                # Required skills filter
+                if required_skills and required_skills.strip():
+                    skills_list = [s.strip().lower() for s in required_skills.split(',') if s.strip()]
+                    if skills_list and 'skills' in df.columns:
+                        def has_all_required_skills(skills_str):
+                            if pd.isna(skills_str) or not skills_str:
+                                return False
+                            profile_skills = str(skills_str).lower()
+                            return all(skill in profile_skills for skill in skills_list)
+                        before = len(df)
+                        df = df[df['skills'].apply(has_all_required_skills)]
+                        removed['Missing Required Skills'] = before - len(df)
+
+                # Store results
+                st.session_state['passed_candidates_df'] = df.reset_index(drop=True)
+                st.session_state['filter_stats'] = {
+                    'original': original_count,
+                    'total_removed': original_count - len(df),
+                    'final': len(df),
+                    'removed_by': removed,
+                    'priority_count': len(priority_matches)
+                }
+
+                st.success(f"Filtered: {original_count} → {len(df)} profiles")
+                for reason, count in removed.items():
+                    if count > 0:
+                        st.caption(f"  - {reason}: {count} removed")
+                if priority_matches and uni_filter_mode == "Prioritize (move to top)":
+                    st.info(f"🎓 {len(priority_matches)} candidates from target universities (shown first)")
 
         # Show current data
         st.divider()
         display_df = st.session_state.get('passed_candidates_df', enriched_df)
-        st.markdown(f"**{len(display_df)}** profiles")
 
-        display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'linkedin_url', 'public_url']
-        available_cols = [c for c in display_cols if c in display_df.columns]
-        st.dataframe(display_df[available_cols].head(50), use_container_width=True, hide_index=True,
-                    column_config={
-                        "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
-                        "public_url": st.column_config.LinkColumn("LinkedIn")
-                    })
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown(f"**{len(display_df)}** profiles")
+        with col2:
+            show_all_cols = st.checkbox("Show all columns", value=False, key="filter2_show_all_cols")
+
+        if show_all_cols:
+            st.dataframe(display_df.head(50), use_container_width=True, hide_index=True,
+                        column_config={
+                            "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                            "public_url": st.column_config.LinkColumn("LinkedIn")
+                        })
+        else:
+            display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'linkedin_url', 'public_url']
+            available_cols = [c for c in display_cols if c in display_df.columns]
+            st.dataframe(display_df[available_cols].head(50), use_container_width=True, hide_index=True,
+                        column_config={
+                            "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                            "public_url": st.column_config.LinkColumn("LinkedIn")
+                        })
 
         if len(display_df) > 0:
             csv_data = display_df.to_csv(index=False)

@@ -80,8 +80,13 @@ def update_phantombuster_with_skip_list(
         # Add skip list for deduplication
         # PhantomBuster Sales Navigator Export uses various param names
         # We set multiple to ensure compatibility
+        # NOTE: Limit skip list to avoid "Argument too big" error from PB API
+        MAX_SKIP_LIST_SIZE = 500  # PhantomBuster has argument size limits
         skipped_count = 0
         if skip_urls and len(skip_urls) > 0:
+            # Truncate if too large (keep most recent)
+            if len(skip_urls) > MAX_SKIP_LIST_SIZE:
+                skip_urls = skip_urls[:MAX_SKIP_LIST_SIZE]
             skipped_count = len(skip_urls)
             # Common parameter names for skip lists in PB phantoms
             arg_dict['profileUrls'] = []  # Clear any input URLs

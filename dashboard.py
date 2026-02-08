@@ -4682,10 +4682,15 @@ with tab_screening:
                 placeholder="e.g., Must have AWS experience, Hebrew speaker preferred, etc."
             )
 
-        # System Prompt Editor (admin only)
-        ADMIN_USERS = {'alexey', 'dana'}
+        # System Prompt Editor (admin only — also shown when auth is off for local dev)
+        ADMIN_NAMES = {'alexey', 'dana'}
         current_user = st.session_state.get('username', '').lower()
-        if current_user in ADMIN_USERS:
+        is_admin = (
+            not authenticator  # no auth = local dev, always show
+            or current_user in ADMIN_NAMES
+            or any(name in current_user for name in ADMIN_NAMES)  # match email like alexey@...
+        )
+        if is_admin:
             with st.expander("System Prompt (admin only)"):
                 current_prompt = get_screening_prompt()
                 edited_prompt = st.text_area(

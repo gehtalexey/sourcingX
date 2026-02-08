@@ -4242,7 +4242,11 @@ with tab_filter2:
                 sample_row = enriched_df.iloc[0]
                 for col in available:
                     val = sample_row.get(col, '')
-                    if pd.notna(val) and str(val).strip():
+                    try:
+                        is_valid = val is not None and str(val).strip() and str(val) != 'nan'
+                    except (ValueError, TypeError):
+                        is_valid = False
+                    if is_valid:
                         st.write(f"**{col}:** {str(val)[:200]}{'...' if len(str(val)) > 200 else ''}")
                     else:
                         st.write(f"**{col}:** *(empty)*")

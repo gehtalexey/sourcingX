@@ -54,6 +54,7 @@ try:
         get_dedup_stats, profiles_to_dataframe, get_usage_summary, get_usage_logs,
         get_usage_by_date, get_enriched_urls, get_recently_enriched_urls,
         get_setting, save_setting,
+        get_search_history, save_search_history_entry, delete_search_history_entry,
         ENRICHMENT_REFRESH_MONTHS,
     )
     from pb_dedup import filter_results_against_database, update_phantombuster_with_skip_list, get_skip_list_from_database
@@ -556,13 +557,25 @@ def get_search_history_path() -> Path:
 
 
 def load_search_history(agent_id: str = None) -> list[dict]:
-    """Load search history from file.
+    """Load search history from database (if available) or local file.
 
     Args:
         agent_id: If provided, filter history to this agent only
 
     Returns list of dicts with keys: agent_id, csv_name, search_url, launched_at, profiles_requested
     """
+    # Try database first (for cloud deployment)
+    if HAS_DATABASE:
+        try:
+            db_client = _get_db_client()
+            if db_client:
+                db_history = get_search_history(db_client, agent_id)
+                if db_history:
+                    return db_history
+        except Exception:
+            pass
+
+    # Fall back to local file
     history_path = get_search_history_path()
     if not history_path.exists():
         return []
@@ -584,12 +597,23 @@ def load_search_history(agent_id: str = None) -> list[dict]:
 
 
 def save_search_to_history(agent_id: str, csv_name: str, search_url: str = None, profiles_requested: int = None, search_name: str = None) -> bool:
-    """Save a search to history file.
+    """Save a search to history (database if available, also local file).
 
     Returns True if saved successfully.
     """
-    history_path = get_search_history_path()
+    saved = False
 
+    # Save to database if available (for cloud persistence)
+    if HAS_DATABASE:
+        try:
+            db_client = _get_db_client()
+            if db_client:
+                saved = save_search_history_entry(db_client, agent_id, csv_name, search_url, profiles_requested, search_name)
+        except Exception:
+            pass
+
+    # Also save to local file (for local development)
+    history_path = get_search_history_path()
     try:
         # Load existing history
         if history_path.exists():
@@ -613,45 +637,54 @@ def save_search_to_history(agent_id: str, csv_name: str, search_url: str = None,
         with open(history_path, 'w') as f:
             json.dump(history, f, indent=2)
 
-        return True
+        saved = True
     except Exception:
-        return False
+        pass
+
+    return saved
 
 
 def delete_search_from_history(agent_id: str, csv_name: str, api_key: str = None, delete_file: bool = False) -> bool:
-    """Delete a search from history and optionally delete the file from PhantomBuster.
+    """Delete a search from history (database and local) and optionally delete the file from PhantomBuster.
 
     Returns True if deleted successfully.
     """
+    deleted = False
+    agent_id_str = str(agent_id)
+
+    # Delete from database if available
+    if HAS_DATABASE:
+        try:
+            db_client = _get_db_client()
+            if db_client:
+                deleted = delete_search_history_entry(db_client, agent_id, csv_name)
+        except Exception:
+            pass
+
+    # Also delete from local file
     history_path = get_search_history_path()
-
     try:
-        # Load history
-        if not history_path.exists():
-            return False
+        if history_path.exists():
+            with open(history_path, 'r') as f:
+                history = json.load(f)
 
-        with open(history_path, 'r') as f:
-            history = json.load(f)
+            # Find and remove entry (convert to string for comparison)
+            original_len = len(history)
+            history = [h for h in history if not (str(h.get('agent_id', '')) == agent_id_str and h.get('csv_name') == csv_name)]
 
-        # Find and remove entry
-        original_len = len(history)
-        history = [h for h in history if not (h.get('agent_id') == agent_id and h.get('csv_name') == csv_name)]
-
-        if len(history) == original_len:
-            return False  # Entry not found
-
-        # Save updated history
-        with open(history_path, 'w') as f:
-            json.dump(history, f, indent=2)
-
-        # Delete file from PhantomBuster if requested
-        if delete_file and api_key:
-            delete_phantombuster_file(api_key, agent_id, f'{csv_name}.csv')
-            delete_phantombuster_file(api_key, agent_id, f'{csv_name}.json')
-
-        return True
+            if len(history) < original_len:
+                with open(history_path, 'w') as f:
+                    json.dump(history, f, indent=2)
+                deleted = True
     except Exception:
-        return False
+        pass
+
+    # Delete file from PhantomBuster if requested
+    if delete_file and api_key:
+        delete_phantombuster_file(api_key, agent_id, f'{csv_name}.csv')
+        delete_phantombuster_file(api_key, agent_id, f'{csv_name}.json')
+
+    return deleted
 
 
 def get_file_size_from_phantombuster(api_key: str, agent_id: str, csv_name: str) -> int:

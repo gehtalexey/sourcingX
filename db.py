@@ -568,6 +568,116 @@ def save_setting(client: SupabaseClient, key: str, value: str) -> bool:
 
 
 # ============================================================================
+# SEARCH HISTORY (PhantomBuster runs)
+# ============================================================================
+
+def get_search_history(client: SupabaseClient, agent_id: str = None) -> list:
+    """Get search history from database.
+
+    Args:
+        client: SupabaseClient instance
+        agent_id: If provided, filter history to this agent only
+
+    Returns:
+        List of search history entries, most recent first
+    """
+    try:
+        history_json = get_setting(client, 'search_history')
+        if not history_json:
+            return []
+
+        history = json.loads(history_json)
+
+        # Filter by agent_id if provided (convert to string for comparison)
+        if agent_id:
+            agent_id_str = str(agent_id)
+            history = [h for h in history if str(h.get('agent_id', '')) == agent_id_str]
+
+        # Sort by launched_at descending (most recent first)
+        history.sort(key=lambda x: x.get('launched_at', ''), reverse=True)
+        return history
+    except Exception as e:
+        print(f"[DB] Failed to get search history: {e}")
+        return []
+
+
+def save_search_history_entry(client: SupabaseClient, agent_id: str, csv_name: str,
+                               search_url: str = None, profiles_requested: int = None,
+                               search_name: str = None) -> bool:
+    """Save a search entry to database history.
+
+    Args:
+        client: SupabaseClient instance
+        agent_id: PhantomBuster agent ID
+        csv_name: Name of the output CSV file
+        search_url: LinkedIn search URL
+        profiles_requested: Number of profiles requested
+        search_name: Optional human-readable name for the search
+
+    Returns:
+        True if saved successfully
+    """
+    try:
+        # Load existing history
+        history_json = get_setting(client, 'search_history')
+        history = json.loads(history_json) if history_json else []
+
+        # Add new entry
+        entry = {
+            'agent_id': str(agent_id),
+            'csv_name': csv_name,
+            'launched_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M'),
+            'search_url': search_url,
+            'profiles_requested': profiles_requested,
+            'search_name': search_name,
+        }
+        history.append(entry)
+
+        # Keep only last 100 entries to avoid bloat
+        if len(history) > 100:
+            history = history[-100:]
+
+        # Save back
+        return save_setting(client, 'search_history', json.dumps(history))
+    except Exception as e:
+        print(f"[DB] Failed to save search history: {e}")
+        return False
+
+
+def delete_search_history_entry(client: SupabaseClient, agent_id: str, csv_name: str) -> bool:
+    """Delete a search entry from database history.
+
+    Args:
+        client: SupabaseClient instance
+        agent_id: PhantomBuster agent ID
+        csv_name: Name of the output CSV file to delete
+
+    Returns:
+        True if deleted successfully
+    """
+    try:
+        history_json = get_setting(client, 'search_history')
+        if not history_json:
+            return False
+
+        history = json.loads(history_json)
+        agent_id_str = str(agent_id)
+
+        # Filter out the entry to delete
+        original_len = len(history)
+        history = [h for h in history if not (str(h.get('agent_id', '')) == agent_id_str and h.get('csv_name') == csv_name)]
+
+        if len(history) == original_len:
+            return False  # Entry not found
+
+        # Save back
+        return save_setting(client, 'search_history', json.dumps(history))
+    except Exception as e:
+        print(f"[DB] Failed to delete search history entry: {e}")
+        return False
+
+
+# ============================================================================
 # BACKWARDS COMPATIBILITY - Deprecated functions
 # ============================================================================
 

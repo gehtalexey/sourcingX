@@ -571,9 +571,10 @@ def load_search_history(agent_id: str = None) -> list[dict]:
         with open(history_path, 'r') as f:
             history = json.load(f)
 
-        # Filter by agent_id if provided
+        # Filter by agent_id if provided (convert to string for comparison)
         if agent_id:
-            history = [h for h in history if h.get('agent_id') == agent_id]
+            agent_id_str = str(agent_id)
+            history = [h for h in history if str(h.get('agent_id', '')) == agent_id_str]
 
         # Sort by launched_at descending (most recent first)
         history.sort(key=lambda x: x.get('launched_at', ''), reverse=True)
@@ -597,9 +598,9 @@ def save_search_to_history(agent_id: str, csv_name: str, search_url: str = None,
         else:
             history = []
 
-        # Add new entry
+        # Add new entry (ensure agent_id is stored as string)
         entry = {
-            'agent_id': agent_id,
+            'agent_id': str(agent_id),
             'csv_name': csv_name,
             'launched_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
             'search_url': search_url,

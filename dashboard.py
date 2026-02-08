@@ -4419,7 +4419,7 @@ with tab_filter2:
                         search_cols = ['past_positions', 'current_title']
                         available_search_cols = [c for c in search_cols if c in df.columns]
                         def has_include_keyword(row):
-                            text = ' '.join(str(row[c]) for c in available_search_cols if pd.notna(row[c])).lower()
+                            text = ' '.join(str(row[c]) for c in available_search_cols if row.get(c) is not None).lower()
                             return any(kw in text for kw in keywords)
                         mask = df.apply(has_include_keyword, axis=1)
                         filtered_out['Missing Title Keywords'] = df[~mask].to_dict('records')
@@ -4433,7 +4433,7 @@ with tab_filter2:
                         search_cols = ['past_positions', 'current_title']
                         available_search_cols = [c for c in search_cols if c in df.columns]
                         def has_exclude_keyword(row):
-                            text = ' '.join(str(row[c]) for c in available_search_cols if pd.notna(row[c])).lower()
+                            text = ' '.join(str(row[c]) for c in available_search_cols if row.get(c) is not None).lower()
                             return any(kw in text for kw in keywords)
                         mask = df.apply(has_exclude_keyword, axis=1)
                         filtered_out['Excluded Title Keywords'] = df[mask].to_dict('records')
@@ -4459,7 +4459,7 @@ with tab_filter2:
                                 # Combine text from all search columns
                                 combined_text = ' '.join(
                                     str(row[c]) for c in available_search_cols
-                                    if c in row and pd.notna(row[c])
+                                    if c in row and row.get(c) is not None
                                 ).lower()
 
                                 if not combined_text.strip():

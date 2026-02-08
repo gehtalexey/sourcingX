@@ -78,23 +78,10 @@ def update_phantombuster_with_skip_list(
         arg_dict['csvName'] = csv_name
 
         # Add skip list for deduplication
-        # PhantomBuster Sales Navigator Export uses various param names
-        # We set multiple to ensure compatibility
-        # NOTE: Limit skip list to avoid "Argument too big" error from PB API
-        MAX_SKIP_LIST_SIZE = 500  # PhantomBuster has argument size limits
+        # NOTE: Skip list disabled - causes "Argument too big" error from PB API
+        # The list gets too large. Use post-scrape filtering instead.
         skipped_count = 0
-        if skip_urls and len(skip_urls) > 0:
-            # Truncate if too large (keep most recent)
-            if len(skip_urls) > MAX_SKIP_LIST_SIZE:
-                skip_urls = skip_urls[:MAX_SKIP_LIST_SIZE]
-            skipped_count = len(skip_urls)
-            # Common parameter names for skip lists in PB phantoms
-            arg_dict['profileUrls'] = []  # Clear any input URLs
-            arg_dict['removeDuplicates'] = True
-            arg_dict['onlyNewProfiles'] = True
-            # Some phantoms use these:
-            arg_dict['alreadyScraped'] = skip_urls
-            arg_dict['blacklist'] = skip_urls
+        arg_dict['removeDuplicates'] = True
 
         # Update the agent
         update_response = requests.post(

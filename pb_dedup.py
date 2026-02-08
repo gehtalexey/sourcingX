@@ -171,15 +171,12 @@ def filter_results_against_database(df: pd.DataFrame, url_column: str = None) ->
         db_urls = set(get_all_linkedin_urls(client))
 
         # Normalize URLs for comparison
-        def normalize(url):
-            if not url:
-                return ''
-            return str(url).strip().rstrip('/').lower().split('?')[0]
+        from normalizers import normalize_linkedin_url as normalize
 
-        db_urls_normalized = {normalize(u) for u in db_urls}
+        db_urls_normalized = {normalize(u) for u in db_urls if normalize(u)}
 
         # Filter out profiles already in database
-        mask = ~df[url_column].apply(lambda x: normalize(x) in db_urls_normalized)
+        mask = ~df[url_column].apply(lambda x: (normalize(x) or '') in db_urls_normalized)
         filtered_df = df[mask].copy()
 
         filtered_count = original_count - len(filtered_df)

@@ -6442,8 +6442,8 @@ with tab_screening:
                             on='linkedin_url', how='left'
                         )
 
-                # Reorder columns to put important ones first
-                priority_cols = ['score', 'fit', 'name', 'current_title', 'current_company', 'summary', 'why', 'strengths', 'concerns', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location', 'linkedin_url']
+                # Reorder columns to put important ones first (linkedin_url next to name for easy click)
+                priority_cols = ['score', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'why', 'strengths', 'concerns', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
                 ordered_cols = [c for c in priority_cols if c in df_display.columns]
                 other_cols = [c for c in df_display.columns if c not in priority_cols and c != 'index']
                 df_display = df_display[ordered_cols + other_cols]

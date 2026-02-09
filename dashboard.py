@@ -3313,6 +3313,42 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
             value = json.dumps(value, ensure_ascii=False)
         return str(value)[:max_len] if value else 'N/A'
 
+    # Extract full work history with dates from raw_crustdata
+    def format_work_history(profile):
+        """Format work history with dates for accurate experience calculation."""
+        raw = profile.get('raw_crustdata', {})
+
+        # Try past_employers first (Crustdata format)
+        past_employers = raw.get('past_employers', [])
+        current_employers = raw.get('current_employers', [])
+        all_positions = current_employers + past_employers
+
+        if all_positions:
+            positions = []
+            for emp in all_positions[:15]:  # Limit to 15 positions
+                if isinstance(emp, dict):
+                    title = emp.get('employee_title') or emp.get('title') or ''
+                    company = emp.get('employer_name') or emp.get('company_name') or ''
+                    start = emp.get('start_date') or emp.get('started_on') or ''
+                    end = emp.get('end_date') or emp.get('ended_on') or 'Present'
+                    duration = emp.get('duration') or ''
+
+                    if title or company:
+                        pos_str = f"- {title} at {company}"
+                        if start:
+                            pos_str += f" ({start} - {end})"
+                        if duration:
+                            pos_str += f" [{duration}]"
+                        positions.append(pos_str)
+
+            if positions:
+                return '\n'.join(positions)
+
+        # Fallback to past_positions field
+        return profile.get('past_positions', 'N/A')
+
+    work_history = format_work_history(profile)
+
     profile_summary = f"""Name: {safe_str(profile.get('first_name', ''))} {safe_str(profile.get('last_name', ''))}
 Title: {safe_str(profile.get('current_title', profile.get('headline', 'N/A')))}
 Company: {safe_str(profile.get('current_company', 'N/A'))}
@@ -3320,7 +3356,8 @@ Location: {safe_str(profile.get('location', 'N/A'))}
 Education: {safe_str(profile.get('education', profile.get('all_schools', 'N/A')))}
 Skills: {safe_str(profile.get('skills', 'N/A'))}
 Summary: {safe_str(profile.get('summary', 'N/A'))}
-Past Positions: {safe_str(profile.get('past_positions', 'N/A'))}"""
+Work History:
+{work_history}"""
 
     # Different prompts based on mode
     if mode == "quick":

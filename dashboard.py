@@ -325,59 +325,104 @@ def _clean_for_json(obj):
         return None
     return obj
 
-def save_session_state():
-    """Save current session state to a local file for persistence across refreshes."""
-    try:
-        session_data = {}
-        keys_to_save = [
-            'results', 'results_df', 'enriched_results', 'enriched_df',
-            'screening_results', 'filtered_results', 'passed_candidates_df',
-            'filter_stats', 'f2_filter_stats', 'last_load_count', 'last_load_file',
-            'user_sheet_url', 'original_results_df',
-            'active_screening_prompt', 'active_screening_role',
-            'jd_screening', 'extra_requirements'
-        ]
-        for key in keys_to_save:
-            if key in st.session_state and st.session_state[key] is not None:
-                value = st.session_state[key]
-                # Convert DataFrames to dict for JSON serialization
-                if isinstance(value, pd.DataFrame):
-                    # Replace NaN with None for JSON compatibility
-                    clean_df = value.where(pd.notnull(value), None)
-                    data = _clean_for_json(clean_df.to_dict('records'))
-                    session_data[key] = {'_type': 'dataframe', 'data': data}
-                elif isinstance(value, list):
-                    session_data[key] = {'_type': 'list', 'data': _clean_for_json(value)}
-                elif isinstance(value, dict):
-                    session_data[key] = {'_type': 'dict', 'data': _clean_for_json(value)}
-                else:
-                    session_data[key] = {'_type': 'value', 'data': _clean_for_json(value)}
+def _get_session_key():
+    """Get the session storage key based on current user."""
+    username = st.session_state.get('username', 'default')
+    return f"session_{username}"
 
-        if session_data:
-            with open(SESSION_FILE, 'w') as f:
-                json.dump(session_data, f)
-            return True
+
+def _build_session_data():
+    """Build session data dict from current session state."""
+    session_data = {}
+    keys_to_save = [
+        'results', 'results_df', 'enriched_results', 'enriched_df',
+        'screening_results', 'filtered_results', 'passed_candidates_df',
+        'filter_stats', 'f2_filter_stats', 'last_load_count', 'last_load_file',
+        'user_sheet_url', 'original_results_df',
+        'active_screening_prompt', 'active_screening_role',
+        'jd_screening', 'extra_requirements'
+    ]
+    for key in keys_to_save:
+        if key in st.session_state and st.session_state[key] is not None:
+            value = st.session_state[key]
+            # Convert DataFrames to dict for JSON serialization
+            if isinstance(value, pd.DataFrame):
+                # Replace NaN with None for JSON compatibility
+                clean_df = value.where(pd.notnull(value), None)
+                data = _clean_for_json(clean_df.to_dict('records'))
+                session_data[key] = {'_type': 'dataframe', 'data': data}
+            elif isinstance(value, list):
+                session_data[key] = {'_type': 'list', 'data': _clean_for_json(value)}
+            elif isinstance(value, dict):
+                session_data[key] = {'_type': 'dict', 'data': _clean_for_json(value)}
+            else:
+                session_data[key] = {'_type': 'value', 'data': _clean_for_json(value)}
+    return session_data
+
+
+def _restore_session_data(session_data: dict):
+    """Restore session state from session data dict."""
+    for key, item in session_data.items():
+        if item['_type'] == 'dataframe':
+            st.session_state[key] = pd.DataFrame(item['data'])
+        elif item['_type'] == 'list':
+            st.session_state[key] = item['data']
+        elif item['_type'] == 'dict':
+            st.session_state[key] = item['data']
+        else:
+            st.session_state[key] = item['data']
+
+
+def save_session_state():
+    """Save current session state. Uses Supabase on cloud, local file for dev."""
+    try:
+        session_data = _build_session_data()
+        if not session_data:
+            return False
+
+        # Try Supabase first (works on cloud)
+        if HAS_DATABASE:
+            try:
+                client = get_supabase_client()
+                if client:
+                    session_key = _get_session_key()
+                    json_data = json.dumps(session_data)
+                    if save_setting(client, session_key, json_data):
+                        return True
+            except Exception as e:
+                print(f"[Session] Supabase save failed: {e}")
+
+        # Fallback to local file (for local development)
+        with open(SESSION_FILE, 'w') as f:
+            json.dump(session_data, f)
+        return True
     except Exception as e:
         print(f"[Session] Save failed: {e}")
     return False
 
 
 def load_session_state():
-    """Load session state from local file."""
+    """Load session state. Tries Supabase first, then local file."""
     try:
+        # Try Supabase first (works on cloud)
+        if HAS_DATABASE:
+            try:
+                client = get_supabase_client()
+                if client:
+                    session_key = _get_session_key()
+                    json_data = get_setting(client, session_key)
+                    if json_data:
+                        session_data = json.loads(json_data)
+                        _restore_session_data(session_data)
+                        return True
+            except Exception as e:
+                print(f"[Session] Supabase load failed: {e}")
+
+        # Fallback to local file (for local development)
         if SESSION_FILE.exists():
             with open(SESSION_FILE, 'r') as f:
                 session_data = json.load(f)
-
-            for key, item in session_data.items():
-                if item['_type'] == 'dataframe':
-                    st.session_state[key] = pd.DataFrame(item['data'])
-                elif item['_type'] == 'list':
-                    st.session_state[key] = item['data']
-                elif item['_type'] == 'dict':
-                    st.session_state[key] = item['data']
-                else:
-                    st.session_state[key] = item['data']
+            _restore_session_data(session_data)
             return True
     except Exception as e:
         print(f"[Session] Load failed: {e}")
@@ -385,14 +430,30 @@ def load_session_state():
 
 
 def clear_session_file():
-    """Delete the session file."""
+    """Delete the session data from Supabase and/or local file."""
+    cleared = False
+
+    # Clear from Supabase
+    if HAS_DATABASE:
+        try:
+            client = get_supabase_client()
+            if client:
+                session_key = _get_session_key()
+                # Save empty value to clear
+                save_setting(client, session_key, '{}')
+                cleared = True
+        except Exception as e:
+            print(f"[Session] Supabase clear failed: {e}")
+
+    # Clear local file too
     try:
         if SESSION_FILE.exists():
             SESSION_FILE.unlink()
-            return True
+            cleared = True
     except Exception:
         pass
-    return False
+
+    return cleared
 
 
 @st.cache_resource(ttl=300)

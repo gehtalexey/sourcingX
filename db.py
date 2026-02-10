@@ -686,8 +686,8 @@ def match_prompt_by_keywords(client: SupabaseClient, text: str) -> Optional[dict
                 best_score = score
                 best_match = prompt
 
-        # Return match if we found at least 2 keyword matches
-        if best_score >= 2:
+        # Return match if we found at least 1 keyword match
+        if best_score >= 1:
             return best_match
 
         return None

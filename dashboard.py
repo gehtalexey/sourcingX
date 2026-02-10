@@ -2654,7 +2654,7 @@ def get_screening_prompt_for_role(role_type: str = None, job_description: str = 
             if score > best_score:
                 best_score = score
                 best_match = role_key
-        if best_score >= 2 and best_match:
+        if best_score >= 1 and best_match:
             return DEFAULT_PROMPTS[best_match]['prompt'], best_match, DEFAULT_PROMPTS[best_match]['name']
 
     # Fall back to general/default

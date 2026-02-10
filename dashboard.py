@@ -6175,7 +6175,7 @@ with tab_screening:
                         "Edit prompt",
                         value=active_prompt,
                         height=250,
-                        key="edit_current_prompt"
+                        key=f"edit_current_prompt_{active_role}"
                     )
                     if st.button("Save Changes", key="save_current_prompt"):
                         if HAS_DATABASE and active_role:
@@ -6235,6 +6235,9 @@ with tab_screening:
                                 default_badge = " (default)" if p.get('is_default') else ""
                                 st.write(f"**{name}**{default_badge}")
                                 st.caption(f"Keywords: {', '.join(p.get('keywords', []))}")
+                                # Show first line of prompt for quick verification
+                                first_line = (p.get('prompt_text') or '').strip().split('\n')[0][:80]
+                                st.caption(f"Prompt: {first_line}...")
                             with col2:
                                 if st.button("Set Default", key=f"default_{p['role_type']}"):
                                     if HAS_DATABASE:
@@ -6253,8 +6256,19 @@ with tab_screening:
                                         db_client = _get_db_client()
                                         if delete_screening_prompt(db_client, p['role_type']):
                                             st.rerun()
-                    else:
-                        st.info("No custom prompts saved yet. Default prompts are built-in.")
+                        st.divider()
+
+                    # Reset to built-in defaults
+                    if st.button("Reset All to Built-in Defaults", key="reset_prompts_defaults"):
+                        if HAS_DATABASE:
+                            db_client = _get_db_client()
+                            if db_client:
+                                # Delete all existing DB prompts so built-in defaults take over
+                                for p in db_prompts:
+                                    delete_screening_prompt(db_client, p['role_type'])
+                                st.success("Cleared DB prompts. Built-in defaults will now be used.")
+                                st.rerun()
+                    st.caption("This removes all saved prompts from the database so the built-in defaults are used instead.")
 
         # Screening Configuration
         st.markdown("### Screening Configuration")

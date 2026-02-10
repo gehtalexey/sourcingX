@@ -2663,7 +2663,7 @@ def get_screening_prompt_for_role(role_type: str = None, job_description: str = 
         if default_prompt:
             return default_prompt['prompt_text'], default_prompt['role_type'], default_prompt.get('name', 'Default')
 
-    return DEFAULT_SCREENING_PROMPT, 'backend', 'Backend Engineering'
+    return DEFAULT_SCREENING_PROMPT, 'general', 'General'
 
 
 def get_screening_prompt() -> str:
@@ -5543,7 +5543,7 @@ with tab_screening:
 
             if not active_prompt:
                 active_prompt = DEFAULT_SCREENING_PROMPT
-                active_role = 'backend'
+                active_role = 'general'
 
         # Store active prompt in session state for screening
         st.session_state['active_screening_prompt'] = active_prompt

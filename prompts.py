@@ -699,4 +699,4 @@ DEFAULT_PROMPTS = {
     'general':                  GENERAL,
 }
 
-DEFAULT_SCREENING_PROMPT = DEFAULT_PROMPTS['backend_israel']['prompt']
+DEFAULT_SCREENING_PROMPT = DEFAULT_PROMPTS['general']['prompt']

@@ -3397,17 +3397,48 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
         # Fallback to past_positions field
         return profile.get('past_positions', 'N/A')
 
-    work_history = format_work_history(profile)
+    # Get full raw Crustdata JSON for comprehensive screening
+    raw_crustdata = profile.get('raw_crustdata', {})
 
-    profile_summary = f"""Name: {safe_str(profile.get('first_name', ''))} {safe_str(profile.get('last_name', ''))}
-Title: {safe_str(profile.get('current_title', profile.get('headline', 'N/A')))}
-Company: {safe_str(profile.get('current_company', 'N/A'))}
-Location: {safe_str(profile.get('location', 'N/A'))}
-Education: {safe_str(profile.get('education', profile.get('all_schools', 'N/A')))}
-Skills: {safe_str(profile.get('skills', 'N/A'))}
-Summary: {safe_str(profile.get('summary', 'N/A'))}
-Work History:
-{work_history}"""
+    # Clean up raw data - remove unnecessary fields to reduce tokens
+    def clean_raw_data(raw):
+        if not raw:
+            return {}
+        # Fields to exclude (large/unnecessary for screening)
+        exclude_fields = [
+            'employer_logo_url', 'profile_picture_url', 'profile_pic_url',
+            'employer_company_website_domain', 'domains', 'employer_linkedin_description',
+            'employer_company_id', 'employee_position_id', 'employer_linkedin_id',
+            'profile_picture_permalink', 'background_picture_permalink',
+            'linkedin_profile_url', 'linkedin_flagship_url', 'linkedin_sales_navigator_url',
+        ]
+        cleaned = {}
+        for key, value in raw.items():
+            if key in exclude_fields:
+                continue
+            # Clean nested employer lists
+            if key in ['current_employers', 'past_employers'] and isinstance(value, list):
+                cleaned_list = []
+                for emp in value:
+                    if isinstance(emp, dict):
+                        cleaned_emp = {k: v for k, v in emp.items() if k not in exclude_fields}
+                        cleaned_list.append(cleaned_emp)
+                cleaned[key] = cleaned_list
+            else:
+                cleaned[key] = value
+        return cleaned
+
+    cleaned_raw = clean_raw_data(raw_crustdata)
+
+    # Format as JSON string (limit size to avoid huge prompts)
+    raw_json_str = json.dumps(cleaned_raw, indent=2, ensure_ascii=False, default=str)
+    if len(raw_json_str) > 8000:  # Truncate if too large
+        raw_json_str = raw_json_str[:8000] + "\n... (truncated)"
+
+    profile_summary = f"""## Full Profile Data (JSON):
+```json
+{raw_json_str}
+```"""
 
     # Different prompts based on mode
     if mode == "quick":

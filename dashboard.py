@@ -5456,21 +5456,24 @@ with tab_screening:
             profiles_df = enriched_df
             st.info(f"**{len(profiles_df)}** enriched profiles ready for screening")
 
-        # Use original enriched_results (with raw data) for screening, not the display DataFrame
-        # The display DataFrame strips raw_data/raw_crustdata which the AI needs
-        enriched_profiles = st.session_state.get('enriched_results') or []
-        if enriched_profiles and profiles_df is not enriched_df:
-            # Filtering was applied — only keep profiles that passed filtering
-            allowed_urls = set(profiles_df['linkedin_url'].dropna().tolist()) if 'linkedin_url' in profiles_df.columns else set()
-            if allowed_urls:
-                profiles = [p for p in enriched_profiles if p.get('linkedin_url', '') in allowed_urls]
-            else:
-                profiles = enriched_profiles
-        elif enriched_profiles:
-            profiles = enriched_profiles
-        else:
-            # Fallback to DataFrame records if enriched_results not available
-            profiles = profiles_df.to_dict('records')
+        # Convert DataFrame to dicts for screening
+        profiles = profiles_df.to_dict('records')
+
+        # Ensure profiles have raw data for AI screening.
+        # - Enrichment path: enriched_df (from flatten_for_csv) already has raw_crustdata
+        # - DB load path: enriched_df (from profiles_to_display_df) strips raw_data,
+        #   so we inject it back from enriched_results (which are full DB rows)
+        enriched_list = st.session_state.get('enriched_results') or []
+        if enriched_list:
+            raw_by_url = {}
+            for ep in enriched_list:
+                url = ep.get('linkedin_url', '')
+                if url:
+                    raw_by_url[url] = ep.get('raw_data') or ep.get('raw_crustdata')
+            for p in profiles:
+                url = p.get('linkedin_url', '')
+                if url and url in raw_by_url and not p.get('raw_crustdata') and not p.get('raw_data'):
+                    p['raw_data'] = raw_by_url[url]
 
         # Job Description Input
         st.markdown("### Job Description")

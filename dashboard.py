@@ -5935,6 +5935,25 @@ with tab_screening:
 
                 if batch_profiles:
                     with st.status(f"Processing batch {current_batch + 1} ({screen_mode} mode)...", expanded=True) as status:
+                        # Save each profile to DB immediately as it completes
+                        def _on_profile_screened(completed, total, result):
+                            if not HAS_DATABASE or not result or result.get('fit') == 'Error':
+                                return
+                            try:
+                                db_client = _get_db_client()
+                                if db_client:
+                                    linkedin_url = result.get('linkedin_url') or result.get('public_url')
+                                    if linkedin_url:
+                                        update_profile_screening(
+                                            db_client, linkedin_url,
+                                            score=result.get('score', 0),
+                                            fit_level=result.get('fit', ''),
+                                            summary=result.get('summary', ''),
+                                            reasoning=result.get('why', '')
+                                        )
+                            except Exception:
+                                pass  # Will retry on final save
+
                         # Screen this batch
                         batch_results = screen_profiles_batch(
                             batch_profiles,
@@ -5943,7 +5962,8 @@ with tab_screening:
                             extra_requirements=extra_req,
                             max_workers=min(10, len(batch_profiles)),
                             mode=screen_mode,
-                            system_prompt=system_prompt
+                            system_prompt=system_prompt,
+                            progress_callback=_on_profile_screened
                         )
                         all_results.extend(batch_results)
 
@@ -5955,24 +5975,8 @@ with tab_screening:
                             'total': len(profiles_to_screen)
                         }
 
-                        # Auto-save after each batch: persist to session state + DB
+                        # Persist to session state after each batch
                         st.session_state['screening_results'] = all_results
-                        if HAS_DATABASE:
-                            try:
-                                db_client = _get_db_client()
-                                if db_client:
-                                    for result in batch_results:
-                                        linkedin_url = result.get('linkedin_url') or result.get('public_url')
-                                        if linkedin_url and result.get('fit') != 'Error':
-                                            update_profile_screening(
-                                                db_client, linkedin_url,
-                                                score=result.get('score', 0),
-                                                fit_level=result.get('fit', ''),
-                                                summary=result.get('summary', ''),
-                                                reasoning=result.get('why', '')
-                                            )
-                            except Exception:
-                                pass  # Will retry on final save
                         save_session_state()
 
                         # Show batch stats

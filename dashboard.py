@@ -5619,23 +5619,57 @@ with tab_screening:
                             st.warning("Role type and prompt text are required")
 
                 with prompt_tabs[2]:
-                    st.markdown("**All saved prompts:**")
-                    if db_prompts:
-                        for p in db_prompts:
-                            col1, col2, col3 = st.columns([3, 1, 1])
-                            with col1:
-                                name = p.get('name', p['role_type'].title())
-                                default_badge = " (default)" if p.get('is_default') else ""
-                                st.write(f"**{name}**{default_badge}")
-                                st.caption(f"Keywords: {', '.join(p.get('keywords', []))}")
-                                # Show first line of prompt for quick verification
-                                first_line = (p.get('prompt_text') or '').strip().split('\n')[0][:80]
-                                st.caption(f"Prompt: {first_line}...")
-                            with col2:
+                    st.markdown("**All prompts:**")
+
+                    # Build merged list: DB overrides take priority, then built-in defaults
+                    db_by_role = {p['role_type']: p for p in db_prompts}
+                    all_prompts = []
+                    for role_key, role_data in DEFAULT_PROMPTS.items():
+                        if role_key in db_by_role:
+                            db_p = db_by_role[role_key]
+                            all_prompts.append({
+                                'role_type': role_key,
+                                'name': db_p.get('name', role_data['name']),
+                                'keywords': db_p.get('keywords', role_data['keywords']),
+                                'prompt_text': db_p.get('prompt_text', ''),
+                                'is_default': db_p.get('is_default', False),
+                                'source': 'db',
+                            })
+                        else:
+                            all_prompts.append({
+                                'role_type': role_key,
+                                'name': role_data['name'],
+                                'keywords': role_data['keywords'],
+                                'prompt_text': role_data['prompt'],
+                                'is_default': False,
+                                'source': 'built-in',
+                            })
+                    # Add any DB-only prompts (custom roles not in DEFAULT_PROMPTS)
+                    for role_key, db_p in db_by_role.items():
+                        if role_key not in DEFAULT_PROMPTS:
+                            all_prompts.append({
+                                'role_type': role_key,
+                                'name': db_p.get('name', role_key.title()),
+                                'keywords': db_p.get('keywords', []),
+                                'prompt_text': db_p.get('prompt_text', ''),
+                                'is_default': db_p.get('is_default', False),
+                                'source': 'db',
+                            })
+
+                    for p in all_prompts:
+                        col1, col2, col3 = st.columns([3, 1, 1])
+                        with col1:
+                            source_badge = " *(customized)*" if p['source'] == 'db' else ""
+                            default_badge = " (default)" if p.get('is_default') else ""
+                            st.write(f"**{p['name']}**{default_badge}{source_badge}")
+                            st.caption(f"Keywords: {', '.join(p.get('keywords', []))}")
+                            first_line = (p.get('prompt_text') or '').strip().split('\n')[0][:80]
+                            st.caption(f"Prompt: {first_line}...")
+                        with col2:
+                            if p['source'] == 'db':
                                 if st.button("Set Default", key=f"default_{p['role_type']}"):
                                     if HAS_DATABASE:
                                         db_client = _get_db_client()
-                                        # Clear other defaults first
                                         for other in db_prompts:
                                             if other.get('is_default'):
                                                 save_screening_prompt(db_client, other['role_type'],
@@ -5643,25 +5677,15 @@ with tab_screening:
                                         save_screening_prompt(db_client, p['role_type'],
                                                              p['prompt_text'], p.get('keywords', []), True)
                                         st.rerun()
-                            with col3:
+                        with col3:
+                            if p['source'] == 'db':
                                 if st.button("Delete", key=f"del_{p['role_type']}"):
                                     if HAS_DATABASE:
                                         db_client = _get_db_client()
                                         if delete_screening_prompt(db_client, p['role_type']):
                                             st.rerun()
-                        st.divider()
-
-                    # Reset to built-in defaults
-                    if st.button("Reset All to Built-in Defaults", key="reset_prompts_defaults"):
-                        if HAS_DATABASE:
-                            db_client = _get_db_client()
-                            if db_client:
-                                # Delete all existing DB prompts so built-in defaults take over
-                                for p in db_prompts:
-                                    delete_screening_prompt(db_client, p['role_type'])
-                                st.success("Cleared DB prompts. Built-in defaults will now be used.")
-                                st.rerun()
-                    st.caption("This removes all saved prompts from the database so the built-in defaults are used instead.")
+                    st.divider()
+                    st.caption(f"{len(all_prompts)} prompts total ({len(db_by_role)} customized in DB, {len(all_prompts) - len(db_by_role)} built-in)")
 
         # Screening Configuration
         st.markdown("### Screening Configuration")

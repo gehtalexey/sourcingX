@@ -97,7 +97,11 @@ def extract_for_screening(raw_data: dict) -> dict:
 
 
 def format_past_positions(positions: list) -> str:
-    """Format positions list into a readable string for AI screening."""
+    """Format positions list into a detailed readable string for AI screening.
+
+    Includes dates and durations when available since past positions
+    are the main source of candidate information.
+    """
     if not positions:
         return ''
 
@@ -106,10 +110,50 @@ def format_past_positions(positions: list) -> str:
         if isinstance(pos, dict):
             title = pos.get('employee_title') or pos.get('title') or ''
             company = pos.get('employer_name') or pos.get('company_name') or ''
-            if title and company:
-                parts.append(f"{title} at {company}")
-            elif title or company:
-                parts.append(title or company)
+            if not title and not company:
+                continue
+            entry = f"{title} at {company}" if title and company else (title or company)
+
+            # Add dates if available
+            start = pos.get('start_date') or pos.get('date_from') or ''
+            end = pos.get('end_date') or pos.get('date_to') or ''
+            duration = pos.get('duration') or pos.get('duration_in_role') or ''
+            if start or end:
+                date_str = f"{start} - {end}" if start and end else (start or end)
+                entry += f" ({date_str})"
+            if duration:
+                entry += f" [{duration}]"
+
+            # Add description if available (truncate to keep prompt reasonable)
+            desc = pos.get('description') or ''
+            if desc:
+                entry += f" - {str(desc)[:200]}"
+
+            parts.append(entry)
+
+    return ' | '.join(parts)
+
+
+def format_education(education_background: list) -> str:
+    """Format education_background list into a readable string for AI screening."""
+    if not education_background:
+        return ''
+
+    parts = []
+    for edu in education_background[:5]:
+        if isinstance(edu, dict):
+            school = edu.get('school_name') or edu.get('school') or ''
+            degree = edu.get('degree') or edu.get('degree_name') or ''
+            field = edu.get('field_of_study') or edu.get('field') or ''
+            if not school:
+                continue
+            entry = school
+            if degree or field:
+                detail = f"{degree} in {field}" if degree and field else (degree or field)
+                entry += f" - {detail}"
+            parts.append(entry)
+        elif isinstance(edu, str):
+            parts.append(edu)
 
     return ' | '.join(parts)
 

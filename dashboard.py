@@ -43,6 +43,7 @@ from normalizers import (
     parse_duration,
     clean_dict,
 )
+from helpers import format_past_positions, format_education
 
 # Database module (Supabase integration)
 # Note: PhantomBuster data is NOT stored in DB - only Crustdata enriched profiles
@@ -3305,7 +3306,64 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
 
     start_time = time.time()
 
-    # Build concise profile summary for the prompt (with safe string conversion)
+    # Try to get raw Crustdata data for richer extraction
+    raw = profile.get('raw_crustdata') or profile.get('raw_data') or {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            raw = {}
+
+    # Build past positions - the main source of candidate information
+    past_positions_str = ''
+    if raw and raw.get('past_employers'):
+        past_positions_str = format_past_positions(raw.get('past_employers', []))
+    elif raw and raw.get('current_employers'):
+        # Include current position from raw data too
+        past_positions_str = format_past_positions(raw.get('current_employers', []))
+    if not past_positions_str:
+        # Fall back to flat field (may be pre-formatted string or JSON)
+        pp = profile.get('past_positions', '')
+        if isinstance(pp, list):
+            past_positions_str = format_past_positions(pp)
+        elif pp:
+            past_positions_str = str(pp)
+
+    # Include current employer from raw if available (separate from past)
+    current_positions_str = ''
+    if raw and raw.get('current_employers'):
+        current_positions_str = format_past_positions(raw.get('current_employers', []))
+
+    # Build education - use structured education_background if available
+    education_str = ''
+    if raw and raw.get('education_background'):
+        education_str = format_education(raw.get('education_background', []))
+    if not education_str:
+        edu = profile.get('education') or profile.get('all_schools', '')
+        if isinstance(edu, list):
+            education_str = ', '.join(str(s) for s in edu if s)
+        elif edu:
+            education_str = str(edu)
+
+    # Build all employers list for career trajectory
+    all_employers_str = ''
+    if raw and raw.get('all_employers'):
+        employers = raw.get('all_employers', [])
+        all_employers_str = ', '.join(str(e) for e in employers if e)
+    elif profile.get('all_employers'):
+        ae = profile.get('all_employers')
+        all_employers_str = ', '.join(ae) if isinstance(ae, list) else str(ae)
+
+    # Build all titles for career trajectory
+    all_titles_str = ''
+    if raw and raw.get('all_titles'):
+        titles = raw.get('all_titles', [])
+        all_titles_str = ', '.join(str(t) for t in titles if t)
+    elif profile.get('all_titles'):
+        at = profile.get('all_titles')
+        all_titles_str = ', '.join(at) if isinstance(at, list) else str(at)
+
+    # Safe string helper (no truncation for past_positions)
     def safe_str(value, max_len=500):
         if value is None:
             return 'N/A'
@@ -3443,11 +3501,11 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
 
     # Different prompts based on mode
     if mode == "quick":
-        response_format = '{"score": <1-10>, "fit": "<Strong Fit|Good Fit|Partial Fit|Not a Fit>", "summary": "<one sentence>"}'
+        json_schema = '{"score": <1-10>, "fit": "<Strong Fit|Good Fit|Partial Fit|Not a Fit>", "summary": "<one sentence>"}'
         max_tokens = 100
     else:
-        response_format = '{"score": <1-10>, "fit": "<Strong Fit|Good Fit|Partial Fit|Not a Fit>", "summary": "<2-3 sentences about the candidate>", "strengths": ["<strength1>", "<strength2>"], "concerns": ["<concern1>", "<concern2>"]}'
-        max_tokens = 400
+        json_schema = '{"score": <1-10>, "fit": "<Strong Fit|Good Fit|Partial Fit|Not a Fit>", "summary": "<2-3 sentences about the candidate>", "why": "<2-3 sentences explaining the score>", "strengths": ["<strength1>", "<strength2>"], "concerns": ["<concern1>", "<concern2>"]}'
+        max_tokens = 500
 
     user_prompt = f"""Evaluate this candidate against the job description.
 
@@ -3460,7 +3518,7 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
 {profile_summary}
 
 Respond with ONLY valid JSON in this exact format:
-{response_format}"""
+{json_schema}"""
 
     try:
         # Use provided prompt or fall back to default
@@ -3472,7 +3530,8 @@ Respond with ONLY valid JSON in this exact format:
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.3,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"}
         )
         elapsed_ms = int((time.time() - start_time) * 1000)
 
@@ -3487,21 +3546,14 @@ Respond with ONLY valid JSON in this exact format:
                 response_time_ms=elapsed_ms
             )
 
-        content = response.choices[0].message.content.strip()
-        # Handle potential markdown code blocks
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-        content = content.strip()
-
-        result = json.loads(content)
+        result = json.loads(response.choices[0].message.content)
         return result
     except json.JSONDecodeError as e:
         return {
             "score": 0,
             "fit": "Error",
             "summary": f"JSON parse error: {str(e)[:80]}",
+            "why": str(e)[:100],
             "strengths": [],
             "concerns": []
         }
@@ -6325,10 +6377,11 @@ with tab_screening:
                                                     score=result.get('score', 0),
                                                     fit_level=result.get('fit', ''),
                                                     summary=result.get('summary', ''),
-                                                    reasoning=result.get('reasoning', '')
+                                                    reasoning=result.get('why', '')
                                                 )
-                                except:
-                                    pass
+                                except Exception as e:
+                                    import logging
+                                    logging.error(f"Failed to save partial screening results to DB: {e}")
                         st.session_state['screening_cancelled'] = True
                         st.session_state['screening_batch_mode'] = False
                         save_session_state()  # Save partial results for restore
@@ -6441,11 +6494,12 @@ with tab_screening:
                                                 score=result.get('score', 0),
                                                 fit_level=result.get('fit', ''),
                                                 summary=result.get('summary', ''),
-                                                reasoning=result.get('reasoning', '')
+                                                reasoning=result.get('why', '')
                                             )
                                             db_saved += 1
-                            except:
-                                pass
+                            except Exception as e:
+                                import logging
+                                logging.error(f"Failed to save screening results to DB: {e}")
 
                         db_msg = f" ({db_saved} saved to DB)" if db_saved > 0 else ""
                         st.success(f"✅ Screening complete! {len(all_results)} profiles{db_msg}")
@@ -6454,14 +6508,10 @@ with tab_screening:
                         st.rerun()
 
             if start_button or continue_button:
-                # Validate OpenAI API key before starting
+                # Validate OpenAI API key before starting (uses free models.list endpoint)
                 try:
                     test_client = OpenAI(api_key=openai_key)
-                    test_response = test_client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[{"role": "user", "content": "Say OK"}],
-                        max_tokens=3
-                    )
+                    test_client.models.list()
                 except Exception as e:
                     error_msg = str(e)
                     if '401' in error_msg or 'Incorrect API key' in error_msg:

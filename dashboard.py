@@ -190,31 +190,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Sidebar - Session Controls
-with st.sidebar:
-    st.markdown("### Session")
-    col_save, col_clear = st.columns(2)
-    with col_save:
-        if st.button("Save", key="sidebar_save_session", help="Save session to restore after refresh"):
-            from pathlib import Path
-            SESSION_FILE = Path(__file__).parent / '.last_session.json'
-            # Quick inline save - use the full save function
-            if save_session_state():
-                st.success("Saved!")
-            else:
-                st.error("Failed to save")
-    with col_clear:
-        if st.button("Clear", key="sidebar_clear_session", help="Clear saved session"):
-            clear_session_file()
-            for key in ['results', 'results_df', 'enriched_results', 'enriched_df', 'screening_results',
-                        'passed_candidates_df', 'filter_stats', 'f2_filter_stats', 'original_results_df',
-                        'active_screening_prompt', 'active_screening_role', 'jd_screening', 'extra_requirements']:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.success("Cleared!")
-            st.rerun()
-    st.divider()
-
 # Load API keys
 @st.cache_data(ttl=60)
 def load_config():
@@ -452,6 +427,29 @@ def clear_session_file():
         pass
 
     return cleared
+
+
+# Sidebar - Session Controls (placed after save/clear functions are defined)
+with st.sidebar:
+    st.markdown("### Session")
+    col_save, col_clear = st.columns(2)
+    with col_save:
+        if st.button("Save", key="sidebar_save_session", help="Save session to restore after refresh"):
+            if save_session_state():
+                st.success("Saved!")
+            else:
+                st.error("Failed to save")
+    with col_clear:
+        if st.button("Clear", key="sidebar_clear_session", help="Clear saved session"):
+            clear_session_file()
+            for key in ['results', 'results_df', 'enriched_results', 'enriched_df', 'screening_results',
+                        'passed_candidates_df', 'filter_stats', 'f2_filter_stats', 'original_results_df',
+                        'active_screening_prompt', 'active_screening_role', 'jd_screening', 'extra_requirements']:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.success("Cleared!")
+            st.rerun()
+    st.divider()
 
 
 @st.cache_resource(ttl=300)

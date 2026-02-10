@@ -3714,9 +3714,9 @@ st.title("SourcingX")
 api_key = load_api_key()
 has_crust_key = api_key and api_key != "YOUR_CRUSTDATA_API_KEY_HERE"
 
-# Show data status in header
-if 'results' in st.session_state and st.session_state['results']:
-    st.info(f"📊 **{len(st.session_state['results'])}** profiles loaded")
+# Show data status in header (always render to keep widget tree stable for tabs)
+_profile_count = len(st.session_state.get('results') or [])
+st.info(f"📊 **{_profile_count}** profiles loaded" if _profile_count else "No profiles loaded — start from the Load tab")
 
 # Create tabs
 tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_database, tab_usage = st.tabs([

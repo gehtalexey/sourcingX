@@ -88,6 +88,30 @@ except ImportError:
     HAS_AUTHENTICATOR = False
 
 
+def _start_keep_alive():
+    """Ping the app's own URL every 10 minutes to prevent Streamlit Cloud from sleeping."""
+    app_url = None
+    try:
+        app_url = st.secrets.get("keep_alive_url")
+    except Exception:
+        pass
+    if not app_url:
+        return  # No URL configured — skip keep-alive
+    print(f"[Keep-Alive] Started — pinging {app_url} every 10 min")
+    def ping():
+        while True:
+            try:
+                r = requests.get(app_url, timeout=30)
+                print(f"[Keep-Alive] Ping OK — status {r.status_code}")
+            except Exception as e:
+                print(f"[Keep-Alive] Ping failed — {e}")
+            time.sleep(600)  # 10 minutes
+    t = threading.Thread(target=ping, daemon=True)
+    t.start()
+
+_start_keep_alive()
+
+
 def get_auth_config():
     """Load authentication config from Streamlit secrets."""
     try:

@@ -6729,14 +6729,17 @@ with tab_screening:
                 # Choose which candidates to enrich
                 candidate_source = st.radio(
                     "Which candidates to enrich?",
-                    ["Priority (Strong Fit + Good Fit)", "All candidates"],
+                    ["Strong + Good Fit", "Strong + Good + Partial Fit", "All candidates"],
                     key="candidate_source_tab5",
                     horizontal=True
                 )
 
-                if candidate_source == "Priority (Strong Fit + Good Fit)" and 'fit' in screening_df.columns:
+                if candidate_source == "Strong + Good Fit" and 'fit' in screening_df.columns:
                     enrich_df = screening_df[screening_df['fit'].isin(['Strong Fit', 'Good Fit'])].copy()
-                    st.caption(f"Priority candidates: {len(enrich_df)} (Strong Fit + Good Fit)")
+                    st.caption(f"Priority candidates: {len(enrich_df)} (Strong + Good Fit)")
+                elif candidate_source == "Strong + Good + Partial Fit" and 'fit' in screening_df.columns:
+                    enrich_df = screening_df[screening_df['fit'].isin(['Strong Fit', 'Good Fit', 'Partial Fit'])].copy()
+                    st.caption(f"Extended candidates: {len(enrich_df)} (Strong + Good + Partial Fit)")
                 else:
                     enrich_df = screening_df.copy()
 
@@ -6817,13 +6820,13 @@ with tab_screening:
                 )
 
             with export_col2:
-                # Strong + Good fit only
-                top_candidates = [r for r in screening_results if r.get('fit') in ['Strong Fit', 'Good Fit']]
+                # Strong + Good + Partial fit
+                top_candidates = [r for r in screening_results if r.get('fit') in ['Strong Fit', 'Good Fit', 'Partial Fit']]
                 top_df = pd.DataFrame(top_candidates)
                 st.download_button(
-                    f"Download Top Candidates ({len(top_candidates)})",
+                    f"Download Fit Candidates ({len(top_candidates)})",
                     top_df.to_csv(index=False) if not top_df.empty else "",
-                    "screening_results_top.csv",
+                    "screening_results_fit.csv",
                     "text/csv",
                     disabled=len(top_candidates) == 0
                 )

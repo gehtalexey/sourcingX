@@ -3139,22 +3139,15 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
     rejection_warning = ""
     if has_rejection_criteria:
         rejection_warning = """
-⚠️ REJECTION CRITERIA DETECTED - READ CAREFULLY:
-The job description or requirements contain REJECTION/EXCLUSION criteria. These are HARD FILTERS that override all positive signals.
+## Rejection Criteria Handling:
+The requirements above contain rejection/exclusion criteria. Follow these rules:
 
-If the candidate matches ANY rejection criteria, you MUST:
-1. Score them 1-3 maximum (Not a Fit)
-2. Explicitly state the rejection reason in your summary
-3. List it as the first concern
+1. FIRST: Check if this specific candidate matches any rejection criteria in the requirements
+2. If YES (candidate matches rejection criteria) → Score 1-3, explain why in summary
+3. If NO (candidate does NOT match rejection criteria) → Evaluate normally based on qualifications
 
-Common rejection patterns to check:
-- "Reject/exclude/no candidates from army/IDF/military" → Check current_company for army/military/defense/IDF
-- "No consultants/freelancers" → Check if current role is consulting/freelance
-- "Must have X+ years" → Verify total experience meets threshold
-- "No juniors/seniors" → Check experience level
-- "Reject from [company type]" → Check employer matches
-
-DO NOT give Partial Fit or above to candidates matching rejection criteria!
+IMPORTANT: Only reject candidates who ACTUALLY match the rejection criteria.
+Candidates who don't match should be scored normally based on their qualifications.
 """
 
     user_prompt = f"""Evaluate this candidate against the job description.
@@ -3184,15 +3177,14 @@ Respond with ONLY valid JSON in this exact format:
             "If the job requires a specific industry and no employer matches → score accordingly."
         )
         _rejection_enforcement = (
-            "\n\n## REJECTION ENFORCEMENT (CRITICAL)\n"
-            "If the 'Extra Requirements' section contains rejection criteria (words like 'reject', 'exclude', "
-            "'no', 'must not', 'don't want', 'not looking for'), you MUST check if the candidate matches these. "
-            "If they do → IMMEDIATELY score 1-3 (Not a Fit). This overrides all positive signals. "
-            "A candidate from the army when 'reject army' is specified = Score 1-3. No exceptions."
+            "\n\n## Rejection Criteria\n"
+            "If the job requirements specify rejection criteria (reject, exclude, no, must not), "
+            "check if THIS SPECIFIC candidate matches. Only reject if they actually match. "
+            "Candidates who don't match rejection criteria should be evaluated normally."
         )
         if 'Company Description Analysis' not in prompt_to_use:
             prompt_to_use += _company_desc_reminder
-        if 'REJECTION ENFORCEMENT' not in prompt_to_use:
+        if 'Rejection Criteria' not in prompt_to_use:
             prompt_to_use += _rejection_enforcement
 
         # Retry with exponential backoff on rate limit (429) errors

@@ -4134,11 +4134,17 @@ with tab_filter:
 
             # Predefined exclusion keywords by category
             EXCLUDE_CATEGORIES = {
-                "Leadership": ["vp", "director", "manager", "head of"],
+                "Leadership": ["vp", "director", "manager", "head of", "product manager"],
                 "C-Level/Founders": ["cto", "ceo", "coo", "cfo", "owner", "founder", "co-founder"],
                 "Non-Employee": ["freelancer", "self employed", "consultant"],
                 "Junior": ["student", "intern", "junior"],
-                "Technical": ["qa", "automation", "embedded", "low level", "real time", "hardware", "design"]
+                "Technical": ["qa", "automation", "embedded", "low level", "real time", "hardware", "firmware", "c++", "gui", "dsp", "unity", "integration"],
+                "Mobile": ["mobile", "ios", "android"],
+                "Design": ["ui", "ux", "design", "designer"],
+                "Data/ML": ["big data", "machine learning", "data", "bi", "science", "ml", "algorithm", "algorithms", "computer vision"],
+                "DevOps/Security": ["devops", "devsecops", "security", "it", "infra", "infrastructure"],
+                "Product": ["product", "analyst", "research"],
+                "Support/Quality": ["client", "clients", "escalation", "quality", "support", "sales"]
             }
             ALL_EXCLUDE_TITLES = [kw for keywords in EXCLUDE_CATEGORIES.values() for kw in keywords]
 

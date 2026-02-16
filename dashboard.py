@@ -6317,25 +6317,56 @@ with tab_screening:
                         st.success("Results cleared!")
                         st.rerun()
 
-                # Re-screen specific profiles
-                with st.expander("🔄 Re-screen specific profiles"):
+                # Re-screen options
+                with st.expander("🔄 Re-screen options"):
+                    st.markdown("**Re-screen by count:**")
+                    rescreen_col1, rescreen_col2 = st.columns([1, 2])
+                    with rescreen_col1:
+                        rescreen_count = st.number_input(
+                            "Number to re-screen",
+                            min_value=1,
+                            max_value=len(existing_results),
+                            value=min(10, len(existing_results)),
+                            key="rescreen_count"
+                        )
+                    with rescreen_col2:
+                        rescreen_order = st.radio(
+                            "Order",
+                            options=["First N", "Lowest scores", "Highest scores"],
+                            horizontal=True,
+                            key="rescreen_order"
+                        )
+
+                    # Determine which profiles to re-screen based on order
+                    if rescreen_order == "Lowest scores":
+                        sorted_results = sorted(existing_results, key=lambda x: x.get('score', 0))
+                    elif rescreen_order == "Highest scores":
+                        sorted_results = sorted(existing_results, key=lambda x: x.get('score', 0), reverse=True)
+                    else:
+                        sorted_results = existing_results
+
+                    rescreen_n_urls = [r.get('linkedin_url', '') for r in sorted_results[:rescreen_count] if r.get('linkedin_url')]
+
+                    if st.button(f"🔄 Re-screen {rescreen_count} profiles ({rescreen_order.lower()})", key="rescreen_n_btn", type="primary"):
+                        st.session_state['rescreen_selected_urls'] = rescreen_n_urls
+                        rescreen_selected_button = True
+
+                    st.divider()
+                    st.markdown("**Re-screen by selection:**")
                     profile_options = {
                         f"{r.get('name', 'Unknown')} — {r.get('current_title', '')[:30]} ({r.get('fit', '?')}, {r.get('score', 0)}/10)": r.get('linkedin_url', '')
                         for r in existing_results if r.get('linkedin_url')
                     }
                     selected_labels = st.multiselect(
-                        "Select profiles to re-screen",
+                        "Select specific profiles",
                         options=list(profile_options.keys()),
                         key="rescreen_profile_select"
                     )
                     selected_urls = [profile_options[label] for label in selected_labels]
-                    st.session_state['rescreen_selected_urls'] = selected_urls
                     if selected_urls:
-                        rescreen_selected_button = st.button(
-                            f"🔄 Re-screen {len(selected_urls)} selected",
-                            key="rescreen_selected_btn",
-                            type="primary"
-                        )
+                        if st.button(f"🔄 Re-screen {len(selected_urls)} selected", key="rescreen_selected_btn"):
+                            st.session_state['rescreen_selected_urls'] = selected_urls
+                            rescreen_selected_button = True
             else:
                 start_disabled = screening_in_progress
                 start_button = st.button("Start Screening", type="primary", key="start_screening", disabled=start_disabled)

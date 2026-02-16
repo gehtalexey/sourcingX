@@ -400,10 +400,6 @@ def normalize_crustdata_profile(raw: dict, original_url: str = None) -> Optional
     if not raw:
         return None
 
-    # Keep original raw data before any modifications
-    import copy
-    original_raw = copy.deepcopy(raw)
-
     # Store original URL if provided (for matching back)
     if original_url:
         raw['_original_linkedin_url'] = original_url
@@ -506,7 +502,7 @@ def normalize_crustdata_profile(raw: dict, original_url: str = None) -> Optional
         'all_schools': all_schools_str,
         'past_positions': past_positions_str,
         'connections_count': connections,
-        'raw_crustdata': original_raw,  # Keep original unmodified data
+        # Note: raw_crustdata NOT stored here to save memory - fetch from DB when needed
     }
 
 

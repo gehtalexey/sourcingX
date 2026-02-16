@@ -3543,6 +3543,10 @@ with tab_upload:
                                     profiles = get_profiles_by_status(db_client, "enriched", limit=1000)
                                     if profiles:
                                         df = profiles_to_dataframe(profiles)
+                                        # Strip raw_data to save memory
+                                        for p in profiles:
+                                            p.pop('raw_data', None)
+                                            p.pop('raw_crustdata', None)
                                         st.session_state['results'] = profiles
                                         st.session_state['results_df'] = df
                                         st.session_state['enriched_results'] = profiles
@@ -3555,6 +3559,10 @@ with tab_upload:
                                     profiles = get_profiles_by_status(db_client, "screened", limit=1000)
                                     if profiles:
                                         df = profiles_to_dataframe(profiles)
+                                        # Strip raw_data to save memory
+                                        for p in profiles:
+                                            p.pop('raw_data', None)
+                                            p.pop('raw_crustdata', None)
                                         st.session_state['results'] = profiles
                                         st.session_state['results_df'] = df
                                         st.session_state['enriched_results'] = profiles
@@ -5212,6 +5220,10 @@ with tab_enrich:
 
                                         if matched_profiles:
                                             enriched_df = profiles_to_dataframe(matched_profiles)
+                                            # Strip raw_data from profiles to save memory (it's in DB)
+                                            for p in matched_profiles:
+                                                p.pop('raw_data', None)
+                                                p.pop('raw_crustdata', None)
                                             st.session_state['enriched_results'] = matched_profiles
                                             st.session_state['enriched_df'] = enriched_df
                                             save_session_state()

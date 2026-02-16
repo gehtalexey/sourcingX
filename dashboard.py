@@ -3278,6 +3278,52 @@ with st.sidebar:
             st.markdown(f"{'🟢' if ok else '🔴'} **{name}**")
     st.divider()
 
+    # Memory management
+    with st.expander("Memory", expanded=False):
+        # Check for raw_crustdata in dataframes
+        _has_raw = False
+        for _df_key in ['results_df', 'enriched_df']:
+            if _df_key in st.session_state and isinstance(st.session_state[_df_key], pd.DataFrame):
+                if 'raw_crustdata' in st.session_state[_df_key].columns:
+                    _has_raw = True
+                    break
+
+        if _has_raw:
+            if st.button("⚡ Strip Raw Data (saves memory)", use_container_width=True, type="primary"):
+                for _df_key in ['results_df', 'enriched_df']:
+                    if _df_key in st.session_state and isinstance(st.session_state[_df_key], pd.DataFrame):
+                        if 'raw_crustdata' in st.session_state[_df_key].columns:
+                            st.session_state[_df_key] = st.session_state[_df_key].drop(columns=['raw_crustdata'])
+                # Also strip from results list
+                if 'results' in st.session_state and st.session_state['results']:
+                    for r in st.session_state['results']:
+                        if isinstance(r, dict) and 'raw_crustdata' in r:
+                            del r['raw_crustdata']
+                if 'enriched_results' in st.session_state and st.session_state['enriched_results']:
+                    for r in st.session_state['enriched_results']:
+                        if isinstance(r, dict) and 'raw_crustdata' in r:
+                            del r['raw_crustdata']
+                st.success("Raw data stripped!")
+                st.rerun()
+
+        if st.button("🗑️ Clear Debug Data", use_container_width=True):
+            _debug_keys = ['_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols', '_debug_valid_urls']
+            for k in _debug_keys:
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.rerun()
+
+        if st.button("🗑️ Clear Filtered Data", use_container_width=True):
+            if 'filtered_out' in st.session_state:
+                del st.session_state['filtered_out']
+            st.rerun()
+
+        if st.button("🔄 Clear All & Reboot", type="secondary", use_container_width=True):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
+    st.divider()
+
 # Main UI
 st.title("SourcingX")
 

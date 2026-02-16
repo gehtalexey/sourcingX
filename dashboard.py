@@ -3121,13 +3121,29 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
         json_schema = '{"score": <1-10>, "fit": "<Strong Fit|Good Fit|Partial Fit|Not a Fit>", "summary": "<2-3 sentences about the candidate>", "why": "<2-3 sentences explaining the score>", "strengths": ["<strength1>", "<strength2>"], "concerns": ["<concern1>", "<concern2>"]}'
         max_tokens = 500
 
+    # Build extra requirements section with strong rejection language
+    extra_req_section = ""
+    if extra_requirements:
+        extra_req_section = f"""
+## CRITICAL - Extra Requirements (MUST enforce):
+{extra_requirements}
+
+⚠️ IMPORTANT: The above requirements are HARD FILTERS. If ANY requirement says "reject", "exclude", "no", or "must not" - and the candidate matches that criteria - you MUST:
+1. Score them 1-3 maximum (Not a Fit)
+2. Explicitly mention the rejection reason in your summary
+3. List it as a concern
+
+Examples:
+- "Reject candidates from the army" → If current company contains "army", "IDF", "military", "defense" → Score 1-3
+- "No consultants" → If they work at consulting firm → Score 1-3
+- "Must have 5+ years" → If less than 5 years → Score 1-3
+"""
+
     user_prompt = f"""Evaluate this candidate against the job description.
 
 ## Job Description:
 {job_description}
-
-{f"## Extra Requirements:{chr(10)}{extra_requirements}" if extra_requirements else ""}
-
+{extra_req_section}
 ## Candidate Profile:
 {profile_summary}
 
@@ -3138,7 +3154,7 @@ Respond with ONLY valid JSON in this exact format:
         # Use provided prompt or fall back to default
         prompt_to_use = system_prompt if system_prompt else get_screening_prompt()
 
-        # Always append company description analysis instruction (covers custom DB prompts too)
+        # Always append company description analysis and extra requirements enforcement
         _company_desc_reminder = (
             "\n\n## Company Description Analysis (CRITICAL)\n"
             "The profile JSON includes `employer_linkedin_description` for each employer. "
@@ -3149,8 +3165,17 @@ Respond with ONLY valid JSON in this exact format:
             "Do NOT rely only on company name recognition — read the descriptions. "
             "If the job requires a specific industry and no employer matches → score accordingly."
         )
+        _rejection_enforcement = (
+            "\n\n## REJECTION ENFORCEMENT (CRITICAL)\n"
+            "If the 'Extra Requirements' section contains rejection criteria (words like 'reject', 'exclude', "
+            "'no', 'must not', 'don't want', 'not looking for'), you MUST check if the candidate matches these. "
+            "If they do → IMMEDIATELY score 1-3 (Not a Fit). This overrides all positive signals. "
+            "A candidate from the army when 'reject army' is specified = Score 1-3. No exceptions."
+        )
         if 'Company Description Analysis' not in prompt_to_use:
             prompt_to_use += _company_desc_reminder
+        if 'REJECTION ENFORCEMENT' not in prompt_to_use:
+            prompt_to_use += _rejection_enforcement
 
         # Retry with exponential backoff on rate limit (429) errors
         response = None

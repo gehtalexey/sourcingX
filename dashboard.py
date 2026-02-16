@@ -3148,14 +3148,19 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
     if has_rejection_criteria:
         rejection_warning = """
 ## Rejection Criteria Handling:
-The requirements above contain rejection/exclusion criteria. Follow these rules:
+The requirements contain rejection/exclusion criteria. Follow these rules:
 
-1. FIRST: Check if this specific candidate matches any rejection criteria in the requirements
-2. If YES (candidate matches rejection criteria) → Score 1-3, explain why in summary
-3. If NO (candidate does NOT match rejection criteria) → Evaluate normally based on qualifications
+1. Check if the candidate's CURRENT role/company matches the rejection criteria
+2. If CURRENTLY matches → Score 1-3, explain why
+3. If does NOT match (or only PAST history) → Evaluate normally
 
-IMPORTANT: Only reject candidates who ACTUALLY match the rejection criteria.
-Candidates who don't match should be scored normally based on their qualifications.
+CRITICAL DISTINCTIONS:
+- "Reject army/IDF" = Only reject if CURRENTLY employed by army/IDF/military. Past army service is NORMAL in Israel (mandatory) - do NOT reject for past service.
+- "Reject consultants" = Only reject if CURRENTLY a consultant. Past consulting is OK.
+- "Reject from [company]" = Only reject if CURRENTLY at that company.
+
+Focus on CURRENT_COMPANY and CURRENT_TITLE when checking rejection criteria.
+Past employers/history should NOT trigger rejection unless explicitly stated.
 """
 
     user_prompt = f"""Evaluate this candidate against the job description.

@@ -6405,7 +6405,7 @@ with tab_screening:
                 extra_req = batch_state.get('extra_requirements', '')
                 screen_mode = batch_state.get('mode', 'detailed')
                 system_prompt = batch_state.get('system_prompt')
-                batch_size = 10  # Process 10 at a time for responsive cancellation
+                batch_size = 5  # Smaller batches for better memory management
                 current_batch = batch_state.get('current_batch', 0)
                 all_results = batch_state.get('results', [])
 
@@ -6431,6 +6431,15 @@ with tab_screening:
                             progress_callback=_on_profile_screened
                         )
                         all_results.extend(batch_results)
+
+                        # Memory cleanup: clear raw_crustdata from screened profiles
+                        for p in batch_profiles:
+                            if isinstance(p, dict):
+                                p.pop('raw_crustdata', None)
+                                p.pop('raw_data', None)
+                        # Force garbage collection after each batch
+                        import gc
+                        gc.collect()
 
                         # Update progress
                         st.session_state['screening_batch_state']['results'] = all_results
@@ -6569,6 +6578,13 @@ with tab_screening:
                     # Start fresh
                     profiles_to_screen = profiles[:screen_count]
                     initial_results = []
+
+                # Pre-screening memory cleanup
+                import gc
+                for _cleanup_key in ['filtered_out', '_enrich_debug', '_enrich_match_debug']:
+                    if _cleanup_key in st.session_state:
+                        del st.session_state[_cleanup_key]
+                gc.collect()
 
                 st.session_state['screening_batch_mode'] = True
                 st.session_state['screening_cancelled'] = False

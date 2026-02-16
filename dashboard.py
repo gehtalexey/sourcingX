@@ -5282,6 +5282,10 @@ with tab_enrich:
 
                             # Store message to show after rerun
                             db_msg = f" (DB: {db_saved} saved)" if db_saved > 0 else ""
+
+                            # Clear the enriched URLs cache so counts update
+                            st.cache_data.clear()
+
                             if len(enriched_df) == 0:
                                 st.error("Enrichment returned empty DataFrame. Check if profiles have valid data.")
                             elif errors:

@@ -4138,10 +4138,10 @@ with tab_filter:
                 "C-Level/Founders": ["cto", "ceo", "coo", "cfo", "owner", "founder", "co-founder"],
                 "Non-Employee": ["freelancer", "self employed", "consultant"],
                 "Junior": ["student", "intern", "junior"],
-                "Technical": ["qa", "automation", "embedded", "low level", "real time", "hardware", "firmware", "c++", "gui", "dsp", "unity", "integration", "test", "system"],
+                "Technical": ["qa", "automation", "embedded", "low level", "real time", "hardware", "firmware", "c++", "gui", "dsp", "unity", "integration", "test", "system", "systems"],
                 "Mobile": ["mobile", "ios", "android"],
                 "Design": ["ui", "ux", "design", "designer"],
-                "Data/ML": ["big data", "machine learning", "data", "bi", "science", "ml", "algorithm", "algorithms", "computer vision"],
+                "Data/ML": ["big data", "machine learning", "data", "bi", "science", "ml", "algorithm", "algorithms", "computer vision", "algo"],
                 "DevOps/Security": ["devops", "devsecops", "security", "it", "infra", "infrastructure"],
                 "Product": ["product", "analyst", "research"],
                 "Support/Quality": ["client", "clients", "escalation", "quality", "support", "sales"]

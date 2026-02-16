@@ -4143,7 +4143,7 @@ with tab_filter:
                 "Design": ["ui", "ux", "design", "designer"],
                 "Data/ML": ["big data", "machine learning", "data", "bi", "science", "ml", "algorithm", "algorithms", "computer vision", "algo"],
                 "DevOps/Security": ["devops", "devsecops", "security", "it", "infra", "infrastructure"],
-                "Product": ["product", "analyst", "research"],
+                "Product": ["product", "analyst", "research", "business"],
                 "Support/Quality": ["client", "clients", "escalation", "quality", "support", "sales"]
             }
             ALL_EXCLUDE_TITLES = [kw for keywords in EXCLUDE_CATEGORIES.values() for kw in keywords]

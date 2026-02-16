@@ -744,8 +744,13 @@ def match_prompt_by_keywords(client: SupabaseClient, text: str) -> Optional[dict
     """Find the best matching prompt based on keywords in the text.
 
     Scans the job description text for keywords and returns the prompt
-    with the most keyword matches.
+    with the most keyword matches. Leadership keywords get bonus points.
     """
+    # Leadership keywords get extra weight to prioritize lead roles
+    leadership_keywords = ['team lead', 'team leader', 'tech lead', 'tech leader',
+                          'engineering lead', 'technical lead', 'lead engineer',
+                          'engineering manager', 'manager', 'director', 'vp', 'head of']
+
     try:
         prompts = get_screening_prompts(client)
         if not prompts:
@@ -764,14 +769,16 @@ def match_prompt_by_keywords(client: SupabaseClient, text: str) -> Optional[dict
             score = 0
             for kw in keywords:
                 kw_lower = kw.lower()
+                is_leadership = any(lk in kw_lower for lk in leadership_keywords) or kw_lower in leadership_keywords
+
                 if ' ' in kw_lower:
-                    # Multi-word phrase: substring match, worth 2 points
+                    # Multi-word phrase: substring match
                     if kw_lower in text_lower:
-                        score += 2
+                        score += 3 if is_leadership else 2
                 else:
                     # Single word: word-boundary match to avoid false positives
                     if re.search(r'\b' + re.escape(kw_lower) + r'\b', text_lower):
-                        score += 1
+                        score += 2 if is_leadership else 1
 
             if score > best_score:
                 best_score = score

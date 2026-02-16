@@ -4046,9 +4046,9 @@ with tab_upload:
                     if progress_pct > 0:
                         st.metric("Progress", f"{progress_pct}%")
 
-            # Show progress bar if we have percentage
+            # Show progress bar if we have percentage (clamp between 0 and 1)
             if progress_pct > 0:
-                st.progress(progress_pct / 100)
+                st.progress(min(1.0, max(0.0, progress_pct / 100)))
 
             # Cancel button
             if st.button("Cancel", key="pb_cancel_btn"):
@@ -6251,8 +6251,9 @@ with tab_screening:
                 total = batch_progress.get('total', 0)
                 pct = (completed / total * 100) if total > 0 else 0
 
-                # Progress bar
-                st.progress(completed / total if total > 0 else 0, text=f"Screening: {completed}/{total} ({pct:.0f}%)")
+                # Progress bar (clamp value between 0 and 1)
+                progress_val = min(1.0, max(0.0, completed / total)) if total > 0 else 0.0
+                st.progress(progress_val, text=f"Screening: {completed}/{total} ({pct:.0f}%)")
 
                 # Live stats from completed results
                 all_results = st.session_state.get('screening_batch_state', {}).get('results', [])

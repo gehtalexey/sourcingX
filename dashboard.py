@@ -3121,29 +3121,47 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
         json_schema = '{"score": <1-10>, "fit": "<Strong Fit|Good Fit|Partial Fit|Not a Fit>", "summary": "<2-3 sentences about the candidate>", "why": "<2-3 sentences explaining the score>", "strengths": ["<strength1>", "<strength2>"], "concerns": ["<concern1>", "<concern2>"]}'
         max_tokens = 500
 
+    # Detect rejection keywords in JD or extra requirements
+    rejection_keywords = ['reject', 'exclude', 'don\'t want', 'do not want', 'must not', 'should not',
+                          'not looking for', 'no candidates from', 'not interested in', 'disqualify']
+    combined_text = (job_description + ' ' + (extra_requirements or '')).lower()
+    has_rejection_criteria = any(kw in combined_text for kw in rejection_keywords)
+
     # Build extra requirements section with strong rejection language
     extra_req_section = ""
     if extra_requirements:
         extra_req_section = f"""
 ## CRITICAL - Extra Requirements (MUST enforce):
 {extra_requirements}
+"""
 
-⚠️ IMPORTANT: The above requirements are HARD FILTERS. If ANY requirement says "reject", "exclude", "no", or "must not" - and the candidate matches that criteria - you MUST:
+    # Add rejection enforcement if ANY rejection keywords found (in JD or extra requirements)
+    rejection_warning = ""
+    if has_rejection_criteria:
+        rejection_warning = """
+⚠️ REJECTION CRITERIA DETECTED - READ CAREFULLY:
+The job description or requirements contain REJECTION/EXCLUSION criteria. These are HARD FILTERS that override all positive signals.
+
+If the candidate matches ANY rejection criteria, you MUST:
 1. Score them 1-3 maximum (Not a Fit)
-2. Explicitly mention the rejection reason in your summary
-3. List it as a concern
+2. Explicitly state the rejection reason in your summary
+3. List it as the first concern
 
-Examples:
-- "Reject candidates from the army" → If current company contains "army", "IDF", "military", "defense" → Score 1-3
-- "No consultants" → If they work at consulting firm → Score 1-3
-- "Must have 5+ years" → If less than 5 years → Score 1-3
+Common rejection patterns to check:
+- "Reject/exclude/no candidates from army/IDF/military" → Check current_company for army/military/defense/IDF
+- "No consultants/freelancers" → Check if current role is consulting/freelance
+- "Must have X+ years" → Verify total experience meets threshold
+- "No juniors/seniors" → Check experience level
+- "Reject from [company type]" → Check employer matches
+
+DO NOT give Partial Fit or above to candidates matching rejection criteria!
 """
 
     user_prompt = f"""Evaluate this candidate against the job description.
 
 ## Job Description:
 {job_description}
-{extra_req_section}
+{extra_req_section}{rejection_warning}
 ## Candidate Profile:
 {profile_summary}
 

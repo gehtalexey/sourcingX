@@ -6476,8 +6476,27 @@ with tab_screening:
                         if st.session_state.get('_screening_active'):
                             _screening_session_end()
                             st.session_state['_screening_active'] = False
+
+                        # Auto-cleanup: strip raw_crustdata and filtered_out to free memory
+                        for _df_key in ['results_df', 'enriched_df']:
+                            if _df_key in st.session_state and isinstance(st.session_state[_df_key], pd.DataFrame):
+                                if 'raw_crustdata' in st.session_state[_df_key].columns:
+                                    st.session_state[_df_key] = st.session_state[_df_key].drop(columns=['raw_crustdata'])
+                        for _list_key in ['results', 'enriched_results']:
+                            if _list_key in st.session_state and st.session_state[_list_key]:
+                                for r in st.session_state[_list_key]:
+                                    if isinstance(r, dict) and 'raw_crustdata' in r:
+                                        del r['raw_crustdata']
+                        # Clear filtered_out (stores full DataFrame copies)
+                        if 'filtered_out' in st.session_state:
+                            del st.session_state['filtered_out']
+                        # Clear debug data
+                        for _debug_key in ['_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols']:
+                            if _debug_key in st.session_state:
+                                del st.session_state[_debug_key]
+
                         db_msg = f" ({db_saved} saved to DB)" if db_saved > 0 else ""
-                        st.success(f"✅ Screening complete! {len(all_results)} profiles{db_msg}")
+                        st.success(f"✅ Screening complete! {len(all_results)} profiles{db_msg} (memory optimized)")
                         send_notification("Screening Complete", f"Screened {len(all_results)} profiles")
                         save_session_state()  # Save for restore
                         st.rerun()

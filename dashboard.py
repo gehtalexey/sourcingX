@@ -3161,9 +3161,13 @@ The requirements contain rejection/exclusion criteria. Follow these rules:
 3. If does NOT match (or only PAST history) → Evaluate normally
 
 CRITICAL DISTINCTIONS:
-- "Reject army/IDF" = Only reject if CURRENTLY employed by army/IDF/military. Past army service is NORMAL in Israel (mandatory) - do NOT reject for past service.
+- "Reject army/IDF" = Only reject if CURRENTLY employed by army/IDF/military.
 - "Reject consultants" = Only reject if CURRENTLY a consultant. Past consulting is OK.
 - "Reject from [company]" = Only reject if CURRENTLY at that company.
+
+ISRAELI MILITARY SERVICE:
+Past IDF/army service is MANDATORY in Israel and is a POSITIVE indicator (shows discipline, technical training, leadership).
+Do NOT mention it as a concern - it's a strength. Only reject if CURRENTLY serving.
 
 Focus on CURRENT_COMPANY and CURRENT_TITLE when checking rejection criteria.
 Past employers/history should NOT trigger rejection unless explicitly stated.

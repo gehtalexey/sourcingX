@@ -4148,23 +4148,42 @@ with tab_filter:
             }
             ALL_EXCLUDE_TITLES = [kw for keywords in EXCLUDE_CATEGORIES.values() for kw in keywords]
 
-            # Quick select buttons
-            st.caption("Quick select:")
-            btn_cols = st.columns(len(EXCLUDE_CATEGORIES) + 1)
-            with btn_cols[0]:
+            # Quick select buttons - organized in rows
+            st.caption("Quick select (click to toggle):")
+
+            # Row 1: All + first 5 categories
+            row1_cols = st.columns(6)
+            with row1_cols[0]:
                 if st.button("All", key="exc_all", use_container_width=True):
                     st.session_state['exclude_title_presets'] = ALL_EXCLUDE_TITLES
                     st.rerun()
-            for i, (cat_name, cat_keywords) in enumerate(EXCLUDE_CATEGORIES.items()):
-                with btn_cols[i + 1]:
+
+            category_items = list(EXCLUDE_CATEGORIES.items())
+            for i, (cat_name, cat_keywords) in enumerate(category_items[:5]):
+                with row1_cols[i + 1]:
                     if st.button(cat_name, key=f"exc_{cat_name}", use_container_width=True):
                         current = st.session_state.get('exclude_title_presets', [])
-                        # Toggle: add if not all present, remove if all present
                         if all(kw in current for kw in cat_keywords):
                             st.session_state['exclude_title_presets'] = [k for k in current if k not in cat_keywords]
                         else:
                             st.session_state['exclude_title_presets'] = list(set(current + cat_keywords))
                         st.rerun()
+
+            # Row 2: Remaining categories + Clear button
+            row2_cols = st.columns(len(category_items) - 5 + 1)
+            for i, (cat_name, cat_keywords) in enumerate(category_items[5:]):
+                with row2_cols[i]:
+                    if st.button(cat_name, key=f"exc_{cat_name}", use_container_width=True):
+                        current = st.session_state.get('exclude_title_presets', [])
+                        if all(kw in current for kw in cat_keywords):
+                            st.session_state['exclude_title_presets'] = [k for k in current if k not in cat_keywords]
+                        else:
+                            st.session_state['exclude_title_presets'] = list(set(current + cat_keywords))
+                        st.rerun()
+            with row2_cols[-1]:
+                if st.button("Clear", key="exc_clear", use_container_width=True):
+                    st.session_state['exclude_title_presets'] = []
+                    st.rerun()
 
             selected_exclude = st.multiselect(
                 "Selected exclusions",

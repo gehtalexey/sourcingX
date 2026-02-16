@@ -296,7 +296,13 @@ def load_salesql_key():
 
 
 # ===== Session Persistence =====
-SESSION_DIR = Path(__file__).parent / '.sessions'
+# On Streamlit Cloud, use /tmp which is writable (but ephemeral across reboots)
+# Locally, use .sessions in app directory
+_IS_STREAMLIT_CLOUD = os.environ.get('STREAMLIT_SHARING_MODE') or '/mount/src' in str(Path(__file__))
+if _IS_STREAMLIT_CLOUD:
+    SESSION_DIR = Path('/tmp/.streamlit_sessions')
+else:
+    SESSION_DIR = Path(__file__).parent / '.sessions'
 SESSION_DIR.mkdir(exist_ok=True)
 # Legacy shared file (for migration)
 _LEGACY_SESSION_FILE = Path(__file__).parent / '.last_session.json'
@@ -307,6 +313,59 @@ def _get_session_file():
     username = st.session_state.get('username', 'default')
     safe_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in username)
     return SESSION_DIR / f'.session_{safe_name}.json'
+
+
+def _save_session_to_db(session_data: dict, username: str) -> bool:
+    """Save session to Supabase for persistence across reboots."""
+    if not HAS_DATABASE:
+        return False
+    try:
+        from db import get_supabase_client
+        client = get_supabase_client()
+        if not client:
+            return False
+
+        # Compress session data to reduce storage size
+        import gzip
+        import base64
+        json_str = json.dumps(session_data)
+        compressed = gzip.compress(json_str.encode('utf-8'))
+        encoded = base64.b64encode(compressed).decode('ascii')
+
+        # Upsert to sessions table
+        from datetime import datetime
+        client.upsert('sessions', {
+            'username': username,
+            'session_data': encoded,
+            'updated_at': datetime.utcnow().isoformat()
+        }, on_conflict='username')
+        return True
+    except Exception as e:
+        print(f"[Session] DB save failed: {e}")
+        return False
+
+
+def _load_session_from_db(username: str):
+    """Load session from Supabase."""
+    if not HAS_DATABASE:
+        return None
+    try:
+        from db import get_supabase_client
+        client = get_supabase_client()
+        if not client:
+            return None
+
+        result = client.select('sessions', 'session_data', {'username': f'eq.{username}'}, limit=1)
+        if result and result[0].get('session_data'):
+            import gzip
+            import base64
+            encoded = result[0]['session_data']
+            compressed = base64.b64decode(encoded)
+            json_str = gzip.decompress(compressed).decode('utf-8')
+            return json.loads(json_str)
+    except Exception as e:
+        print(f"[Session] DB load failed: {e}")
+    return None
 
 def _clean_for_json(obj):
     """Recursively clean data for JSON serialization (handle NaN, numpy types, etc.)."""
@@ -380,22 +439,29 @@ def _restore_session_data(session_data: dict):
             st.session_state[key] = item['data']
 
 
-def save_session_state():
-    """Save current session state to local per-user file only.
+def save_session_state(to_db: bool = False):
+    """Save current session state to local file and optionally to Supabase.
 
-    NOTE: Session state is saved locally only (not to Supabase) to avoid
-    excessive disk IO. DataFrames can be 8MB+ and saves happen frequently.
-    Profile data is already persisted in Supabase via save_enriched_profile().
+    Args:
+        to_db: If True, also save to Supabase for persistence across reboots.
+               Default False to avoid excessive IO on every auto-save.
     """
     try:
         session_data = _build_session_data()
         if not session_data:
             return False
 
-        # Save to local per-user file only (no Supabase - too much IO)
+        username = st.session_state.get('username', 'default')
+
+        # Always save to local file
         session_file = _get_session_file()
         with open(session_file, 'w') as f:
             json.dump(session_data, f)
+
+        # Optionally save to Supabase for persistence across reboots
+        if to_db or _IS_STREAMLIT_CLOUD:
+            _save_session_to_db(session_data, username)
+
         return True
     except Exception as e:
         print(f"[Session] Save failed: {e}")
@@ -403,9 +469,11 @@ def save_session_state():
 
 
 def load_session_state():
-    """Load session state from local per-user file."""
+    """Load session state from local file or Supabase."""
+    username = st.session_state.get('username', 'default')
+
     try:
-        # Fallback to local file (per-user)
+        # Try local file first (faster)
         session_file = _get_session_file()
         if session_file.exists():
             with open(session_file, 'r') as f:
@@ -413,19 +481,25 @@ def load_session_state():
             _restore_session_data(session_data)
             return True, None
 
-        # Try legacy shared file as last resort (one-time migration)
+        # Try legacy shared file
         if _LEGACY_SESSION_FILE.exists():
             with open(_LEGACY_SESSION_FILE, 'r') as f:
                 session_data = json.load(f)
             _restore_session_data(session_data)
-            # Migrate: save to per-user file and delete legacy
-            with open(session_file, 'w') as f:
-                json.dump(session_data, f)
             _LEGACY_SESSION_FILE.unlink(missing_ok=True)
             return True, None
 
-        # No session file found
-        return False, f"No session file found at {session_file}"
+        # Try Supabase (for cloud persistence across reboots)
+        session_data = _load_session_from_db(username)
+        if session_data:
+            _restore_session_data(session_data)
+            # Also save locally for faster access next time
+            with open(session_file, 'w') as f:
+                json.dump(session_data, f)
+            return True, "Restored from database"
+
+        # No session found anywhere
+        return False, f"No session found for user '{username}'"
     except json.JSONDecodeError as e:
         return False, f"Corrupt session file: {e}"
     except Exception as e:
@@ -457,9 +531,9 @@ with st.sidebar:
     st.markdown("### Session")
     col_save, col_clear = st.columns(2)
     with col_save:
-        if st.button("Save", key="sidebar_save_session", help="Save session to restore after refresh"):
-            if save_session_state():
-                st.success("Saved!")
+        if st.button("Save", key="sidebar_save_session", help="Save session to DB for persistence"):
+            if save_session_state(to_db=True):
+                st.success("Saved to DB!")
             else:
                 st.error("Failed to save")
     with col_clear:

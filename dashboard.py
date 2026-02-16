@@ -6807,32 +6807,51 @@ with tab_screening:
 
             # Export options
             st.markdown("### Export Results")
-            export_col1, export_col2, export_col3 = st.columns(3)
+
+            # Count by fit level
+            strong_list = [r for r in screening_results if r.get('fit') == 'Strong Fit']
+            good_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
+            partial_list = [r for r in screening_results if r.get('fit') == 'Partial Fit']
+
+            export_col1, export_col2, export_col3, export_col4, export_col5 = st.columns(5)
 
             with export_col1:
-                # Full results CSV
+                st.download_button(
+                    f"Strong Fit ({len(strong_list)})",
+                    pd.DataFrame(strong_list).to_csv(index=False) if strong_list else "",
+                    "screening_strong_fit.csv",
+                    "text/csv",
+                    disabled=len(strong_list) == 0
+                )
+
+            with export_col2:
+                st.download_button(
+                    f"Good Fit ({len(good_list)})",
+                    pd.DataFrame(good_list).to_csv(index=False) if good_list else "",
+                    "screening_good_fit.csv",
+                    "text/csv",
+                    disabled=len(good_list) == 0
+                )
+
+            with export_col3:
+                st.download_button(
+                    f"Partial Fit ({len(partial_list)})",
+                    pd.DataFrame(partial_list).to_csv(index=False) if partial_list else "",
+                    "screening_partial_fit.csv",
+                    "text/csv",
+                    disabled=len(partial_list) == 0
+                )
+
+            with export_col4:
                 full_df = pd.DataFrame(sorted_results)
                 st.download_button(
-                    "Download All Results (CSV)",
+                    f"All ({len(sorted_results)})",
                     full_df.to_csv(index=False),
                     "screening_results_all.csv",
                     "text/csv"
                 )
 
-            with export_col2:
-                # Strong + Good + Partial fit
-                top_candidates = [r for r in screening_results if r.get('fit') in ['Strong Fit', 'Good Fit', 'Partial Fit']]
-                top_df = pd.DataFrame(top_candidates)
-                st.download_button(
-                    f"Download Fit Candidates ({len(top_candidates)})",
-                    top_df.to_csv(index=False) if not top_df.empty else "",
-                    "screening_results_fit.csv",
-                    "text/csv",
-                    disabled=len(top_candidates) == 0
-                )
-
-            with export_col3:
-                # Clear results
+            with export_col5:
                 if st.button("Clear Results", key="clear_screening"):
                     del st.session_state['screening_results']
                     st.rerun()

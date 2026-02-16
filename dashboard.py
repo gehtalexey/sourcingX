@@ -3202,17 +3202,23 @@ Respond with ONLY valid JSON in this exact format:
             "Candidates who don't match rejection criteria should be evaluated normally."
         )
         _no_hallucination = (
-            "\n\n## CRITICAL: Use ONLY data provided\n"
-            "- ONLY mention job titles that EXPLICITLY appear in the profile data\n"
-            "- ONLY use the years/durations from the 'Work History' section - do NOT calculate your own\n"
-            "- If a role (like 'Team Leader') is NOT in the data, do NOT claim they have it\n"
-            "- Company mergers mentioned in descriptions do NOT mean the person worked at both companies\n"
-            "- Be FACTUAL - do not invent or assume information not present in the profile"
+            "\n\n## CRITICAL: Use ONLY data provided - NO HALLUCINATION\n"
+            "STRICT RULES:\n"
+            "1. ONLY mention companies that EXPLICITLY appear in current_employers or past_employers\n"
+            "2. ONLY mention job titles that EXPLICITLY appear in employee_title fields\n"
+            "3. Use the 'Total experience: ~X years' from Work History - do NOT calculate your own\n"
+            "4. If a role (like 'Team Leader') is NOT listed, do NOT claim they have it\n"
+            "5. Company descriptions/about text do NOT indicate employment - only current_employers and past_employers lists count\n"
+            "6. Do NOT confuse company descriptions (e.g., 'Unity acquired ironSource') with the candidate's work history\n"
+            "7. If data is missing or unclear, say 'Not specified in profile' - do NOT guess or assume\n"
+            "VIOLATION = WRONG ASSESSMENT. Triple-check your claims against the actual JSON data."
         )
         if 'Company Description Analysis' not in prompt_to_use:
             prompt_to_use += _company_desc_reminder
         if 'Rejection Criteria' not in prompt_to_use:
             prompt_to_use += _rejection_enforcement
+        # Always add anti-hallucination warning
+        prompt_to_use += _no_hallucination
 
         # Retry with exponential backoff on rate limit (429) errors
         response = None

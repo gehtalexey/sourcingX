@@ -2823,18 +2823,26 @@ def _score_keywords(keywords: list, text_lower: str) -> float:
     Multi-word keywords (phrases) get 2 points each since they're more specific.
     Single-word keywords get 1 point and use word-boundary regex to avoid
     false substring matches (e.g. 'go' matching inside 'going').
+    Leadership keywords get bonus points to prioritize lead roles over IC roles.
     """
+    # Leadership keywords get extra weight (3 points for phrases, 2 for single words)
+    leadership_keywords = ['team lead', 'team leader', 'tech lead', 'tech leader',
+                          'engineering lead', 'technical lead', 'lead engineer',
+                          'engineering manager', 'manager', 'director', 'vp', 'head of']
+
     score = 0
     for kw in keywords:
         kw_lower = kw.lower()
+        is_leadership = any(lk in kw_lower for lk in leadership_keywords) or kw_lower in leadership_keywords
+
         if ' ' in kw_lower:
-            # Multi-word phrase: substring match is fine, worth 2 points
+            # Multi-word phrase: substring match is fine
             if kw_lower in text_lower:
-                score += 2
+                score += 3 if is_leadership else 2
         else:
             # Single word: use word boundary to avoid false matches
             if re.search(r'\b' + re.escape(kw_lower) + r'\b', text_lower):
-                score += 1
+                score += 2 if is_leadership else 1
     return score
 
 

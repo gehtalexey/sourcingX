@@ -213,8 +213,9 @@ DEVOPS_ISRAEL = {
 TEAMLEAD_ISRAEL = {
     'name': 'Team Lead - Israel',
     'keywords': [
-        'team lead', 'tech lead', 'engineering lead', 'technical lead',
-        'lead engineer', 'staff engineer', 'israel', 'tel aviv',
+        'team lead', 'team leader', 'tech lead', 'tech leader',
+        'engineering lead', 'technical lead', 'lead engineer',
+        'staff engineer', 'tl', 'israel', 'tel aviv',
     ],
     'prompt': f"""You are an expert technical recruiter for top Israeli startups. You screen Team/Tech Leads.
 

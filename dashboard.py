@@ -3201,6 +3201,14 @@ Respond with ONLY valid JSON in this exact format:
             "check if THIS SPECIFIC candidate matches. Only reject if they actually match. "
             "Candidates who don't match rejection criteria should be evaluated normally."
         )
+        _no_hallucination = (
+            "\n\n## CRITICAL: Use ONLY data provided\n"
+            "- ONLY mention job titles that EXPLICITLY appear in the profile data\n"
+            "- ONLY use the years/durations from the 'Work History' section - do NOT calculate your own\n"
+            "- If a role (like 'Team Leader') is NOT in the data, do NOT claim they have it\n"
+            "- Company mergers mentioned in descriptions do NOT mean the person worked at both companies\n"
+            "- Be FACTUAL - do not invent or assume information not present in the profile"
+        )
         if 'Company Description Analysis' not in prompt_to_use:
             prompt_to_use += _company_desc_reminder
         if 'Rejection Criteria' not in prompt_to_use:
@@ -6523,6 +6531,21 @@ with tab_screening:
                     existing_results = st.session_state.get('screening_results', [])
                     initial_results = [r for r in existing_results if r.get('linkedin_url', '') not in rescreen_urls]
                     profiles_to_screen = [p for p in profiles if p.get('linkedin_url', '') in rescreen_urls]
+
+                    # Reload raw_crustdata from DB if missing (after memory cleanup)
+                    if HAS_DATABASE and profiles_to_screen:
+                        db_client = _get_db_client()
+                        if db_client:
+                            for p in profiles_to_screen:
+                                if not p.get('raw_crustdata') and not p.get('raw_data'):
+                                    url = normalize_linkedin_url(p.get('linkedin_url', ''))
+                                    if url:
+                                        try:
+                                            db_profile = get_profile(db_client, url)
+                                            if db_profile and db_profile.get('raw_data'):
+                                                p['raw_crustdata'] = db_profile['raw_data']
+                                        except:
+                                            pass
                 elif continue_button:
                     # Continue: only screen profiles not yet screened
                     existing_results = st.session_state.get('screening_results', [])

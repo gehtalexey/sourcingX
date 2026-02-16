@@ -405,14 +405,13 @@ def save_session_state():
 def load_session_state():
     """Load session state from local per-user file."""
     try:
-
         # Fallback to local file (per-user)
         session_file = _get_session_file()
         if session_file.exists():
             with open(session_file, 'r') as f:
                 session_data = json.load(f)
             _restore_session_data(session_data)
-            return True
+            return True, None
 
         # Try legacy shared file as last resort (one-time migration)
         if _LEGACY_SESSION_FILE.exists():
@@ -423,10 +422,14 @@ def load_session_state():
             with open(session_file, 'w') as f:
                 json.dump(session_data, f)
             _LEGACY_SESSION_FILE.unlink(missing_ok=True)
-            return True
+            return True, None
+
+        # No session file found
+        return False, f"No session file found at {session_file}"
+    except json.JSONDecodeError as e:
+        return False, f"Corrupt session file: {e}"
     except Exception as e:
-        print(f"[Session] Load failed: {e}")
-    return False
+        return False, f"Load error: {e}"
 
 
 def clear_session_file():
@@ -3354,11 +3357,12 @@ with tab_upload:
                 col_local1, col_local2 = st.columns([3, 1])
                 with col_local1:
                     if st.button("Restore Last Session", key="restore_local_session", type="primary"):
-                        if load_session_state():
+                        success, error_msg = load_session_state()
+                        if success:
                             st.success("Session restored!")
                             st.rerun()
                         else:
-                            st.error("Failed to restore session")
+                            st.error(f"Failed to restore: {error_msg}")
                 with col_local2:
                     if st.button("Clear", key="clear_local_session"):
                         clear_session_file()

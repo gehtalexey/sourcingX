@@ -4138,7 +4138,7 @@ with tab_filter:
                 "C-Level/Founders": ["cto", "ceo", "coo", "cfo", "owner", "founder", "co-founder"],
                 "Non-Employee": ["freelancer", "self employed", "consultant"],
                 "Junior": ["student", "intern", "junior"],
-                "Technical": ["qa", "automation", "embedded", "low level", "real time", "hardware", "firmware", "c++", "gui", "dsp", "unity", "integration"],
+                "Technical": ["qa", "automation", "embedded", "low level", "real time", "hardware", "firmware", "c++", "gui", "dsp", "unity", "integration", "test", "system"],
                 "Mobile": ["mobile", "ios", "android"],
                 "Design": ["ui", "ux", "design", "designer"],
                 "Data/ML": ["big data", "machine learning", "data", "bi", "science", "ml", "algorithm", "algorithms", "computer vision"],

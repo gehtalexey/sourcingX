@@ -3116,7 +3116,13 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
     if len(raw_json_str) > 8000:  # Truncate if too large
         raw_json_str = raw_json_str[:8000] + "\n... (truncated)"
 
-    profile_summary = f"""## Full Profile Data (JSON):
+    # Get formatted work history with calculated durations
+    work_history_formatted = format_work_history(profile)
+
+    profile_summary = f"""## Work History (with calculated durations):
+{work_history_formatted}
+
+## Full Profile Data (JSON):
 ```json
 {raw_json_str}
 ```"""

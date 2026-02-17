@@ -3245,40 +3245,55 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
 
     # Detect rejection keywords in JD or extra requirements
     rejection_keywords = ['reject', 'exclude', 'don\'t want', 'do not want', 'must not', 'should not',
-                          'not looking for', 'no candidates from', 'not interested in', 'disqualify']
+                          'not looking for', 'no candidates from', 'not interested in', 'disqualify', 'overqualified']
+    must_have_keywords = ['must have', 'is a must', 'required', 'mandatory', 'must be mentioned', 'must include']
     combined_text = (job_description + ' ' + (extra_requirements or '')).lower()
     has_rejection_criteria = any(kw in combined_text for kw in rejection_keywords)
+    has_must_have_criteria = any(kw in combined_text for kw in must_have_keywords)
 
     # Build extra requirements section with strong rejection language
     extra_req_section = ""
     if extra_requirements:
         extra_req_section = f"""
-## CRITICAL - Extra Requirements (MUST enforce):
+## CRITICAL - Extra Requirements (HARD RULES - MUST enforce):
 {extra_requirements}
+
+ENFORCEMENT RULES:
+- If a requirement says "must have X" or "X is a must" → Candidate MUST show X in their profile or score ≤3
+- If a requirement says "reject Y" → If candidate matches Y → Score 1-2, mark as "Not a Fit"
+- These are DISQUALIFIERS, not preferences
 """
 
     # Add rejection enforcement if ANY rejection keywords found (in JD or extra requirements)
     rejection_warning = ""
-    if has_rejection_criteria:
+    if has_rejection_criteria or has_must_have_criteria:
         rejection_warning = """
-## Rejection Criteria Handling:
-The requirements contain rejection/exclusion criteria. Follow these rules:
+## HARD RULES - Rejection & Must-Have Criteria:
+The requirements contain HARD RULES. These are NOT preferences - they are disqualifiers.
 
-1. Check if the candidate's CURRENT role/company matches the rejection criteria
-2. If CURRENTLY matches → Score 1-3, explain why
-3. If does NOT match (or only PAST history) → Evaluate normally
+### REJECTION RULES (Score 1-2 if matched):
+1. "Reject overqualified/VP/Director/CTO/Head of" → Check CURRENT TITLE. If title contains VP, Director, CTO, Chief, Head of, or similar executive titles → Score 1-2, "Not a Fit"
+2. "Reject junior/students/freelancers" → If current role is Junior, Intern, Student, or Freelance → Score 1-2
+3. "Reject project companies" → If current company is consulting/outsourcing (Matrix, Tikal, Ness, Sela, etc.) → Score 1-2
+4. "Reject [specific type]" → Apply literally to CURRENT position
 
-CRITICAL DISTINCTIONS:
-- "Reject army/IDF" = Only reject if CURRENTLY employed by army/IDF/military.
-- "Reject consultants" = Only reject if CURRENTLY a consultant. Past consulting is OK.
-- "Reject from [company]" = Only reject if CURRENTLY at that company.
+### MUST-HAVE RULES (Score ≤3 if missing):
+1. "X is a must" or "must have X" → Search the ENTIRE profile for X. If NOT found anywhere → Score ≤3, "Partial Fit" at best
+2. "Must have N years of Y experience" → Calculate from work history. If not met → Score ≤3
+3. "Must have team lead experience in recent N years" → Check if ANY role in past N years had "lead", "manager", "head" in title
+
+### HOW TO CHECK:
+- For skills: Search profile text, skills list, job descriptions, certifications
+- For titles: Check current_title AND all past titles
+- For experience: Calculate from work history dates
+
+### CRITICAL:
+- A candidate missing a MUST-HAVE requirement can NEVER be "Strong Fit" or "Good Fit"
+- A candidate matching a REJECTION criterion is ALWAYS "Not a Fit" (Score 1-2)
 
 ISRAELI MILITARY SERVICE:
-Past IDF/army service is MANDATORY in Israel and is a POSITIVE indicator (shows discipline, technical training, leadership).
+Past IDF/army service is MANDATORY in Israel and is a POSITIVE indicator.
 Do NOT mention it as a concern - it's a strength. Only reject if CURRENTLY serving.
-
-Focus on CURRENT_COMPANY and CURRENT_TITLE when checking rejection criteria.
-Past employers/history should NOT trigger rejection unless explicitly stated.
 """
 
     user_prompt = f"""Evaluate this candidate against the job description.

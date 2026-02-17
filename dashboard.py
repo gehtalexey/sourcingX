@@ -3317,10 +3317,19 @@ The requirements contain HARD RULES. These are NOT preferences - they are disqua
 3. "Reject project companies" → If current company is consulting/outsourcing (Matrix, Tikal, Ness, Sela, etc.) → Score 1-2
 4. "Reject [specific type]" → Apply literally to CURRENT position
 
-### MUST-HAVE RULES (Score ≤3 if missing):
-1. "X is a must" or "must have X" → Search the ENTIRE profile for X. If NOT found anywhere → Score ≤3, "Partial Fit" at best
-2. "Must have N years of Y experience" → Calculate from work history. If not met → Score ≤3
-3. "Must have team lead experience in recent N years" → Check if ANY role in past N years had "lead", "manager", "head" in title
+### MUST-HAVE RULES — TIERED SCORING:
+A must-have requirement ("must have X", "X is a must") is critical but does NOT automatically mean score ≤3.
+Apply this tiered logic:
+
+**Score 7-10 (Good/Strong Fit)**: Candidate CLEARLY meets ALL must-have requirements. No ambiguity.
+**Score 5-6 (Partial Fit — "Maybe" pile)**: Candidate does NOT clearly meet a must-have BUT has STRONG compensating signals:
+  - Top-tier company background (Wiz, Monday, Rapyd, Fireblocks, CyberArk, SentinelOne, Check Point, Palo Alto, etc.)
+  - Elite army unit (8200, Mamram, Talpiot)
+  - Strong title progression showing rapid growth
+  - Top university (Technion, TAU, Hebrew U)
+  These candidates are worth a MANUAL REVIEW by the recruiter.
+**Score 3-4 (Not a Fit)**: Candidate does NOT meet a must-have AND has NO strong compensating signals. Average company, no standout progression.
+**Score 1-2 (Not a Fit — hard reject)**: Candidate matches a REJECTION criterion (overqualified, junior, consulting company, etc.)
 
 ### HOW TO CHECK (use ALL available JSON fields):
 - **CURRENT TITLE** (AUTHORITATIVE): This is the candidate's ACTUAL current job title. ALWAYS trust this over headline.
@@ -3338,8 +3347,9 @@ The requirements contain HARD RULES. These are NOT preferences - they are disqua
 - Only score 1-2 if there's POSITIVE EVIDENCE of rejection criteria (e.g., title says "Junior", company is consulting firm)
 
 ### CRITICAL:
-- A candidate missing a MUST-HAVE requirement can NEVER be "Strong Fit" or "Good Fit"
+- A candidate missing a MUST-HAVE can NEVER be "Strong Fit" or "Good Fit" (max 6)
 - A candidate matching a REJECTION criterion is ALWAYS "Not a Fit" (Score 1-2)
+- The difference between 5-6 and 3-4 for candidates missing must-haves is COMPANY STRENGTH and SIGNALS
 
 ISRAELI MILITARY SERVICE:
 Past IDF/army service is MANDATORY in Israel and is a POSITIVE indicator.
@@ -3352,10 +3362,13 @@ Do NOT mention it as a concern - it's a strength. Only reject if CURRENTLY servi
 {job_description}
 {rejection_warning}
 IMPORTANT RULES:
-- Any "must have" requirement is a HARD filter. If the candidate clearly does NOT meet it, score 3 or below.
-- Use the "Work History" section above with calculated durations to determine years of experience. Do NOT say "duration not specified" when dates and durations are provided.
+- "Must have" requirements are critical filters. Use TIERED scoring:
+  * Meets all must-haves → eligible for 7-10
+  * Doesn't meet a must-have BUT has strong signals (top company, elite army, top university) → 5-6 (worth manual review)
+  * Doesn't meet a must-have AND no strong signals → 3-4
+  * Matches a rejection criterion → 1-2
+- Use the "Work History" section with calculated durations to determine years of experience. Do NOT say "duration not specified" when dates and durations are provided.
 - When work history dates are missing, infer from the number of positions, career trajectory, title seniority, and other signals. Make your BEST assessment — never default to "can't determine" or "insufficient data".
-- Differentiate scores: a candidate at a top company (Wiz, Rapyd, Fireblocks, Cybereason, etc.) with the right title should score higher than someone at an unknown company with the same title.
 - Be specific in your reasoning — reference actual companies, durations, and titles from the profile.
 
 ## Candidate Profile:
@@ -3394,7 +3407,7 @@ Respond with ONLY valid JSON in this exact format:
             "4. If a role (like 'Team Leader') is NOT listed, do NOT claim they have it\n"
             "5. Company descriptions/about text do NOT indicate employment - only current_employers and past_employers lists count\n"
             "6. Do NOT confuse company descriptions (e.g., 'Unity acquired ironSource') with the candidate's work history\n"
-            "7. If data is missing or unclear, say 'Not specified in profile' - do NOT guess or assume\n"
+            "7. If data is missing, infer from available signals (title, companies, skills) - do NOT refuse to assess\n"
             "VIOLATION = WRONG ASSESSMENT. Triple-check your claims against the actual JSON data."
         )
         if 'Company Description Analysis' not in prompt_to_use:
@@ -3411,8 +3424,11 @@ Respond with ONLY valid JSON in this exact format:
             "The profile includes a pre-calculated work history with dates and durations. USE IT.\n"
             "2. When dates are truly missing, infer experience from: number of positions, title progression, "
             "company types, and skill depth. State your inference, don't punt.\n"
-            "3. 'Must have' requirements in the screening requirements are HARD filters. "
-            "If a candidate clearly fails a must-have → score 3 or below, regardless of other strengths.\n"
+            "3. TIERED must-have scoring:\n"
+            "   - Meets all must-haves → 7-10\n"
+            "   - Fails a must-have BUT strong signals (top company, elite army, top university) → 5-6 (manual review)\n"
+            "   - Fails a must-have AND no strong signals → 3-4\n"
+            "   - Matches rejection criterion → 1-2\n"
             "4. DIFFERENTIATE scores. Two candidates should NOT get the same score unless they are truly equivalent. "
             "Company reputation, title seniority, tenure, and skill depth should all create score differences.\n"
             "5. Be SPECIFIC in summary/why — mention actual company names, years, titles. "

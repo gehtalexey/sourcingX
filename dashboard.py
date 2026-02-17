@@ -3392,15 +3392,35 @@ The requirements contain HARD RULES. These are NOT preferences - they are disqua
 A must-have requirement ("must have X", "X is a must") is critical but does NOT automatically mean score ≤3.
 Apply this tiered logic:
 
-**Score 7-10 (Good/Strong Fit)**: Candidate CLEARLY meets ALL must-have requirements. No ambiguity.
+**Score 7-10 (Good/Strong Fit)**: Candidate CLEARLY meets ALL must-have requirements with VERIFIED DURATIONS. No ambiguity.
 **Score 5-6 (Partial Fit — "Maybe" pile)**: Candidate does NOT clearly meet a must-have BUT has STRONG compensating signals:
-  - Top-tier company background (Wiz, Monday, Rapyd, Fireblocks, CyberArk, SentinelOne, Check Point, Palo Alto, etc.)
+  - Top-tier company background (Wiz, Monday, Rapyd, Fireblocks, CyberArk, SentinelOne, Check Point, Palo Alto, PayPal, Google, Meta, etc.)
   - Elite army unit (8200, Mamram, Talpiot)
   - Strong title progression showing rapid growth
   - Top university (Technion, TAU, Hebrew U)
   These candidates are worth a MANUAL REVIEW by the recruiter.
 **Score 3-4 (Not a Fit)**: Candidate does NOT meet a must-have AND has NO strong compensating signals. Average company, no standout progression.
 **Score 1-2 (Not a Fit — hard reject)**: Candidate matches a REJECTION criterion (overqualified, junior, consulting company, etc.)
+
+### EXPERIENCE CALCULATION (CRITICAL - READ CAREFULLY):
+
+**For "X years LEAD/TEAM LEAD experience" requirements:**
+- You MUST calculate TOTAL DURATION of roles with Lead/Manager/TL/Team Leader in the TITLE
+- Current title alone does NOT count as meeting the requirement! Calculate how long they've been in lead roles.
+- Example: If requirement is "2 years lead" and candidate has been Tech Lead for only 8 months → does NOT meet requirement
+- SUM all lead roles: "Team Lead 2019-2021 (2yr) + Tech Lead 2023-present (1yr) = 3yr total" ✓
+- "Manager" title COUNTS as leadership (DevOps Manager, Engineering Manager, etc.)
+
+**For "X years DEVOPS experience" requirements:**
+- Count ONLY roles that are actually DevOps: DevOps Engineer, SRE, Platform Engineer, Cloud Engineer, DevSecOps
+- Do NOT count these as DevOps:
+  * System Administrator, SysAdmin, Linux Admin → Infrastructure/IT, NOT DevOps
+  * Storage Administrator, Storage Engineer → Storage, NOT DevOps
+  * Network Administrator → Networking, NOT DevOps
+  * QA Engineer, Test Engineer → QA, NOT DevOps
+  * IT Support, Help Desk, IT Specialist → IT Support, NOT DevOps
+  * DBA, Database Administrator → DBA, NOT DevOps
+- Military infra roles (even in 8200) count as DevOps ONLY if title contains DevOps/SRE/Platform
 
 ### HOW TO CHECK (use ALL available JSON fields):
 - **CURRENT TITLE** (AUTHORITATIVE): This is the candidate's ACTUAL current job title. ALWAYS trust this over headline.
@@ -3409,8 +3429,8 @@ Apply this tiered logic:
 - **skills**: Array of skills - search for required technologies here
 - **all_titles**: Array of ALL job titles from career history - check for leadership roles (Lead, Manager, Head, TL)
 - **all_employers**: Array of ALL companies worked at
-- **current_employers** + **past_employers**: Detailed work history with dates
-- For experience years: Calculate from work history dates in past_employers
+- **current_employers** + **past_employers**: Detailed work history with dates and durations
+- **CALCULATE experience years** by summing durations from work history. Show your math: "Dell 2.5yr + H2O 1.5yr = 4yr DevOps"
 
 ### MISSING DATA HANDLING:
 - If work history (past_employers) is EMPTY but CURRENT TITLE shows "Team Lead" or "Tech Lead" → Give benefit of doubt for leadership
@@ -3434,12 +3454,13 @@ Do NOT mention it as a concern - it's a strength. Only reject if CURRENTLY servi
 {rejection_warning}
 IMPORTANT RULES:
 - "Must have" requirements are critical filters. Use TIERED scoring with SIGNAL CHECK:
-  * Meets all must-haves → eligible for 7-10
+  * Meets all must-haves WITH VERIFIED DURATIONS → eligible for 7-10
   * Fails a must-have BUT has a NAMED strong signal (top company like Wiz/Rapyd/Fireblocks/PayPal, elite army 8200/Mamram, top university Technion/TAU) → 5-6. You MUST name the signal.
   * Fails a must-have AND has NO named strong signal → 3-4. The job title alone is NOT a signal.
   * Matches a rejection criterion → 1-2
-- Use the "Work History" section with calculated durations to determine years of experience. Do NOT say "duration not specified" when dates and durations are provided.
-- When work history dates are missing, infer from the number of positions, career trajectory, title seniority, and other signals. Make your BEST assessment — never default to "can't determine" or "insufficient data".
+- CALCULATE LEAD EXPERIENCE: For "X years lead experience" requirements, SUM the durations of ALL roles with Lead/Manager/TL in title. Current title alone is NOT enough - verify HOW LONG they've been a lead.
+- CALCULATE DEVOPS EXPERIENCE: Only count DevOps/SRE/Platform/Cloud roles. Do NOT count SysAdmin, Storage, QA, IT Support, DBA as DevOps.
+- Show your calculation: "Lead @ Company A (2yr) + TL @ Company B (1yr) = 3yr lead experience"
 - Be specific in your reasoning — reference actual companies, durations, and titles from the profile.
 
 ## Candidate Profile:

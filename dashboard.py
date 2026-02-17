@@ -3527,6 +3527,74 @@ Respond with ONLY valid JSON in this exact format:
         }
 
 
+def fetch_raw_data_for_batch(profiles: list, enriched_results: list = None, db_client = None) -> None:
+    """Fetch raw_data for a batch of profiles (memory-efficient, on-demand).
+
+    Modifies profiles in-place to add raw_data/raw_crustdata.
+    Only fetches for profiles that don't already have raw_data.
+
+    Args:
+        profiles: List of profile dicts to fetch raw_data for
+        enriched_results: Optional list of enriched profiles (from session state)
+        db_client: Optional database client for fetching from DB
+    """
+    def _ensure_raw_dict(raw):
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return raw if isinstance(raw, dict) else {}
+
+    # Find profiles missing raw_data
+    missing = [p for p in profiles if not p.get('raw_crustdata') and not p.get('raw_data')]
+    if not missing:
+        return
+
+    # FIRST: Try enriched_results (has raw_data if fresh from enrichment)
+    if enriched_results:
+        raw_by_url = {}
+        for ep in enriched_results:
+            raw = ep.get('raw_data') or ep.get('raw_crustdata')
+            if not raw:
+                continue
+            parsed_raw = _ensure_raw_dict(raw) if not isinstance(raw, dict) else raw
+            if not parsed_raw:
+                continue
+            # Index under all possible URL variants
+            for url_key in ['linkedin_flagship_url', 'linkedin_url', 'linkedin_profile_url']:
+                for source in [ep, parsed_raw]:
+                    url = source.get(url_key, '') if isinstance(source, dict) else ''
+                    if url:
+                        raw_by_url[url] = parsed_raw
+        for p in missing:
+            url = p.get('linkedin_url', '')
+            if url and url in raw_by_url:
+                p['raw_crustdata'] = raw_by_url[url]
+
+    # SECOND: Fetch from DB for still-missing profiles
+    still_missing = [p for p in profiles if not p.get('raw_crustdata') and not p.get('raw_data')]
+    if still_missing and db_client:
+        try:
+            missing_urls = [p.get('linkedin_url', '') for p in still_missing if p.get('linkedin_url')]
+            if missing_urls:
+                # Fetch ONLY the profiles we need using 'in' filter
+                url_filter = ','.join(missing_urls)
+                db_profiles = db_client.select('profiles', 'linkedin_url,raw_data',
+                                               {'linkedin_url': f'in.({url_filter})'},
+                                               limit=len(missing_urls))
+                db_raw_by_url = {}
+                for dp in db_profiles:
+                    if dp.get('linkedin_url'):
+                        db_raw_by_url[dp['linkedin_url']] = _ensure_raw_dict(dp.get('raw_data'))
+                for p in still_missing:
+                    url = p.get('linkedin_url', '')
+                    if url and url in db_raw_by_url and db_raw_by_url[url]:
+                        p['raw_crustdata'] = db_raw_by_url[url]
+        except Exception as e:
+            print(f"[Screening] Failed to fetch raw data from DB: {e}")
+
+
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
                           max_workers: int = 50,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
@@ -6141,84 +6209,13 @@ with tab_screening:
         # Convert DataFrame to dicts for screening
         profiles = profiles_df.to_dict('records')
 
-        # Helper: ensure raw_data is a dict (may arrive as JSON string from DB/session)
-        def _ensure_raw_dict(raw):
-            if isinstance(raw, str):
-                try:
-                    raw = json.loads(raw)
-                except (json.JSONDecodeError, TypeError):
-                    return {}
-            return raw if isinstance(raw, dict) else {}
-
-        # Ensure profiles have raw data for AI screening.
-        # The display DataFrame may strip raw_data/raw_crustdata, so we inject it
-        # back from enriched_results (session state) or the database directly.
-
-        # First, parse any existing raw_data/raw_crustdata that are JSON strings
+        # Strip any existing raw_data to save memory - will be fetched per-batch
         for p in profiles:
-            if p.get('raw_crustdata'):
-                p['raw_crustdata'] = _ensure_raw_dict(p['raw_crustdata'])
-            if p.get('raw_data'):
-                p['raw_data'] = _ensure_raw_dict(p['raw_data'])
+            p.pop('raw_data', None)
+            p.pop('raw_crustdata', None)
 
-        profiles_missing_raw = [p for p in profiles if not p.get('raw_crustdata') and not p.get('raw_data')]
-        if profiles_missing_raw:
-            # FIRST: Try enriched_results (has raw_data if fresh from enrichment)
-            # Index by BOTH linkedin_flagship_url (clean) and linkedin_url (encoded)
-            raw_by_url = {}
-            for ep in (st.session_state.get('enriched_results') or []):
-                raw = ep.get('raw_data') or ep.get('raw_crustdata')
-                if not raw:
-                    continue
-                parsed_raw = _ensure_raw_dict(raw) if not isinstance(raw, dict) else raw
-                if not parsed_raw or not parsed_raw.get('current_employers') and not parsed_raw.get('past_employers'):
-                    continue
-                # Index under all possible URL variants
-                urls_to_index = set()
-                for url_key in ['linkedin_flagship_url', 'linkedin_url', 'linkedin_profile_url']:
-                    for source in [ep, parsed_raw]:
-                        url = source.get(url_key, '') if isinstance(source, dict) else ''
-                        if url:
-                            urls_to_index.add(url)
-                for url in urls_to_index:
-                    raw_by_url[url] = parsed_raw
-            for p in profiles_missing_raw:
-                url = p.get('linkedin_url', '')
-                if url and url in raw_by_url and raw_by_url[url]:
-                    p['raw_data'] = raw_by_url[url]
-
-            # SECOND: If still missing, fetch from database (ONLY missing URLs - memory efficient)
-            still_missing = [p for p in profiles if not p.get('raw_crustdata') and not p.get('raw_data')]
-            if still_missing and HAS_DATABASE:
-                try:
-                    db_client = _get_db_client()
-                    if db_client:
-                        missing_urls = [p.get('linkedin_url', '') for p in still_missing if p.get('linkedin_url')]
-                        if missing_urls:
-                            # Fetch ONLY the profiles we need (not all profiles)
-                            # Use PostgREST 'in' filter for targeted fetch
-                            url_filter = ','.join(missing_urls[:100])  # Limit to 100 URLs per batch
-                            db_profiles = db_client.select('profiles', 'linkedin_url,raw_data',
-                                                           {'linkedin_url': f'in.({url_filter})'},
-                                                           limit=len(missing_urls))
-                            db_raw_by_url = {}
-                            for dp in db_profiles:
-                                if dp.get('linkedin_url'):
-                                    db_raw_by_url[dp['linkedin_url']] = _ensure_raw_dict(dp.get('raw_data'))
-                            for p in still_missing:
-                                url = p.get('linkedin_url', '')
-                                if url and url in db_raw_by_url and db_raw_by_url[url]:
-                                    p['raw_data'] = db_raw_by_url[url]
-                except Exception as e:
-                    print(f"[Screening] Failed to fetch raw data from DB: {e}")
-
-        # Diagnostic: show data status so issues can be identified
-        has_raw = sum(1 for p in profiles if p.get('raw_crustdata') or p.get('raw_data'))
-        missing_raw = len(profiles) - has_raw
-        if missing_raw > 0:
-            st.warning(f"**{missing_raw}** of {len(profiles)} profiles are missing detailed data. AI screening may be limited for these profiles.")
-        else:
-            st.caption(f"All {len(profiles)} profiles have full data for AI screening.")
+        # Show profile count (raw_data will be fetched per-batch during screening)
+        st.caption(f"{len(profiles)} profiles ready for screening (data fetched per-batch for memory efficiency)")
 
         # AI Screening Requirements Input
         st.markdown("### AI Screening Requirements")
@@ -6687,6 +6684,14 @@ with tab_screening:
 
                 if batch_profiles:
                     with st.status(f"Processing batch {current_batch + 1} ({screen_mode} mode)...", expanded=True) as status:
+                        # Fetch raw_data for this batch only (memory efficient)
+                        db_client = _get_db_client() if HAS_DATABASE else None
+                        fetch_raw_data_for_batch(
+                            batch_profiles,
+                            enriched_results=st.session_state.get('enriched_results'),
+                            db_client=db_client
+                        )
+
                         # Progress callback (DB save deferred to batch at end)
                         def _on_profile_screened(completed, total, result):
                             pass  # DB save happens in batch after screening completes

@@ -2726,22 +2726,58 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
     # Track skipped filters for diagnostics
     stats['_skipped_filters'] = []
 
-    # 1. Past candidates filter
+    # 1. Past candidates filter (match by LinkedIn URL first, then by name)
     if filters.get('past_candidates_df') is not None:
         past_df = filters['past_candidates_df']
+        df['_is_past'] = False
+
+        # Helper to normalize LinkedIn URLs for comparison
+        def normalize_linkedin_url(url):
+            if pd.isna(url) or not url:
+                return ''
+            url = str(url).lower().strip().rstrip('/')
+            # Extract the profile ID part (e.g., "john-smith-123abc")
+            if '/in/' in url:
+                return url.split('/in/')[-1].split('/')[0].split('?')[0]
+            return url
+
+        # Try LinkedIn URL matching first (most reliable)
+        linkedin_col = None
+        for col in ['LinkedIn', 'linkedin_url', 'LinkedIn URL', 'linkedinUrl', 'profile_url', 'URL']:
+            if col in past_df.columns:
+                linkedin_col = col
+                break
+
+        if linkedin_col and 'linkedin_url' in df.columns:
+            past_urls = set(normalize_linkedin_url(url) for url in past_df[linkedin_col].dropna())
+            df['_norm_url'] = df['linkedin_url'].apply(normalize_linkedin_url)
+            df['_is_past'] = df['_norm_url'].isin(past_urls)
+            df = df.drop(columns=['_norm_url'])
+
+        # Also try name matching (catches cases where URL format differs)
         if 'Name' in past_df.columns:
-            past_names = set(str(name).lower().strip() for name in past_df['Name'].dropna())
-            if 'first_name' in df.columns and 'last_name' in df.columns:
-                df['_full_name'] = (df['first_name'].fillna('').str.lower().str.strip() + ' ' +
-                                   df['last_name'].fillna('').str.lower().str.strip())
-                df['_is_past'] = df['_full_name'].isin(past_names)
-                stats['past_candidates'] = df['_is_past'].sum()
-                filtered_out['Past Candidates'] = df[df['_is_past']].drop(columns=['_is_past', '_full_name']).copy()
-                df = df[~df['_is_past']].drop(columns=['_is_past', '_full_name'])
-            else:
-                stats['_skipped_filters'].append('past_candidates (missing first_name/last_name columns)')
-        else:
-            stats['_skipped_filters'].append(f"past_candidates (sheet needs 'Name' column, has: {list(past_df.columns)})")
+            past_names = set(str(name).lower().strip() for name in past_df['Name'].dropna() if str(name).strip())
+            if past_names:
+                # Try full name from 'name' column first
+                if 'name' in df.columns:
+                    df['_name_match'] = df['name'].fillna('').str.lower().str.strip().isin(past_names)
+                    df['_is_past'] = df['_is_past'] | df['_name_match']
+                    df = df.drop(columns=['_name_match'])
+                # Also try first_name + last_name
+                if 'first_name' in df.columns and 'last_name' in df.columns:
+                    df['_full_name'] = (df['first_name'].fillna('').str.lower().str.strip() + ' ' +
+                                       df['last_name'].fillna('').str.lower().str.strip())
+                    df['_name_match'] = df['_full_name'].isin(past_names)
+                    df['_is_past'] = df['_is_past'] | df['_name_match']
+                    df = df.drop(columns=['_full_name', '_name_match'])
+
+        stats['past_candidates'] = df['_is_past'].sum()
+        if df['_is_past'].sum() > 0:
+            filtered_out['Past Candidates'] = df[df['_is_past']].drop(columns=['_is_past']).copy()
+        df = df[~df['_is_past']].drop(columns=['_is_past'])
+
+        if stats['past_candidates'] == 0 and linkedin_col is None and 'Name' not in past_df.columns:
+            stats['_skipped_filters'].append(f"past_candidates (sheet needs 'LinkedIn' or 'Name' column, has: {list(past_df.columns)})")
 
     # 2. Blacklist filter
     if filters.get('blacklist'):

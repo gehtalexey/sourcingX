@@ -2148,6 +2148,11 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
                     df = df.rename(columns={col: 'linkedin_url'})
                     break
 
+    # Create combined 'name' column from first_name + last_name if missing
+    if 'name' not in df.columns and 'first_name' in df.columns and 'last_name' in df.columns:
+        df['name'] = (df['first_name'].fillna('').astype(str).str.strip() + ' ' +
+                      df['last_name'].fillna('').astype(str).str.strip()).str.strip()
+
     # Use headline as current_title if current_title doesn't exist
     if 'headline' in df.columns and 'current_title' not in df.columns:
         df['current_title'] = df['headline']

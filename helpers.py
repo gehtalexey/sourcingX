@@ -183,11 +183,11 @@ def profile_to_display_row(profile: dict) -> dict:
         past_employers = display.get('past_employers') or []
     else:
         # Use indexed DB columns directly (no raw_data)
-        name = ''
+        name = profile.get('name') or ''
         first_name = ''
         last_name = ''
         headline = ''
-        location = ''
+        location = profile.get('location') or ''
         summary = ''
         education = ''
         connections = ''

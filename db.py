@@ -222,6 +222,16 @@ def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_r
 
     cd = crustdata_response or {}
 
+    # Extract name for indexed column
+    name = cd.get('name') or ''
+    if not name:
+        first_name = cd.get('first_name') or ''
+        last_name = cd.get('last_name') or ''
+        name = f"{first_name} {last_name}".strip()
+
+    # Extract location
+    location = cd.get('location') or ''
+
     # Extract only title/company for indexed filtering
     current_title = None
     current_company = None
@@ -261,6 +271,8 @@ def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_r
         'linkedin_url': linkedin_url,
         'original_url': original_url,  # For matching with loaded data
         'raw_data': crustdata_response,
+        'name': name if name else None,
+        'location': location if location else None,
         'current_title': current_title,
         'current_company': current_company,
         'all_employers': all_employers if all_employers else None,
@@ -411,7 +423,7 @@ def get_all_profiles(client: SupabaseClient, limit: int = 10000, include_raw_dat
         return client.select('profiles', '*', limit=limit)
     else:
         # Select only indexed columns to save memory (exclude raw_data)
-        columns = 'linkedin_url,original_url,current_title,current_company,all_employers,all_titles,all_schools,skills,status,enriched_at,screening_score,screening_fit_level,screening_summary,screening_reasoning,screened_at,email'
+        columns = 'linkedin_url,original_url,name,location,current_title,current_company,all_employers,all_titles,all_schools,skills,status,enriched_at,screening_score,screening_fit_level,screening_summary,screening_reasoning,screened_at,email'
         return client.select('profiles', columns, limit=limit)
 
 

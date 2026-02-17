@@ -398,9 +398,21 @@ def get_profiles_by_fit_level(client: SupabaseClient, fit_level: str, limit: int
     return client.select('profiles', '*', {'screening_fit_level': f'eq.{fit_level}'}, limit=limit)
 
 
-def get_all_profiles(client: SupabaseClient, limit: int = 10000) -> list:
-    """Get all profiles."""
-    return client.select('profiles', '*', limit=limit)
+def get_all_profiles(client: SupabaseClient, limit: int = 10000, include_raw_data: bool = False) -> list:
+    """Get all profiles.
+
+    Args:
+        client: SupabaseClient instance
+        limit: Maximum number of profiles to return
+        include_raw_data: If False (default), excludes raw_data to save memory.
+                         Set to True only when raw_data is needed (e.g., screening).
+    """
+    if include_raw_data:
+        return client.select('profiles', '*', limit=limit)
+    else:
+        # Select only indexed columns to save memory (exclude raw_data)
+        columns = 'linkedin_url,original_url,current_title,current_company,all_employers,all_titles,all_schools,skills,status,enriched_at,screening_score,screening_fit_level,screening_summary,screening_reasoning,screened_at,email'
+        return client.select('profiles', columns, limit=limit)
 
 
 def get_pipeline_stats(client: SupabaseClient) -> dict:

@@ -161,29 +161,66 @@ def format_education(education_background: list) -> str:
 def profile_to_display_row(profile: dict) -> dict:
     """Convert a DB profile record to a display row.
 
-    Combines DB fields (screening results, status) with extracted raw_data fields.
+    Works with or without raw_data. If raw_data is not present, uses indexed DB columns.
     """
     raw = profile.get('raw_data') or {}
-    display = extract_display_fields(raw)
+
+    # If raw_data exists, extract display fields from it
+    if raw:
+        display = extract_display_fields(raw)
+        name = display['name']
+        first_name = display['first_name']
+        last_name = display['last_name']
+        headline = display['headline']
+        location = display['location']
+        summary = display['summary']
+        education = display['education']
+        skills_str = display['skills_str']
+        connections = display['connections']
+        all_schools = display['all_schools']
+        all_employers_str = display['all_employers']
+        num_positions = display['num_positions']
+        past_employers = display.get('past_employers') or []
+    else:
+        # Use indexed DB columns directly (no raw_data)
+        name = ''
+        first_name = ''
+        last_name = ''
+        headline = ''
+        location = ''
+        summary = ''
+        education = ''
+        connections = ''
+        num_positions = 0
+        past_employers = []
+
+        # Skills and employers from DB columns (arrays)
+        skills_list = profile.get('skills') or []
+        skills_str = ', '.join(skills_list[:20]) if isinstance(skills_list, list) else str(skills_list or '')
+
+        all_employers_list = profile.get('all_employers') or []
+        all_employers_str = ', '.join(all_employers_list) if isinstance(all_employers_list, list) else str(all_employers_list or '')
+
+        all_schools_list = profile.get('all_schools') or []
+        all_schools = ', '.join(all_schools_list) if isinstance(all_schools_list, list) else str(all_schools_list or '')
 
     # Past positions as full JSON from Crustdata
     import json
-    past_employers = display.get('past_employers') or []
     past_positions = json.dumps(past_employers, ensure_ascii=False) if past_employers else ''
 
     return {
         'linkedin_url': profile.get('linkedin_url', ''),
-        'name': display['name'],
-        'first_name': display['first_name'],
-        'last_name': display['last_name'],
-        'current_title': profile.get('current_title') or display['current_title'],
-        'current_company': profile.get('current_company') or display['current_company'],
-        'headline': display['headline'],
-        'location': display['location'],
-        'summary': display['summary'],
-        'education': display['education'],
-        'skills': display['skills_str'],
-        'connections': display['connections'],
+        'name': name,
+        'first_name': first_name,
+        'last_name': last_name,
+        'current_title': profile.get('current_title') or '',
+        'current_company': profile.get('current_company') or '',
+        'headline': headline,
+        'location': location,
+        'summary': summary,
+        'education': education,
+        'skills': skills_str,
+        'connections': connections,
         'past_positions': past_positions,
 
         # From DB columns (screening results)
@@ -201,9 +238,9 @@ def profile_to_display_row(profile: dict) -> dict:
         'screened_at': profile.get('screened_at'),
 
         # For filtering (lists)
-        'all_schools': display['all_schools'],
-        'all_employers': display['all_employers'],
-        'num_positions': display['num_positions'],
+        'all_schools': all_schools,
+        'all_employers': all_employers_str,
+        'num_positions': num_positions,
     }
 
 

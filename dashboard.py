@@ -3239,24 +3239,70 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
             ]
             return any(re.search(p, title_lower) for p in lead_patterns)
 
-        def is_devops_role(title):
-            """Check if title is a DevOps role (not SysAdmin, Storage, QA, etc.)."""
+        def get_role_categories(title):
+            """Categorize a role into one or more categories. Returns list of category names."""
             if not title:
-                return False
+                return []
             title_lower = title.lower()
-            # DevOps roles
-            devops_patterns = [r'devops', r'\bsre\b', r'site reliability', r'platform engineer',
-                              r'cloud engineer', r'devsecops', r'infrastructure engineer']
-            # NOT DevOps roles
-            not_devops_patterns = [r'sysadmin', r'system admin', r'storage', r'\bqa\b', r'quality',
-                                   r'test engineer', r'\bit\s+support', r'help desk', r'\bdba\b',
-                                   r'database admin', r'network admin']
+            categories = []
 
-            # Check if it's explicitly NOT DevOps
-            if any(re.search(p, title_lower) for p in not_devops_patterns):
-                return False
-            # Check if it's DevOps
-            return any(re.search(p, title_lower) for p in devops_patterns)
+            # Role category definitions - order matters (more specific first)
+            role_patterns = {
+                'DevOps/SRE/Platform': [
+                    r'devops', r'\bsre\b', r'site reliability', r'platform engineer',
+                    r'cloud engineer', r'devsecops', r'infrastructure engineer'
+                ],
+                'Backend/Software': [
+                    r'backend', r'back-end', r'software engineer', r'software developer',
+                    r'server.?side', r'\bjava\b', r'python developer', r'node\.?js',
+                    r'golang', r'\bgo\b developer', r'ruby', r'\.net', r'c\+\+', r'\bc#'
+                ],
+                'Frontend': [
+                    r'frontend', r'front-end', r'front end', r'react', r'angular', r'vue',
+                    r'javascript developer', r'ui developer', r'web developer'
+                ],
+                'Fullstack': [
+                    r'fullstack', r'full-stack', r'full stack'
+                ],
+                'Mobile': [
+                    r'mobile', r'ios', r'android', r'swift', r'kotlin', r'react native', r'flutter'
+                ],
+                'Data/ML/AI': [
+                    r'data engineer', r'data scientist', r'machine learning', r'\bml\b',
+                    r'\bai\b engineer', r'big data', r'data analyst', r'analytics engineer'
+                ],
+                'QA/Test': [
+                    r'\bqa\b', r'quality', r'test engineer', r'sdet', r'automation engineer',
+                    r'test automation', r'quality assurance'
+                ],
+                'Security/InfoSec': [
+                    r'security', r'infosec', r'cybersec', r'penetration', r'appsec',
+                    r'security engineer', r'soc analyst'
+                ],
+                'DBA/Database': [
+                    r'\bdba\b', r'database admin', r'database engineer'
+                ],
+                'SysAdmin/IT': [
+                    r'sysadmin', r'system admin', r'systems admin', r'it support',
+                    r'help desk', r'it specialist', r'network admin', r'linux admin'
+                ],
+                'Product/PM': [
+                    r'product manager', r'product owner', r'\bpm\b', r'program manager'
+                ],
+                'Design/UX': [
+                    r'designer', r'\bux\b', r'\bui\b', r'product design'
+                ]
+            }
+
+            for category, patterns in role_patterns.items():
+                if any(re.search(p, title_lower) for p in patterns):
+                    categories.append(category)
+
+            # If no specific category matched, mark as "Other"
+            if not categories:
+                categories.append('Other')
+
+            return categories
 
         raw = profile.get('raw_crustdata') or profile.get('raw_data') or {}
 
@@ -3269,8 +3315,9 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
             positions = []
             total_months = 0
             lead_months = 0
-            devops_months = 0
             lead_roles = []  # Track lead roles for explicit reporting
+            category_months = {}  # Track months by role category
+            category_roles = {}  # Track role details by category
 
             for emp in all_positions[:15]:  # Limit to 15 positions
                 if isinstance(emp, dict):
@@ -3296,36 +3343,53 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
                         lead_months += role_months
                         lead_roles.append(f"{title} at {company} ({duration})")
 
-                    # Track DevOps experience
-                    if is_devops_role(title) and role_months > 0:
-                        devops_months += role_months
+                    # Track experience by category
+                    role_categories = get_role_categories(title)
+                    for cat in role_categories:
+                        if cat not in category_months:
+                            category_months[cat] = 0
+                            category_roles[cat] = []
+                        category_months[cat] += role_months
+                        if role_months > 0:
+                            category_roles[cat].append(f"{title} at {company} ({duration})")
 
                     if title or company:
                         start_fmt = format_date(start_dt) or '?'
                         end_fmt = format_date(end_dt) or 'Present'
-                        # Mark lead roles with ⭐
+                        # Mark lead roles with ⭐ and show categories
                         lead_marker = " ⭐LEAD" if is_lead_role(title) else ""
-                        devops_marker = " [DevOps]" if is_devops_role(title) else ""
+                        cat_marker = f" [{', '.join(role_categories)}]" if role_categories and role_categories != ['Other'] else ""
                         pos_str = f"- {title} at {company} ({start_fmt} - {end_fmt})"
                         if duration:
-                            pos_str += f" [{duration}]{lead_marker}{devops_marker}"
+                            pos_str += f" [{duration}]{lead_marker}{cat_marker}"
                         positions.append(pos_str)
 
             if positions:
                 total_years = round(total_months / 12, 1)
                 lead_years = lead_months / 12
-                devops_years = devops_months / 12
 
-                # Format lead/devops experience summary
-                lead_summary = f"**LEAD EXPERIENCE: {lead_months} months ({lead_years:.1f} years)**"
+                # Format lead experience summary
+                lead_summary = f"**LEAD/MANAGEMENT EXPERIENCE: {lead_months} months ({lead_years:.1f} years)**"
                 if lead_roles:
                     lead_summary += f"\n  Lead roles: {'; '.join(lead_roles)}"
                 else:
                     lead_summary += "\n  Lead roles: NONE FOUND"
 
-                devops_summary = f"**DEVOPS EXPERIENCE: {devops_months} months ({devops_years:.1f} years)**"
+                # Format experience by category
+                category_summary_lines = []
+                # Sort categories by months (descending)
+                sorted_categories = sorted(category_months.items(), key=lambda x: x[1], reverse=True)
+                for cat, months in sorted_categories:
+                    if months > 0 and cat != 'Other':
+                        years = months / 12
+                        roles_str = '; '.join(category_roles[cat][:3])  # Show top 3 roles
+                        if len(category_roles[cat]) > 3:
+                            roles_str += f" (+{len(category_roles[cat])-3} more)"
+                        category_summary_lines.append(f"**{cat.upper()} EXPERIENCE: {months} months ({years:.1f} years)**\n  Roles: {roles_str}")
 
-                header = f"Total experience: ~{total_years} years\n{lead_summary}\n{devops_summary}\n"
+                category_summary = '\n'.join(category_summary_lines) if category_summary_lines else "No specific technical category detected"
+
+                header = f"Total experience: ~{total_years} years\n\n{lead_summary}\n\n{category_summary}\n\n"
                 return header + '\n'.join(positions)
 
         # Fallback to past_positions field
@@ -3476,32 +3540,37 @@ Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requi
 ### EXPERIENCE CALCULATION (CRITICAL - USE PRE-CALCULATED VALUES):
 
 **⚠️ WE HAVE PRE-CALCULATED EXPERIENCE FOR YOU - USE THESE VALUES:**
-The "Work History" section contains PRE-CALCULATED values:
-- **LEAD EXPERIENCE: X months (Y years)** - This is the TOTAL lead experience. USE THIS NUMBER.
-- **DEVOPS EXPERIENCE: X months (Y years)** - This is the TOTAL DevOps experience. USE THIS NUMBER.
+The "Work History" section contains PRE-CALCULATED values by category:
+- **LEAD/MANAGEMENT EXPERIENCE: X months** - Total leadership experience (Lead, Manager, TL, Director, etc.)
+- **[CATEGORY] EXPERIENCE: X months** - Experience by role type (DevOps/SRE, Backend/Software, Frontend, QA/Test, Data/ML, Mobile, Security, etc.)
 - Roles marked with ⭐LEAD are leadership roles
-- Roles marked with [DevOps] are DevOps roles
+- Roles marked with [Category] show their role type
 
 **DO NOT CALCULATE YOUR OWN VALUES. USE THE PRE-CALCULATED ONES.**
 
 **For "X years LEAD/TEAM LEAD experience" requirements:**
-- READ the "LEAD EXPERIENCE: X months" value from the Work History section
+- READ the "LEAD/MANAGEMENT EXPERIENCE: X months" value from the Work History section
 - Compare this EXACT number to the requirement (e.g., 2 years = 24 months)
 - If LEAD EXPERIENCE shows "8 months" and requirement is "2 years" → 8/24 = 33% → Score 3-4
 - If LEAD EXPERIENCE shows "18 months" and requirement is "2 years" → 18/24 = 75% → Score 5-6 with signal
-- "Manager" title COUNTS as leadership (DevOps Manager, Engineering Manager, etc.)
 
-**For "X years DEVOPS experience" requirements:**
-- READ the "DEVOPS EXPERIENCE: X months" value from the Work History section
-- DevOps roles: DevOps Engineer, SRE, Platform Engineer, Cloud Engineer, DevSecOps
-- NOT DevOps: SysAdmin, Storage Admin, QA, IT Support, DBA, Network Admin
+**For "X years [ROLE TYPE] experience" requirements (DevOps, Backend, Frontend, QA, etc.):**
+- READ the corresponding "[CATEGORY] EXPERIENCE: X months" value from Work History
+- Match the JD requirement to the appropriate category:
+  * "DevOps experience" → DEVOPS/SRE/PLATFORM EXPERIENCE
+  * "Backend experience" → BACKEND/SOFTWARE EXPERIENCE
+  * "Frontend experience" → FRONTEND EXPERIENCE
+  * "QA experience" → QA/TEST EXPERIENCE
+  * "Data/ML experience" → DATA/ML/AI EXPERIENCE
+  * etc.
+- Compare months to requirement and apply percentage-based scoring
 
 ### HOW TO CHECK:
-- **LEAD EXPERIENCE** and **DEVOPS EXPERIENCE** values are PRE-CALCULATED - USE THEM
+- Experience values are PRE-CALCULATED by category - USE THEM, don't recalculate
 - **CURRENT TITLE** (AUTHORITATIVE): The candidate's ACTUAL current job title
 - **headline**: May be OUTDATED - trust CURRENT TITLE if they conflict
 - Roles marked ⭐LEAD in work history are leadership roles
-- Roles marked [DevOps] in work history are DevOps roles
+- Roles marked with [Category] show their classified role type
 
 ### MISSING DATA HANDLING:
 - If work history (past_employers) is EMPTY but CURRENT TITLE shows "Team Lead" or "Tech Lead" → Give benefit of doubt for leadership
@@ -3531,14 +3600,17 @@ IMPORTANT RULES:
   * Matches a rejection criterion → 1-2
 
 ⚠️ CRITICAL - USE PRE-CALCULATED VALUES:
-- The Work History section contains **LEAD EXPERIENCE: X months** and **DEVOPS EXPERIENCE: X months**
+- The Work History section contains PRE-CALCULATED experience by category:
+  * **LEAD/MANAGEMENT EXPERIENCE: X months** - for leadership requirements
+  * **[CATEGORY] EXPERIENCE: X months** - for role-specific requirements (DevOps, Backend, Frontend, QA, etc.)
 - USE THESE PRE-CALCULATED VALUES. DO NOT calculate your own.
-- For "2 years lead" requirement: Compare the LEAD EXPERIENCE months to 24 months
-  * 24+ months = meets requirement (7-10)
-  * 18-23 months = 75%+ (5-6 with signal)
-  * 12-17 months = 50-75% (4-5)
-  * <12 months = <50% (3-4, signals cannot compensate)
-- Quote the exact LEAD EXPERIENCE value in your reasoning: "LEAD EXPERIENCE shows 8 months, requirement is 24 months (33%)"
+- Match the JD requirement to the appropriate category and compare months
+- For any "X years experience" requirement: Compare the relevant CATEGORY months to the requirement
+  * Required months = meets requirement (7-10)
+  * 75%+ of required = close (5-6 with signal)
+  * 50-75% of required = halfway (4-5)
+  * <50% of required = far (3-4, signals cannot compensate)
+- Quote the exact experience value in your reasoning: "LEAD EXPERIENCE shows 8 months, requirement is 24 months (33%)"
 - Be specific in your reasoning — reference actual companies, durations, and titles from the profile.
 
 ## Candidate Profile:

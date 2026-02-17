@@ -3311,14 +3311,19 @@ Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requi
 
 **For "X years LEAD/TEAM LEAD experience" requirements:**
 - Find roles where `employee_title` contains: Lead, Leader, Manager, Head, Director, TL
-- SUM the durations of ALL matching roles
+- EXCLUDE: Consulting firms (Tikal, Matrix, Ness), non-tech lead roles (Branch Manager, Sales), IC roles (Lead Developer without team)
+- SUM qualifying lead roles ONLY
 - Compare to requirement (2 years = 24 months)
-- Example: "DevOps Team Lead" from 2022-08 to 2024-08 = 24 months ✓
+- Example calculation:
+  * "DevOps Lead @ PayPal: 2022-08 to 2024-08 = 24 months" ✓ (counts)
+  * "Tech Lead @ Tikal: 2020-12 to 2024-09 = 45 months" ✗ (consulting, excluded)
+  * "Branch Manager @ Postal Co: 2019-01 to 2021-01 = 24 months" ✗ (non-tech, excluded)
+  * TOTAL: 24 months from PayPal only
 
 **For "X years [ROLE TYPE] experience" (DevOps, Backend, Frontend, QA, etc.):**
-- DevOps roles: titles containing DevOps, SRE, Platform Engineer, Cloud Engineer
+- DevOps roles: titles containing DevOps, SRE, Platform Engineer, Cloud Engineer, Infrastructure
 - Backend roles: titles containing Backend, Software Engineer, Developer
-- Do NOT count as DevOps: SysAdmin, Storage Admin, QA, IT Support, DBA
+- Do NOT count as DevOps: SysAdmin, Storage Admin, QA, IT Support, DBA, Network Admin
 - SUM durations and compare to requirement
 
 **Apply percentage-based scoring:**
@@ -3326,6 +3331,9 @@ Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requi
 - 75-99% of requirement → Score 5-6 (close, with signal)
 - 50-74% of requirement → Score 4-5 (halfway)
 - <50% of requirement → Score 3-4 (far, signals cannot compensate)
+
+**ALWAYS SHOW YOUR MATH in reasoning:**
+"LEAD: [Company1: Xm] + [Company2: Ym] = Zm total (Z/24 = X%)"
 
 ### MISSING DATA HANDLING:
 - If work history (past_employers) is EMPTY but CURRENT TITLE shows "Team Lead" or "Tech Lead" → Give benefit of doubt for leadership
@@ -3354,18 +3362,37 @@ IMPORTANT RULES:
   * Fails a must-have AND has NO named strong signal → 3-4. The job title alone is NOT a signal.
   * Matches a rejection criterion → 1-2
 
-⚠️ CRITICAL - CALCULATE EXPERIENCE FROM RAW JSON:
-- Read `current_employers` and `past_employers` arrays in the JSON
-- Calculate duration for each role using start_date and end_date
-- For LEAD experience: sum durations where employee_title contains Lead/Manager/TL/Director
-- For ROLE experience: sum durations matching the role type (DevOps, Backend, etc.)
-- Compare total months to requirement and apply percentage-based scoring
-  * 100%+ = meets requirement (7-10)
-  * 75%+ of required = close (5-6 with signal)
-  * 50-75% of required = halfway (4-5)
-  * <50% of required = far (3-4, signals cannot compensate)
-- Quote the exact experience value in your reasoning: "LEAD EXPERIENCE shows 8 months (verified), requirement is 24 months (33%)"
-- Be specific in your reasoning — reference actual companies, durations, and titles from the profile.
+⚠️ CRITICAL - CALCULATE EXPERIENCE FROM RAW JSON (SHOW YOUR MATH):
+
+**STEP 1: List each LEAD role with exact dates and duration:**
+- Find roles where employee_title contains: Lead, Leader, Manager, Head, Director, TL
+- For EACH lead role, calculate: (end_year - start_year) × 12 + (end_month - start_month)
+- Example: "DevOps Team Lead @ AT&T: 2011-03 to 2012-11 = 20 months"
+- Example: "DevOps Team Lead @ Intel: 2012-11 to 2015-01 = 26 months"
+
+**STEP 2: EXCLUDE these from lead calculation:**
+- Consulting companies (Tikal, Matrix, Ness, outsourcing firms)
+- Non-tech lead roles (Branch Manager, Project Manager at non-tech company, Sales Manager)
+- Roles where "Lead" is not about managing people (Lead Developer = IC, not manager)
+
+**STEP 3: SUM only qualifying lead roles:**
+- Add up months from Step 1, excluding Step 2
+- Example: "AT&T (20m) + Intel (26m) = 46 months total lead"
+
+**STEP 4: Add CURRENT role if it's a lead:**
+- Check current_employers for lead titles
+- Calculate from start_date to Feb 2026
+- Add to total
+
+**STEP 5: Apply percentage scoring:**
+- Total months ÷ required months = percentage
+- 100%+ → 7-10 (meets requirement)
+- 75-99% → 5-6 (close, needs signal)
+- 50-74% → 4-5 (halfway)
+- <50% → 3-4 (far, signals cannot compensate)
+
+**IN YOUR REASONING, YOU MUST SHOW:**
+"LEAD CALCULATION: [Role1 @ Company1: Xm] + [Role2 @ Company2: Ym] = TOTAL Zm months (Z÷24 = X% of requirement)"
 
 ## Candidate Profile:
 {profile_summary}

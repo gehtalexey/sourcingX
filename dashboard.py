@@ -3390,16 +3390,21 @@ The requirements contain HARD RULES. These are NOT preferences - they are disqua
 
 ### MUST-HAVE RULES — TIERED SCORING:
 A must-have requirement ("must have X", "X is a must") is critical but does NOT automatically mean score ≤3.
-Apply this tiered logic:
+Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requirement:
 
 **Score 7-10 (Good/Strong Fit)**: Candidate CLEARLY meets ALL must-have requirements with VERIFIED DURATIONS. No ambiguity.
-**Score 5-6 (Partial Fit — "Maybe" pile)**: Candidate does NOT clearly meet a must-have BUT has STRONG compensating signals:
-  - Top-tier company background (Wiz, Monday, Rapyd, Fireblocks, CyberArk, SentinelOne, Check Point, Palo Alto, PayPal, Google, Meta, etc.)
-  - Elite army unit (8200, Mamram, Talpiot)
-  - Strong title progression showing rapid growth
-  - Top university (Technion, TAU, Hebrew U)
-  These candidates are worth a MANUAL REVIEW by the recruiter.
-**Score 3-4 (Not a Fit)**: Candidate does NOT meet a must-have AND has NO strong compensating signals. Average company, no standout progression.
+
+**Score 5-6 (Partial Fit — worth review)**: Candidate is CLOSE to meeting must-have (≥75% of required) AND has strong signals:
+  - Example: Requirement is "2 years lead" and candidate has 18+ months → CLOSE, eligible for 5-6 with signal
+  - Strong signals: Top company (Wiz, Monday, Rapyd, Fireblocks, PayPal, Google, etc.), Elite army (8200, Mamram), Top university
+
+**Score 4-5 (Weak Fit)**: Candidate is HALFWAY to meeting must-have (50-75% of required) with strong signals:
+  - Example: Requirement is "2 years lead" and candidate has 12-18 months → 4-5 max even with PayPal background
+
+**Score 3-4 (Not a Fit)**: Candidate is FAR from meeting must-have (<50% of required) OR has no strong signals:
+  - Example: Requirement is "2 years lead" and candidate has only 8 months (33%) → Score 3-4, even with good company
+  - Signals cannot compensate for being FAR from the requirement
+
 **Score 1-2 (Not a Fit — hard reject)**: Candidate matches a REJECTION criterion (overqualified, junior, consulting company, etc.)
 
 ### EXPERIENCE CALCULATION (CRITICAL - READ CAREFULLY):

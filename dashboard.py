@@ -3006,12 +3006,13 @@ def get_screening_prompt() -> str:
     return prompt
 
 
-def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker: 'UsageTracker' = None, mode: str = "detailed", system_prompt: str = None) -> dict:
+def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker: 'UsageTracker' = None, mode: str = "detailed", system_prompt: str = None, ai_model: str = "gpt-4o-mini") -> dict:
     """Screen a profile against a job description using OpenAI.
 
     Args:
         mode: "quick" for cheaper/faster (score + fit + summary) or "detailed" for full analysis
         system_prompt: Custom system prompt (if None, uses default)
+        ai_model: OpenAI model to use (default: gpt-4o-mini)
     """
     # Validate profile has minimum useful data before calling OpenAI
     name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
@@ -3469,7 +3470,7 @@ Respond with ONLY valid JSON in this exact format:
         for _attempt in range(4):  # 1 initial + 3 retries
             try:
                 response = client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model=ai_model,
                     messages=[
                         {"role": "system", "content": prompt_to_use},
                         {"role": "user", "content": user_prompt}
@@ -3495,7 +3496,7 @@ Respond with ONLY valid JSON in this exact format:
             tracker.log_openai(
                 tokens_input=response.usage.prompt_tokens,
                 tokens_output=response.usage.completion_tokens,
-                model='gpt-4o-mini',
+                model=ai_model,
                 profiles_screened=1,
                 status='success',
                 response_time_ms=elapsed_ms
@@ -3518,7 +3519,7 @@ Respond with ONLY valid JSON in this exact format:
             tracker.log_openai(
                 tokens_input=0,
                 tokens_output=0,
-                model='gpt-4o-mini',
+                model=ai_model,
                 profiles_screened=0,
                 status='error',
                 error_message=str(e)[:200],
@@ -3536,7 +3537,7 @@ Respond with ONLY valid JSON in this exact format:
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
                           max_workers: int = 50,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
-                          system_prompt: str = None) -> list:
+                          system_prompt: str = None, ai_model: str = "gpt-4o-mini") -> list:
     """Screen multiple profiles in parallel using ThreadPoolExecutor.
 
     Args:
@@ -3567,7 +3568,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         # Create client per thread to avoid thread-safety issues
         client = OpenAI(api_key=openai_api_key)
         try:
-            result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, system_prompt=system_prompt)
+            result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, system_prompt=system_prompt, ai_model=ai_model)
             # Add profile info to result
             name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
             if not name:
@@ -6443,7 +6444,7 @@ with tab_screening:
         # Screening Configuration
         st.markdown("### Screening Configuration")
 
-        col_count, col_mode = st.columns([1, 1])
+        col_count, col_mode, col_model = st.columns([1, 1, 1])
         with col_count:
             screen_count = st.number_input(
                 "Number of profiles to screen",
@@ -6461,12 +6462,23 @@ with tab_screening:
                 key="screening_mode",
                 help="Quick: score + fit + short summary | Detailed: adds reasoning, strengths, concerns"
             )
+        with col_model:
+            ai_model_choice = st.radio(
+                "AI Model",
+                options=["gpt-4o-mini (fast & cheap)", "gpt-4o (smart & precise)"],
+                index=0,
+                key="ai_model_choice",
+                help="gpt-4o-mini: $0.15/$0.60 per 1M tokens | gpt-4o: $2.50/$10.00 per 1M tokens"
+            )
+        ai_model = "gpt-4o-mini" if "mini" in ai_model_choice else "gpt-4o"
 
         # Dynamic concurrent workers — scales down when multiple users screen simultaneously
         max_workers = _screening_session_start()
         st.session_state['_screening_active'] = True  # Track so we can decrement on completion
 
-        # Cost estimate based on mode
+        # Cost estimate based on mode and model
+        model_input_cost = 0.15 if ai_model == "gpt-4o-mini" else 2.50  # per 1M tokens
+        model_output_cost = 0.60 if ai_model == "gpt-4o-mini" else 10.00  # per 1M tokens
         if screening_mode == "Quick (cheaper)":
             output_tokens = 50  # ~50 tokens for quick response
             st.caption("Quick mode: Returns score, fit level, and brief summary only")
@@ -6474,9 +6486,9 @@ with tab_screening:
             output_tokens = 200  # ~200 tokens for detailed response
             st.caption("Detailed mode: Returns full analysis with reasoning, strengths, and concerns")
 
-        est_cost = (screen_count * 2500 * 0.15 / 1_000_000) + (screen_count * output_tokens * 0.60 / 1_000_000)
+        est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
         est_time = (screen_count / 10) * 2  # ~2 seconds per batch of 10
-        st.info(f"💰 Estimated cost: **${est_cost:.3f}** | ⏱️ Time: ~{est_time:.0f}s")
+        st.info(f"Model: **{ai_model}** | Estimated cost: **${est_cost:.3f}** | Time: ~{est_time:.0f}s")
 
         # Debug: Show available fields and test single profile
         with st.expander("Debug: Profile Fields & Test"):
@@ -6489,8 +6501,8 @@ with tab_screening:
                         client = OpenAI(api_key=openai_key)
                         test_mode = 'quick' if screening_mode == "Quick (cheaper)" else 'detailed'
                         test_prompt = st.session_state.get('active_screening_prompt', active_prompt)
-                        st.write(f"Testing with first profile ({test_mode} mode, prompt: {active_name})...")
-                        result = screen_profile(profiles[0], job_description, client, mode=test_mode, system_prompt=test_prompt)
+                        st.write(f"Testing with first profile ({test_mode} mode, model: {ai_model}, prompt: {active_name})...")
+                        result = screen_profile(profiles[0], job_description, client, mode=test_mode, system_prompt=test_prompt, ai_model=ai_model)
                         st.write("Result:", result)
                     except Exception as e:
                         import traceback
@@ -6665,6 +6677,7 @@ with tab_screening:
                 profiles_to_screen = batch_state.get('profiles', [])
                 job_desc = batch_state.get('job_description', '')
                 screen_mode = batch_state.get('mode', 'detailed')
+                batch_ai_model = batch_state.get('ai_model', 'gpt-4o-mini')
                 system_prompt = batch_state.get('system_prompt')
                 batch_size = 5  # Smaller batches for better memory management
                 current_batch = batch_state.get('current_batch', 0)
@@ -6688,6 +6701,7 @@ with tab_screening:
                             max_workers=min(10, len(batch_profiles)),
                             mode=screen_mode,
                             system_prompt=system_prompt,
+                            ai_model=batch_ai_model,
                             progress_callback=_on_profile_screened
                         )
                         all_results.extend(batch_results)
@@ -6858,6 +6872,7 @@ with tab_screening:
                     'profiles': profiles_to_screen,
                     'job_description': job_description,
                     'mode': 'quick' if screening_mode == "Quick (cheaper)" else 'detailed',
+                    'ai_model': ai_model,
                     'system_prompt': st.session_state.get('active_screening_prompt', active_prompt),
                     'current_batch': 0,
                     'results': initial_results,  # Start with existing results if continuing

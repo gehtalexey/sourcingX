@@ -4892,7 +4892,11 @@ with tab_filter:
         st.success(f"**{len(view_df)}** candidates")
 
         # Display columns (without category columns)
-        display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'education', 'location', 'public_url']
+        # Prefer 'name' over 'first_name'/'last_name' for DB-loaded profiles
+        display_cols = ['name', 'current_title', 'current_company', 'location', 'education', 'linkedin_url']
+        # Fallback for PhantomBuster data with separate name columns
+        if 'name' not in view_df.columns or view_df['name'].isna().all():
+            display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'education', 'public_url']
         available_cols = [c for c in display_cols if c in view_df.columns]
 
         if available_cols:
@@ -5880,7 +5884,11 @@ with tab_filter2:
                             "public_url": st.column_config.LinkColumn("LinkedIn")
                         })
         else:
-            display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'linkedin_url', 'public_url']
+            # Prefer 'name' for DB-loaded profiles, fallback to first_name/last_name
+            if 'name' in display_df.columns and not display_df['name'].isna().all():
+                display_cols = ['name', 'current_title', 'current_company', 'location', 'linkedin_url']
+            else:
+                display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'linkedin_url', 'public_url']
             available_cols = [c for c in display_cols if c in display_df.columns]
             st.dataframe(display_df[available_cols].head(100), use_container_width=True, hide_index=True,
                         column_config={

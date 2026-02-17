@@ -3228,6 +3228,17 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
     work_history_formatted = format_work_history(profile)
 
     # Extract key fields for easy reading
+    # Current position from profile (DB) or raw data
+    current_title = profile.get('current_title') or raw_crustdata.get('title') or 'N/A'
+    current_company = profile.get('current_company') or 'N/A'
+    # Also check current_employers array
+    current_employers = raw_crustdata.get('current_employers', [])
+    if current_employers and isinstance(current_employers, list) and len(current_employers) > 0:
+        emp = current_employers[0]
+        if isinstance(emp, dict):
+            current_title = emp.get('employee_title') or emp.get('title') or current_title
+            current_company = emp.get('employer_name') or emp.get('company_name') or current_company
+
     headline = raw_crustdata.get('headline', 'N/A')
     summary = raw_crustdata.get('summary', 'N/A')
     all_titles = raw_crustdata.get('all_titles', [])
@@ -3235,6 +3246,8 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
     skills_list = raw_crustdata.get('skills', [])
 
     profile_summary = f"""## Key Profile Fields (READ THESE CAREFULLY):
+- **CURRENT TITLE**: {current_title}
+- **CURRENT COMPANY**: {current_company}
 - **Headline**: {headline}
 - **All Titles (career history)**: {', '.join(all_titles) if all_titles else 'N/A'}
 - **All Employers (career history)**: {', '.join(all_employers) if all_employers else 'N/A'}

@@ -7110,6 +7110,84 @@ with tab_database:
                     else:
                         st.warning("No profiles found to load")
 
+                # Re-enrich profile section
+                st.divider()
+                st.markdown("#### Re-Enrich Profile")
+                st.caption("Refresh profile data from Crustdata API (useful for stale/incomplete profiles)")
+
+                reenrich_url = st.text_input(
+                    "LinkedIn URL",
+                    key="reenrich_url",
+                    placeholder="https://www.linkedin.com/in/username"
+                )
+
+                if st.button("Re-Enrich Profile", key="reenrich_btn", type="primary"):
+                    if not reenrich_url:
+                        st.warning("Please enter a LinkedIn URL")
+                    elif not api_key or api_key == "YOUR_CRUSTDATA_API_KEY_HERE":
+                        st.error("Crustdata API key not configured")
+                    else:
+                        with st.spinner("Fetching fresh data from Crustdata..."):
+                            try:
+                                # Call Crustdata API
+                                response = requests.get(
+                                    'https://api.crustdata.com/screener/person/enrich',
+                                    params={'linkedin_profile_url': reenrich_url},
+                                    headers={'Authorization': f'Token {api_key}'},
+                                    timeout=120
+                                )
+
+                                if response.status_code == 200:
+                                    data = response.json()
+                                    result = data[0] if isinstance(data, list) else data
+
+                                    if 'error' in result:
+                                        st.error(f"Crustdata error: {result.get('error')}")
+                                    else:
+                                        # Extract LinkedIn URL from response
+                                        linkedin_url = result.get('linkedin_flagship_url') or result.get('linkedin_url')
+                                        if linkedin_url:
+                                            # Save to database
+                                            saved = save_enriched_profile(db_client, linkedin_url, result, reenrich_url)
+                                            if saved:
+                                                st.success(f"Profile re-enriched and saved!")
+
+                                                # Show what was updated
+                                                name = result.get('name', 'Unknown')
+                                                all_titles = result.get('all_titles', [])
+                                                all_employers = result.get('all_employers', [])
+                                                skills = result.get('skills', [])
+
+                                                st.markdown(f"**{name}**")
+                                                st.markdown(f"**Titles:** {', '.join(all_titles[:5]) if all_titles else 'N/A'}")
+                                                st.markdown(f"**Employers:** {', '.join(all_employers[:5]) if all_employers else 'N/A'}")
+                                                st.markdown(f"**Skills:** {', '.join(skills[:10]) if skills else 'N/A'}...")
+
+                                                # Show work history
+                                                current_employers = result.get('current_employers', [])
+                                                past_employers = result.get('past_employers', [])
+                                                all_positions = current_employers + past_employers
+                                                if all_positions:
+                                                    with st.expander("Full Work History", expanded=True):
+                                                        for emp in all_positions[:10]:
+                                                            title = emp.get('employee_title', '')
+                                                            company = emp.get('employer_name', '')
+                                                            start = emp.get('start_date', '')[:7] if emp.get('start_date') else '?'
+                                                            end = emp.get('end_date', '')[:7] if emp.get('end_date') else 'Present'
+                                                            st.markdown(f"- **{title}** at {company} ({start} - {end})")
+                                            else:
+                                                st.error("Failed to save to database")
+                                        else:
+                                            st.error("Could not extract LinkedIn URL from response")
+                                elif response.status_code == 404:
+                                    st.error("Profile not found on Crustdata")
+                                else:
+                                    st.error(f"Crustdata API error: {response.status_code}")
+                            except requests.exceptions.Timeout:
+                                st.error("Request timed out. Try again.")
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+
         except Exception as e:
             st.error(f"Database error: {e}")
 

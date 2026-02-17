@@ -4371,32 +4371,7 @@ with tab_filter:
         if 'original_results_df' not in st.session_state or st.session_state.get('original_results_df') is None:
             st.session_state['original_results_df'] = df.copy()
 
-        # Show loaded profiles preview
-        st.markdown(f"### Loaded Profiles: **{len(df)}**")
-
-        # Determine best columns for preview
-        if 'name' in df.columns and df['name'].notna().any():
-            preview_cols = ['name', 'current_title', 'current_company', 'location', 'linkedin_url']
-        elif 'first_name' in df.columns:
-            preview_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'linkedin_url', 'public_url']
-        else:
-            preview_cols = list(df.columns)[:6]
-
-        available_preview = [c for c in preview_cols if c in df.columns]
-        if available_preview:
-            st.dataframe(
-                df[available_preview].head(50),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
-                    "public_url": st.column_config.LinkColumn("LinkedIn"),
-                }
-            )
-            if len(df) > 50:
-                st.caption(f"Showing 50 of {len(df)} profiles")
-
-        st.divider()
+        st.markdown(f"**{len(df)} profiles loaded** — configure filters below")
 
         needs_filtering = 'job_1_job_title' in df.columns and 'current_title' not in df.columns
 

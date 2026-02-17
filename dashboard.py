@@ -3767,7 +3767,15 @@ with tab_upload:
                                     profiles = get_profiles_by_status(db_client, "enriched", limit=500)  # Reduced for memory
                                     if profiles:
                                         df = profiles_to_dataframe(profiles)
-                                        # Strip raw_data to save memory
+                                        # Cache raw_crustdata BEFORE stripping (needed for AI screening)
+                                        raw_cache = st.session_state.get('raw_crustdata_cache', {})
+                                        for p in profiles:
+                                            url = p.get('linkedin_url', '')
+                                            raw = p.get('raw_data') or p.get('raw_crustdata')
+                                            if url and raw:
+                                                raw_cache[url] = raw
+                                        st.session_state['raw_crustdata_cache'] = raw_cache
+                                        # Strip raw_data to save memory (it's now in cache)
                                         for p in profiles:
                                             p.pop('raw_data', None)
                                             p.pop('raw_crustdata', None)
@@ -3784,7 +3792,15 @@ with tab_upload:
                                     profiles = get_profiles_by_status(db_client, "screened", limit=500)  # Reduced for memory
                                     if profiles:
                                         df = profiles_to_dataframe(profiles)
-                                        # Strip raw_data to save memory
+                                        # Cache raw_crustdata BEFORE stripping (needed for AI screening)
+                                        raw_cache = st.session_state.get('raw_crustdata_cache', {})
+                                        for p in profiles:
+                                            url = p.get('linkedin_url', '')
+                                            raw = p.get('raw_data') or p.get('raw_crustdata')
+                                            if url and raw:
+                                                raw_cache[url] = raw
+                                        st.session_state['raw_crustdata_cache'] = raw_cache
+                                        # Strip raw_data to save memory (it's now in cache)
                                         for p in profiles:
                                             p.pop('raw_data', None)
                                             p.pop('raw_crustdata', None)
@@ -5500,7 +5516,15 @@ with tab_enrich:
 
                                         if matched_profiles:
                                             enriched_df = profiles_to_dataframe(matched_profiles)
-                                            # Strip raw_data from profiles to save memory (it's in DB)
+                                            # Cache raw_crustdata BEFORE stripping (needed for AI screening)
+                                            raw_cache = st.session_state.get('raw_crustdata_cache', {})
+                                            for p in matched_profiles:
+                                                url = p.get('linkedin_url', '')
+                                                raw = p.get('raw_data') or p.get('raw_crustdata')
+                                                if url and raw:
+                                                    raw_cache[url] = raw
+                                            st.session_state['raw_crustdata_cache'] = raw_cache
+                                            # Strip raw_data from profiles to save memory (it's now in cache)
                                             for p in matched_profiles:
                                                 p.pop('raw_data', None)
                                                 p.pop('raw_crustdata', None)
@@ -5610,6 +5634,14 @@ with tab_enrich:
                             st.write(f"- Result samples: {match_debug.get('result_samples', [])}")
 
                         if successful:
+                            # Cache raw_crustdata for AI screening (before any stripping)
+                            raw_cache = st.session_state.get('raw_crustdata_cache', {})
+                            for p in successful:
+                                url = p.get('linkedin_flagship_url') or p.get('linkedin_url', '')
+                                if url:
+                                    raw_cache[url] = p  # The entire profile is the raw crustdata
+                            st.session_state['raw_crustdata_cache'] = raw_cache
+
                             # Save enriched data separately - don't overwrite original loaded data
                             st.session_state['enriched_results'] = successful
                             enriched_df = flatten_for_csv(successful)
@@ -6161,32 +6193,44 @@ with tab_screening:
 
         profiles_missing_raw = [p for p in profiles if not p.get('raw_crustdata') and not p.get('raw_data')]
         if profiles_missing_raw:
-            # Try enriched_results first (in-memory, fast)
+            # FIRST: Check raw_crustdata_cache (primary source - cached before stripping)
+            raw_cache = st.session_state.get('raw_crustdata_cache', {})
+            if raw_cache:
+                for p in profiles_missing_raw:
+                    url = p.get('linkedin_url', '')
+                    if url and url in raw_cache:
+                        p['raw_crustdata'] = _ensure_raw_dict(raw_cache[url])
+
+            # Recheck what's still missing
+            profiles_missing_raw = [p for p in profiles if not p.get('raw_crustdata') and not p.get('raw_data')]
+
+            # SECOND: Try enriched_results (fallback, usually stripped but try anyway)
             # Index by BOTH linkedin_flagship_url (clean) and linkedin_url (encoded)
             # since display DF uses flagship but raw Crustdata has both
-            raw_by_url = {}
-            for ep in (st.session_state.get('enriched_results') or []):
-                raw = ep.get('raw_data') or ep.get('raw_crustdata') or ep
-                parsed_raw = _ensure_raw_dict(raw) if not isinstance(raw, dict) else raw
-                if not parsed_raw:
-                    continue
-                # Index under all possible URL variants from both the entry
-                # (DB profile has linkedin_url at top) and the raw data inside
-                # (Crustdata response has linkedin_flagship_url, linkedin_url, etc.)
-                urls_to_index = set()
-                for url_key in ['linkedin_flagship_url', 'linkedin_url', 'linkedin_profile_url']:
-                    for source in [ep, parsed_raw]:
-                        url = source.get(url_key, '') if isinstance(source, dict) else ''
-                        if url:
-                            urls_to_index.add(url)
-                for url in urls_to_index:
-                    raw_by_url[url] = parsed_raw
-            for p in profiles_missing_raw:
-                url = p.get('linkedin_url', '')
-                if url and url in raw_by_url and raw_by_url[url]:
-                    p['raw_data'] = raw_by_url[url]
+            if profiles_missing_raw:
+                raw_by_url = {}
+                for ep in (st.session_state.get('enriched_results') or []):
+                    raw = ep.get('raw_data') or ep.get('raw_crustdata') or ep
+                    parsed_raw = _ensure_raw_dict(raw) if not isinstance(raw, dict) else raw
+                    if not parsed_raw:
+                        continue
+                    # Index under all possible URL variants from both the entry
+                    # (DB profile has linkedin_url at top) and the raw data inside
+                    # (Crustdata response has linkedin_flagship_url, linkedin_url, etc.)
+                    urls_to_index = set()
+                    for url_key in ['linkedin_flagship_url', 'linkedin_url', 'linkedin_profile_url']:
+                        for source in [ep, parsed_raw]:
+                            url = source.get(url_key, '') if isinstance(source, dict) else ''
+                            if url:
+                                urls_to_index.add(url)
+                    for url in urls_to_index:
+                        raw_by_url[url] = parsed_raw
+                for p in profiles_missing_raw:
+                    url = p.get('linkedin_url', '')
+                    if url and url in raw_by_url and raw_by_url[url]:
+                        p['raw_data'] = raw_by_url[url]
 
-            # If still missing, fetch from database directly
+            # THIRD: If still missing, fetch from database directly
             still_missing = [p for p in profiles if not p.get('raw_crustdata') and not p.get('raw_data')]
             if still_missing and HAS_DATABASE:
                 try:
@@ -6194,7 +6238,7 @@ with tab_screening:
                     if db_client:
                         missing_urls = [p.get('linkedin_url', '') for p in still_missing if p.get('linkedin_url')]
                         if missing_urls:
-                            # Batch fetch all profiles from DB
+                            # Batch fetch profiles from DB - filter by missing URLs for efficiency
                             db_profiles = db_client.select('profiles', 'linkedin_url,raw_data', limit=len(profiles) + 100)
                             db_raw_by_url = {}
                             for dp in db_profiles:

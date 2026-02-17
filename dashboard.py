@@ -3537,40 +3537,49 @@ Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requi
 
 **Score 1-2 (Not a Fit — hard reject)**: Candidate matches a REJECTION criterion (overqualified, junior, consulting company, etc.)
 
-### EXPERIENCE CALCULATION (CRITICAL - USE PRE-CALCULATED VALUES):
+### EXPERIENCE CALCULATION (PRE-CALCULATED + VERIFICATION):
 
-**⚠️ WE HAVE PRE-CALCULATED EXPERIENCE FOR YOU - USE THESE VALUES:**
+**We have PRE-CALCULATED experience values. You must VERIFY them against the raw JSON.**
+
 The "Work History" section contains PRE-CALCULATED values by category:
 - **LEAD/MANAGEMENT EXPERIENCE: X months** - Total leadership experience (Lead, Manager, TL, Director, etc.)
 - **[CATEGORY] EXPERIENCE: X months** - Experience by role type (DevOps/SRE, Backend/Software, Frontend, QA/Test, Data/ML, Mobile, Security, etc.)
 - Roles marked with ⭐LEAD are leadership roles
 - Roles marked with [Category] show their role type
 
-**DO NOT CALCULATE YOUR OWN VALUES. USE THE PRE-CALCULATED ONES.**
+**YOUR JOB: VERIFY THE CALCULATIONS**
+1. READ the pre-calculated values from Work History section
+2. VERIFY by checking the raw JSON `current_employers` and `past_employers` arrays:
+   - Check `start_date` and `end_date` for each position
+   - Verify the duration calculation makes sense
+   - Verify the role was correctly classified (e.g., "DevOps Lead" should be both LEAD and DEVOPS)
+3. If the pre-calculated value looks CORRECT → USE IT for scoring
+4. If you find an ERROR in the calculation → Use your own calculation and NOTE the discrepancy
 
 **For "X years LEAD/TEAM LEAD experience" requirements:**
-- READ the "LEAD/MANAGEMENT EXPERIENCE: X months" value from the Work History section
-- Compare this EXACT number to the requirement (e.g., 2 years = 24 months)
-- If LEAD EXPERIENCE shows "8 months" and requirement is "2 years" → 8/24 = 33% → Score 3-4
-- If LEAD EXPERIENCE shows "18 months" and requirement is "2 years" → 18/24 = 75% → Score 5-6 with signal
+- READ "LEAD/MANAGEMENT EXPERIENCE: X months" from Work History
+- VERIFY by checking roles marked ⭐LEAD - do the dates add up?
+- Compare months to requirement (2 years = 24 months)
+- Apply percentage-based scoring: 8/24 = 33% → Score 3-4
 
 **For "X years [ROLE TYPE] experience" requirements (DevOps, Backend, Frontend, QA, etc.):**
-- READ the corresponding "[CATEGORY] EXPERIENCE: X months" value from Work History
+- READ the corresponding "[CATEGORY] EXPERIENCE: X months" from Work History
+- VERIFY by checking roles marked with that category in the JSON
 - Match the JD requirement to the appropriate category:
   * "DevOps experience" → DEVOPS/SRE/PLATFORM EXPERIENCE
   * "Backend experience" → BACKEND/SOFTWARE EXPERIENCE
   * "Frontend experience" → FRONTEND EXPERIENCE
   * "QA experience" → QA/TEST EXPERIENCE
   * "Data/ML experience" → DATA/ML/AI EXPERIENCE
-  * etc.
 - Compare months to requirement and apply percentage-based scoring
 
-### HOW TO CHECK:
-- Experience values are PRE-CALCULATED by category - USE THEM, don't recalculate
+### HOW TO VERIFY:
+- Check `start_date` and `end_date` in the JSON for each role
+- Calculate: (end_year - start_year) * 12 + (end_month - start_month)
+- If end_date is null/empty → role is current, use today's date
+- Sum durations for roles matching the category
 - **CURRENT TITLE** (AUTHORITATIVE): The candidate's ACTUAL current job title
 - **headline**: May be OUTDATED - trust CURRENT TITLE if they conflict
-- Roles marked ⭐LEAD in work history are leadership roles
-- Roles marked with [Category] show their classified role type
 
 ### MISSING DATA HANDLING:
 - If work history (past_employers) is EMPTY but CURRENT TITLE shows "Team Lead" or "Tech Lead" → Give benefit of doubt for leadership
@@ -3599,18 +3608,18 @@ IMPORTANT RULES:
   * Fails a must-have AND has NO named strong signal → 3-4. The job title alone is NOT a signal.
   * Matches a rejection criterion → 1-2
 
-⚠️ CRITICAL - USE PRE-CALCULATED VALUES:
-- The Work History section contains PRE-CALCULATED experience by category:
-  * **LEAD/MANAGEMENT EXPERIENCE: X months** - for leadership requirements
-  * **[CATEGORY] EXPERIENCE: X months** - for role-specific requirements (DevOps, Backend, Frontend, QA, etc.)
-- USE THESE PRE-CALCULATED VALUES. DO NOT calculate your own.
+⚠️ CRITICAL - VERIFY EXPERIENCE CALCULATIONS:
+- The Work History section contains PRE-CALCULATED experience by category
+- You MUST VERIFY these calculations against the raw JSON data (current_employers, past_employers)
+- Check the start_date and end_date fields to verify durations are correct
+- If calculation is correct → USE IT. If you find an error → NOTE IT and use your own calculation.
 - Match the JD requirement to the appropriate category and compare months
 - For any "X years experience" requirement: Compare the relevant CATEGORY months to the requirement
   * Required months = meets requirement (7-10)
   * 75%+ of required = close (5-6 with signal)
   * 50-75% of required = halfway (4-5)
   * <50% of required = far (3-4, signals cannot compensate)
-- Quote the exact experience value in your reasoning: "LEAD EXPERIENCE shows 8 months, requirement is 24 months (33%)"
+- Quote the exact experience value in your reasoning: "LEAD EXPERIENCE shows 8 months (verified), requirement is 24 months (33%)"
 - Be specific in your reasoning — reference actual companies, durations, and titles from the profile.
 
 ## Candidate Profile:

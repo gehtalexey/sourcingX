@@ -3379,10 +3379,13 @@ IMPORTANT RULES:
 - Add up months from Step 1, excluding Step 2
 - Example: "AT&T (20m) + Intel (26m) = 46 months total lead"
 
-**STEP 4: Add CURRENT role if it's a lead:**
-- Check current_employers for lead titles
-- Calculate from start_date to Feb 2026
-- Add to total
+**STEP 4: Add CURRENT role if it's a lead (IMPORTANT!):**
+- Check `current_employers[]` array in JSON (NOT past_employers)
+- Current roles have end_date = null, meaning still employed
+- Calculate duration: from start_date to TODAY (Feb 2026)
+- Example: current_employers shows "DevOps Lead @ Mate Security, start_date: 2024-03"
+  → Duration = Feb 2026 - Mar 2024 = 23 months
+  → ADD this to total lead time from past roles
 
 **STEP 5: Apply percentage scoring:**
 - Total months ÷ required months = percentage
@@ -3391,8 +3394,9 @@ IMPORTANT RULES:
 - 50-74% → 4-5 (halfway)
 - <50% → 3-4 (far, signals cannot compensate)
 
-**IN YOUR REASONING, YOU MUST SHOW:**
-"LEAD CALCULATION: [Role1 @ Company1: Xm] + [Role2 @ Company2: Ym] = TOTAL Zm months (Z÷24 = X% of requirement)"
+**IN YOUR REASONING, YOU MUST SHOW THE MATH:**
+"LEAD CALCULATION: [Past: Role1 @ Company1: Xm] + [Past: Role2 @ Company2: Ym] + [CURRENT: Role @ Company: Zm] = TOTAL Wm months (W÷24 = X%)"
+Example: "LEAD: [Past: DevOps Lead @ APEX: 9m] + [CURRENT: DevOps Lead @ Mate Security: 14m] = 23m total (23÷24 = 96%)"
 
 ## Candidate Profile:
 {profile_summary}

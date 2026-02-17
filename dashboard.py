@@ -4697,12 +4697,26 @@ with tab_filter:
                 st.session_state['results_df'] = filtered_df
                 st.session_state['results'] = filtered_df.to_dict('records')
                 st.session_state['filter_stats'] = stats
-                # MEMORY OPTIMIZATION: Only store counts per filter, not full DataFrames
-                # Full filtered data can be reconstructed by re-running filters if needed
+
+                # MEMORY OPTIMIZATION: Store lightweight version of filtered-out candidates
+                # Only keep key columns (no raw_data), limit to 100 per category
+                lightweight_cols = ['name', 'first_name', 'last_name', 'current_title', 'current_company', 'linkedin_url', 'public_url']
+                filtered_out_light = {}
+                for filter_name, filter_df in filtered_out.items():
+                    if len(filter_df) > 0:
+                        # Get available columns
+                        available = [c for c in lightweight_cols if c in filter_df.columns]
+                        if available:
+                            # Take only first 100 rows and only lightweight columns
+                            light_df = filter_df[available].head(100).copy()
+                            filtered_out_light[filter_name] = light_df
+                        else:
+                            # Fallback: first 5 columns, 100 rows
+                            light_df = filter_df[list(filter_df.columns)[:5]].head(100).copy()
+                            filtered_out_light[filter_name] = light_df
+
                 st.session_state['filtered_out_counts'] = {k: len(v) for k, v in filtered_out.items()}
-                # Don't store filtered_out DataFrames - saves significant memory
-                if 'filtered_out' in st.session_state:
-                    del st.session_state['filtered_out']
+                st.session_state['filtered_out_light'] = filtered_out_light
                 cleanup_memory()  # Aggressive memory cleanup
                 save_session_state()  # Save for restore
 
@@ -4750,6 +4764,52 @@ with tab_filter:
                 if filters_enabled:
                     st.caption(f"Filters enabled: {', '.join(filters_enabled)}")
                 st.caption("No individual matches found. Check column names in your data.")
+
+        # View filtered-out candidates by category
+        filtered_out_light = st.session_state.get('filtered_out_light', {})
+        if filtered_out_light:
+            with st.expander("View Filtered-Out Candidates", expanded=False):
+                filter_tabs = list(filtered_out_light.keys())
+                if filter_tabs:
+                    selected_filter = st.selectbox(
+                        "Select filter category",
+                        filter_tabs,
+                        format_func=lambda x: f"{x.replace('_', ' ').title()} ({len(filtered_out_light[x])} shown)"
+                    )
+
+                    if selected_filter and selected_filter in filtered_out_light:
+                        view_df = filtered_out_light[selected_filter]
+                        total_count = st.session_state.get('filtered_out_counts', {}).get(selected_filter, len(view_df))
+
+                        st.markdown(f"**{selected_filter.replace('_', ' ').title()}**: {total_count} removed")
+                        if total_count > 100:
+                            st.caption(f"Showing first 100 of {total_count}")
+
+                        # Determine best name column
+                        if 'name' in view_df.columns and view_df['name'].notna().any():
+                            name_col = 'name'
+                        elif 'first_name' in view_df.columns:
+                            view_df = view_df.copy()
+                            view_df['name'] = (view_df.get('first_name', '').fillna('') + ' ' + view_df.get('last_name', '').fillna('')).str.strip()
+                            name_col = 'name'
+                        else:
+                            name_col = None
+
+                        # Display columns
+                        display_cols = ['name', 'current_title', 'current_company', 'linkedin_url']
+                        if name_col is None:
+                            display_cols = list(view_df.columns)[:4]
+                        available = [c for c in display_cols if c in view_df.columns]
+
+                        st.dataframe(
+                            view_df[available] if available else view_df,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                                "public_url": st.column_config.LinkColumn("LinkedIn"),
+                            }
+                        )
 
     # View passed candidates section (only show after filtering)
     if 'filter_stats' in st.session_state and 'passed_candidates_df' in st.session_state:

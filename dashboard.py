@@ -332,15 +332,14 @@ def cleanup_memory():
                 st.session_state[df_key] = df.drop(columns=cols_to_drop)
 
     # MEMORY OPTIMIZATION: Clear list versions - they're duplicates of DataFrames
+    # BUT keep 'results' as it's used for data existence checks
     # Lists can be reconstructed via get_profiles_list() when needed
-    for list_key in ['results', 'enriched_results']:
+    for list_key in ['enriched_results']:  # Removed 'results' - needed for UI checks
         if list_key in st.session_state:
             del st.session_state[list_key]
 
-    # Clear redundant DataFrame copies
-    # passed_candidates_df is same as results_df after filtering
-    if 'passed_candidates_df' in st.session_state:
-        del st.session_state['passed_candidates_df']
+    # NOTE: Keep passed_candidates_df - needed for filtered candidates preview
+    # It's the same as results_df but we need it for the UI flow
 
     # Clear filtered_out if it exists (legacy)
     for key in ['filtered_out', 'f2_filtered_out', 'original_results_df']:

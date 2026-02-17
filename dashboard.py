@@ -4742,8 +4742,17 @@ with tab_filter:
 
         # View filtered-out candidates by category
         filtered_out_light = st.session_state.get('filtered_out_light', {})
-        if filtered_out_light:
-            with st.expander("View Filtered-Out Candidates", expanded=False):
+        skipped_filters = stats.get('_skipped_filters', [])
+
+        with st.expander("View Filtered-Out Candidates", expanded=False):
+            # Show skipped filters warning
+            if skipped_filters:
+                st.warning(f"**Skipped filters** (missing data columns):")
+                for skip in skipped_filters:
+                    st.caption(f"  ⚠️ {skip}")
+                st.divider()
+
+            if filtered_out_light:
                 filter_tabs = list(filtered_out_light.keys())
                 if filter_tabs:
                     selected_filter = st.selectbox(
@@ -4785,6 +4794,8 @@ with tab_filter:
                                 "public_url": st.column_config.LinkColumn("LinkedIn"),
                             }
                         )
+            elif not skipped_filters:
+                st.info("No candidates were filtered out.")
 
     # Priority categories section (only show after filtering)
     if 'filter_stats' in st.session_state and 'passed_candidates_df' in st.session_state:

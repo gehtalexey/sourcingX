@@ -4754,27 +4754,38 @@ with tab_filter:
 
     # View passed candidates section (only show after filtering)
     if 'filter_stats' in st.session_state and 'passed_candidates_df' in st.session_state:
-        st.divider()
-        st.markdown("### Filtered Candidates Preview")
-
         passed_df = st.session_state['passed_candidates_df']
 
-        # Show preview of filtered candidates
-        if 'name' in passed_df.columns and passed_df['name'].notna().any():
-            preview_cols = ['name', 'current_title', 'current_company', 'location', 'linkedin_url']
-        elif 'first_name' in passed_df.columns:
-            preview_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'linkedin_url']
-        else:
-            preview_cols = list(passed_df.columns)[:6]
+        if len(passed_df) > 0:
+            st.divider()
+            st.markdown(f"### Filtered Candidates: **{len(passed_df)}**")
 
-        available_preview = [c for c in preview_cols if c in passed_df.columns]
-        if available_preview and len(passed_df) > 0:
+            # Build preview columns - try multiple options
+            possible_cols = [
+                ['name', 'current_title', 'current_company', 'location', 'linkedin_url'],
+                ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'public_url'],
+                ['fullName', 'job_1_job_title', 'job_1_company', 'location', 'profileUrl'],
+            ]
+
+            available_preview = []
+            for cols in possible_cols:
+                available = [c for c in cols if c in passed_df.columns]
+                if len(available) >= 3:  # Need at least 3 columns
+                    available_preview = available
+                    break
+
+            # Fallback: just use first 5 columns
+            if not available_preview:
+                available_preview = list(passed_df.columns)[:5]
+
             st.dataframe(
                 passed_df[available_preview].head(50),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
                     "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                    "public_url": st.column_config.LinkColumn("LinkedIn"),
+                    "profileUrl": st.column_config.LinkColumn("LinkedIn"),
                 }
             )
             if len(passed_df) > 50:

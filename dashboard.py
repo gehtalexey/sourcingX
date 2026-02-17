@@ -3364,10 +3364,10 @@ Do NOT mention it as a concern - it's a strength. Only reject if CURRENTLY servi
 {job_description}
 {rejection_warning}
 IMPORTANT RULES:
-- "Must have" requirements are critical filters. Use TIERED scoring:
+- "Must have" requirements are critical filters. Use TIERED scoring with SIGNAL CHECK:
   * Meets all must-haves → eligible for 7-10
-  * Doesn't meet a must-have BUT has strong signals (top company, elite army, top university) → 5-6 (worth manual review)
-  * Doesn't meet a must-have AND no strong signals → 3-4
+  * Fails a must-have BUT has a NAMED strong signal (top company like Wiz/Rapyd/Fireblocks/PayPal, elite army 8200/Mamram, top university Technion/TAU) → 5-6. You MUST name the signal.
+  * Fails a must-have AND has NO named strong signal → 3-4. The job title alone is NOT a signal.
   * Matches a rejection criterion → 1-2
 - Use the "Work History" section with calculated durations to determine years of experience. Do NOT say "duration not specified" when dates and durations are provided.
 - When work history dates are missing, infer from the number of positions, career trajectory, title seniority, and other signals. Make your BEST assessment — never default to "can't determine" or "insufficient data".
@@ -3428,14 +3428,26 @@ Respond with ONLY valid JSON in this exact format:
             "company types, and skill depth. State your inference, don't punt.\n"
             "3. TIERED must-have scoring:\n"
             "   - Meets all must-haves → 7-10\n"
-            "   - Fails a must-have BUT strong signals (top company, elite army, top university) → 5-6 (manual review)\n"
-            "   - Fails a must-have AND no strong signals → 3-4\n"
+            "   - Fails a must-have BUT passes SIGNAL CHECK (see below) → 5-6 (manual review)\n"
+            "   - Fails a must-have AND fails SIGNAL CHECK → 3-4 (no exceptions)\n"
             "   - Matches rejection criterion → 1-2\n"
-            "4. DIFFERENTIATE scores. Two candidates should NOT get the same score unless they are truly equivalent. "
+            "\n"
+            "4. SIGNAL CHECK — to score 5-6 when failing a must-have, candidate MUST have AT LEAST ONE of:\n"
+            "   a) Worked at a RECOGNIZED top company: Wiz, Monday, Snyk, Wix, AppsFlyer, Fiverr, CyberArk, SentinelOne,\n"
+            "      Check Point, Palo Alto, Armis, Rapyd, Fireblocks, BigID, Cyera, Google, Meta, Amazon, Microsoft,\n"
+            "      PayPal, Cloudflare, Datadog, or similar well-known tech companies\n"
+            "   b) Elite military unit: 8200, Mamram, Talpiot\n"
+            "   c) Top university: Technion, Tel Aviv University, Hebrew University, Ben-Gurion, Weizmann,\n"
+            "      MIT, Stanford, CMU, Berkeley\n"
+            "   d) Clear rapid career progression (e.g. Junior → Senior → Lead in under 5 years)\n"
+            "   If NONE of the above → score MUST be 3-4 when failing a must-have. The job title alone\n"
+            "   (e.g. 'DevOps Tech Lead') is NOT a strong signal — that is what was searched for.\n"
+            "   You MUST name the specific signal in your 'why' field to justify a 5-6 score.\n"
+            "5. DIFFERENTIATE scores. Two candidates should NOT get the same score unless they are truly equivalent. "
             "Company reputation, title seniority, tenure, and skill depth should all create score differences.\n"
-            "5. Be SPECIFIC in summary/why — mention actual company names, years, titles. "
+            "6. Be SPECIFIC in summary/why — mention actual company names, years, titles. "
             "Generic statements like 'strong background' without evidence are not acceptable.\n"
-            "6. LinkedIn profiles are NOT CVs. Sparse profiles from strong companies are still strong candidates. "
+            "7. LinkedIn profiles are NOT CVs. Sparse profiles from strong companies are still strong candidates. "
             "Score based on available signals, not profile completeness.\n"
             "\n## Title Level Understanding (ALWAYS APPLY)\n"
             "These titles are the SAME seniority level — treat them equivalently:\n"

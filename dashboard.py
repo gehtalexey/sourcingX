@@ -3183,9 +3183,13 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
 
     # Extract full work history with dates from raw_crustdata
     def format_work_history(profile):
-        """Format work history with dates for accurate experience calculation."""
+        """Format work history with dates for accurate experience calculation.
+
+        Returns tuple: (formatted_history_str, lead_experience_months, devops_experience_months, lead_roles_list)
+        """
         from datetime import datetime
         from dateutil.relativedelta import relativedelta
+        import re
 
         def parse_date(date_str):
             """Parse ISO date string to datetime."""
@@ -3223,6 +3227,37 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
             except:
                 return ''
 
+        def is_lead_role(title):
+            """Check if title indicates a leadership role."""
+            if not title:
+                return False
+            title_lower = title.lower()
+            lead_patterns = [
+                r'\blead\b', r'\bleader\b', r'\bmanager\b', r'\bhead\b', r'\bdirector\b',
+                r'\btl\b', r'\bteam\s*lead', r'\btech\s*lead', r'\bstaff\b', r'\bprincipal\b',
+                r'\bvp\b', r'\bchief\b', r'\bcto\b', r'\bcio\b'
+            ]
+            return any(re.search(p, title_lower) for p in lead_patterns)
+
+        def is_devops_role(title):
+            """Check if title is a DevOps role (not SysAdmin, Storage, QA, etc.)."""
+            if not title:
+                return False
+            title_lower = title.lower()
+            # DevOps roles
+            devops_patterns = [r'devops', r'\bsre\b', r'site reliability', r'platform engineer',
+                              r'cloud engineer', r'devsecops', r'infrastructure engineer']
+            # NOT DevOps roles
+            not_devops_patterns = [r'sysadmin', r'system admin', r'storage', r'\bqa\b', r'quality',
+                                   r'test engineer', r'\bit\s+support', r'help desk', r'\bdba\b',
+                                   r'database admin', r'network admin']
+
+            # Check if it's explicitly NOT DevOps
+            if any(re.search(p, title_lower) for p in not_devops_patterns):
+                return False
+            # Check if it's DevOps
+            return any(re.search(p, title_lower) for p in devops_patterns)
+
         raw = profile.get('raw_crustdata') or profile.get('raw_data') or {}
 
         # Try past_employers first (Crustdata format)
@@ -3233,6 +3268,10 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
         if all_positions:
             positions = []
             total_months = 0
+            lead_months = 0
+            devops_months = 0
+            lead_roles = []  # Track lead roles for explicit reporting
+
             for emp in all_positions[:15]:  # Limit to 15 positions
                 if isinstance(emp, dict):
                     title = emp.get('employee_title') or emp.get('title') or ''
@@ -3245,22 +3284,49 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
                     duration = calc_duration(start_dt, end_dt)
 
                     # Track total experience
+                    role_months = 0
                     if start_dt:
                         end_for_calc = end_dt or datetime.now()
-                        months = (end_for_calc.year - start_dt.year) * 12 + (end_for_calc.month - start_dt.month)
-                        total_months += max(0, months)
+                        role_months = (end_for_calc.year - start_dt.year) * 12 + (end_for_calc.month - start_dt.month)
+                        role_months = max(0, role_months)
+                        total_months += role_months
+
+                    # Track LEAD experience
+                    if is_lead_role(title) and role_months > 0:
+                        lead_months += role_months
+                        lead_roles.append(f"{title} at {company} ({duration})")
+
+                    # Track DevOps experience
+                    if is_devops_role(title) and role_months > 0:
+                        devops_months += role_months
 
                     if title or company:
                         start_fmt = format_date(start_dt) or '?'
                         end_fmt = format_date(end_dt) or 'Present'
+                        # Mark lead roles with ⭐
+                        lead_marker = " ⭐LEAD" if is_lead_role(title) else ""
+                        devops_marker = " [DevOps]" if is_devops_role(title) else ""
                         pos_str = f"- {title} at {company} ({start_fmt} - {end_fmt})"
                         if duration:
-                            pos_str += f" [{duration}]"
+                            pos_str += f" [{duration}]{lead_marker}{devops_marker}"
                         positions.append(pos_str)
 
             if positions:
                 total_years = round(total_months / 12, 1)
-                return f"Total experience: ~{total_years} years\n" + '\n'.join(positions)
+                lead_years = lead_months / 12
+                devops_years = devops_months / 12
+
+                # Format lead/devops experience summary
+                lead_summary = f"**LEAD EXPERIENCE: {lead_months} months ({lead_years:.1f} years)**"
+                if lead_roles:
+                    lead_summary += f"\n  Lead roles: {'; '.join(lead_roles)}"
+                else:
+                    lead_summary += "\n  Lead roles: NONE FOUND"
+
+                devops_summary = f"**DEVOPS EXPERIENCE: {devops_months} months ({devops_years:.1f} years)**"
+
+                header = f"Total experience: ~{total_years} years\n{lead_summary}\n{devops_summary}\n"
+                return header + '\n'.join(positions)
 
         # Fallback to past_positions field
         return profile.get('past_positions', 'N/A')
@@ -3407,35 +3473,35 @@ Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requi
 
 **Score 1-2 (Not a Fit — hard reject)**: Candidate matches a REJECTION criterion (overqualified, junior, consulting company, etc.)
 
-### EXPERIENCE CALCULATION (CRITICAL - READ CAREFULLY):
+### EXPERIENCE CALCULATION (CRITICAL - USE PRE-CALCULATED VALUES):
+
+**⚠️ WE HAVE PRE-CALCULATED EXPERIENCE FOR YOU - USE THESE VALUES:**
+The "Work History" section contains PRE-CALCULATED values:
+- **LEAD EXPERIENCE: X months (Y years)** - This is the TOTAL lead experience. USE THIS NUMBER.
+- **DEVOPS EXPERIENCE: X months (Y years)** - This is the TOTAL DevOps experience. USE THIS NUMBER.
+- Roles marked with ⭐LEAD are leadership roles
+- Roles marked with [DevOps] are DevOps roles
+
+**DO NOT CALCULATE YOUR OWN VALUES. USE THE PRE-CALCULATED ONES.**
 
 **For "X years LEAD/TEAM LEAD experience" requirements:**
-- You MUST calculate TOTAL DURATION of roles with Lead/Manager/TL/Team Leader in the TITLE
-- Current title alone does NOT count as meeting the requirement! Calculate how long they've been in lead roles.
-- Example: If requirement is "2 years lead" and candidate has been Tech Lead for only 8 months → does NOT meet requirement
-- SUM all lead roles: "Team Lead 2019-2021 (2yr) + Tech Lead 2023-present (1yr) = 3yr total" ✓
+- READ the "LEAD EXPERIENCE: X months" value from the Work History section
+- Compare this EXACT number to the requirement (e.g., 2 years = 24 months)
+- If LEAD EXPERIENCE shows "8 months" and requirement is "2 years" → 8/24 = 33% → Score 3-4
+- If LEAD EXPERIENCE shows "18 months" and requirement is "2 years" → 18/24 = 75% → Score 5-6 with signal
 - "Manager" title COUNTS as leadership (DevOps Manager, Engineering Manager, etc.)
 
 **For "X years DEVOPS experience" requirements:**
-- Count ONLY roles that are actually DevOps: DevOps Engineer, SRE, Platform Engineer, Cloud Engineer, DevSecOps
-- Do NOT count these as DevOps:
-  * System Administrator, SysAdmin, Linux Admin → Infrastructure/IT, NOT DevOps
-  * Storage Administrator, Storage Engineer → Storage, NOT DevOps
-  * Network Administrator → Networking, NOT DevOps
-  * QA Engineer, Test Engineer → QA, NOT DevOps
-  * IT Support, Help Desk, IT Specialist → IT Support, NOT DevOps
-  * DBA, Database Administrator → DBA, NOT DevOps
-- Military infra roles (even in 8200) count as DevOps ONLY if title contains DevOps/SRE/Platform
+- READ the "DEVOPS EXPERIENCE: X months" value from the Work History section
+- DevOps roles: DevOps Engineer, SRE, Platform Engineer, Cloud Engineer, DevSecOps
+- NOT DevOps: SysAdmin, Storage Admin, QA, IT Support, DBA, Network Admin
 
-### HOW TO CHECK (use ALL available JSON fields):
-- **CURRENT TITLE** (AUTHORITATIVE): This is the candidate's ACTUAL current job title. ALWAYS trust this over headline.
-- **headline**: LinkedIn headline - may be OUTDATED or different from actual title. If CURRENT TITLE and headline conflict, TRUST CURRENT TITLE.
-- **summary**: LinkedIn "About" section - may contain skills, experience details
-- **skills**: Array of skills - search for required technologies here
-- **all_titles**: Array of ALL job titles from career history - check for leadership roles (Lead, Manager, Head, TL)
-- **all_employers**: Array of ALL companies worked at
-- **current_employers** + **past_employers**: Detailed work history with dates and durations
-- **CALCULATE experience years** by summing durations from work history. Show your math: "Dell 2.5yr + H2O 1.5yr = 4yr DevOps"
+### HOW TO CHECK:
+- **LEAD EXPERIENCE** and **DEVOPS EXPERIENCE** values are PRE-CALCULATED - USE THEM
+- **CURRENT TITLE** (AUTHORITATIVE): The candidate's ACTUAL current job title
+- **headline**: May be OUTDATED - trust CURRENT TITLE if they conflict
+- Roles marked ⭐LEAD in work history are leadership roles
+- Roles marked [DevOps] in work history are DevOps roles
 
 ### MISSING DATA HANDLING:
 - If work history (past_employers) is EMPTY but CURRENT TITLE shows "Team Lead" or "Tech Lead" → Give benefit of doubt for leadership
@@ -3463,9 +3529,16 @@ IMPORTANT RULES:
   * Fails a must-have BUT has a NAMED strong signal (top company like Wiz/Rapyd/Fireblocks/PayPal, elite army 8200/Mamram, top university Technion/TAU) → 5-6. You MUST name the signal.
   * Fails a must-have AND has NO named strong signal → 3-4. The job title alone is NOT a signal.
   * Matches a rejection criterion → 1-2
-- CALCULATE LEAD EXPERIENCE: For "X years lead experience" requirements, SUM the durations of ALL roles with Lead/Manager/TL in title. Current title alone is NOT enough - verify HOW LONG they've been a lead.
-- CALCULATE DEVOPS EXPERIENCE: Only count DevOps/SRE/Platform/Cloud roles. Do NOT count SysAdmin, Storage, QA, IT Support, DBA as DevOps.
-- Show your calculation: "Lead @ Company A (2yr) + TL @ Company B (1yr) = 3yr lead experience"
+
+⚠️ CRITICAL - USE PRE-CALCULATED VALUES:
+- The Work History section contains **LEAD EXPERIENCE: X months** and **DEVOPS EXPERIENCE: X months**
+- USE THESE PRE-CALCULATED VALUES. DO NOT calculate your own.
+- For "2 years lead" requirement: Compare the LEAD EXPERIENCE months to 24 months
+  * 24+ months = meets requirement (7-10)
+  * 18-23 months = 75%+ (5-6 with signal)
+  * 12-17 months = 50-75% (4-5)
+  * <12 months = <50% (3-4, signals cannot compensate)
+- Quote the exact LEAD EXPERIENCE value in your reasoning: "LEAD EXPERIENCE shows 8 months, requirement is 24 months (33%)"
 - Be specific in your reasoning — reference actual companies, durations, and titles from the profile.
 
 ## Candidate Profile:

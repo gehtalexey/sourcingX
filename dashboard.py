@@ -3244,15 +3244,21 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
     all_employers = raw_crustdata.get('all_employers', [])
     skills_list = raw_crustdata.get('skills', [])
 
+    # Check for missing work history
+    has_work_history = bool(work_history_formatted and work_history_formatted.strip() and work_history_formatted != 'N/A')
+    work_history_warning = ""
+    if not has_work_history:
+        work_history_warning = "\n⚠️ WARNING: Work history data is MISSING or INCOMPLETE. Evaluate based on available fields (title, skills, headline) but note this limitation."
+
     profile_summary = f"""## Key Profile Fields (READ THESE CAREFULLY):
-- **CURRENT TITLE**: {current_title}
+- **CURRENT TITLE** (AUTHORITATIVE): {current_title}
 - **CURRENT COMPANY**: {current_company}
-- **Headline**: {headline}
+- **Headline** (may be stale - trust CURRENT TITLE above): {headline}
 - **All Titles (career history)**: {', '.join(all_titles) if all_titles else 'N/A'}
 - **All Employers (career history)**: {', '.join(all_employers) if all_employers else 'N/A'}
 - **Skills**: {', '.join(skills_list[:30]) if skills_list else 'N/A'}
 - **Summary/About**: {summary[:500] if summary else 'N/A'}
-
+{work_history_warning}
 ## Work History (with calculated durations):
 {work_history_formatted}
 
@@ -3309,13 +3315,19 @@ The requirements contain HARD RULES. These are NOT preferences - they are disqua
 3. "Must have team lead experience in recent N years" → Check if ANY role in past N years had "lead", "manager", "head" in title
 
 ### HOW TO CHECK (use ALL available JSON fields):
-- **headline**: Often contains current title and company (e.g., "DevOps Engineer at Company")
+- **CURRENT TITLE** (AUTHORITATIVE): This is the candidate's ACTUAL current job title. ALWAYS trust this over headline.
+- **headline**: LinkedIn headline - may be OUTDATED or different from actual title. If CURRENT TITLE and headline conflict, TRUST CURRENT TITLE.
 - **summary**: LinkedIn "About" section - may contain skills, experience details
 - **skills**: Array of skills - search for required technologies here
-- **all_titles**: Array of ALL job titles from career history - check for leadership roles
+- **all_titles**: Array of ALL job titles from career history - check for leadership roles (Lead, Manager, Head, TL)
 - **all_employers**: Array of ALL companies worked at
 - **current_employers** + **past_employers**: Detailed work history with dates
 - For experience years: Calculate from work history dates in past_employers
+
+### MISSING DATA HANDLING:
+- If work history (past_employers) is EMPTY but CURRENT TITLE shows "Team Lead" or "Tech Lead" → Give benefit of doubt for leadership
+- If work history is MISSING, you CANNOT definitively say candidate lacks experience - mark as "Partial Fit" (5-6), not "Not a Fit"
+- Only score 1-2 if there's POSITIVE EVIDENCE of rejection criteria (e.g., title says "Junior", company is consulting firm)
 
 ### CRITICAL:
 - A candidate missing a MUST-HAVE requirement can NEVER be "Strong Fit" or "Good Fit"

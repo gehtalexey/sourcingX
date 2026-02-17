@@ -307,6 +307,50 @@ SESSION_DIR.mkdir(exist_ok=True)
 # Legacy shared file (for migration)
 _LEGACY_SESSION_FILE = Path(__file__).parent / '.last_session.json'
 
+# ===== Startup Memory Optimization =====
+# On Streamlit Cloud, proactively clean up memory on each rerun
+if _IS_STREAMLIT_CLOUD:
+    import gc
+    gc.collect()
+    # Clear any stale batch state that might have survived a reboot
+    if 'screening_batch_state' in st.session_state and not st.session_state.get('screening_batch_mode'):
+        del st.session_state['screening_batch_state']
+        gc.collect()
+
+
+def cleanup_memory():
+    """Aggressive memory cleanup - call after major operations."""
+    import gc
+
+    # Remove heavy columns from DataFrames
+    heavy_cols = ['raw_crustdata', 'raw_data', 'education_details', 'certifications']
+    for df_key in ['results_df', 'enriched_df', 'passed_candidates_df']:
+        if df_key in st.session_state and isinstance(st.session_state[df_key], pd.DataFrame):
+            df = st.session_state[df_key]
+            cols_to_drop = [c for c in heavy_cols if c in df.columns]
+            if cols_to_drop:
+                st.session_state[df_key] = df.drop(columns=cols_to_drop)
+
+    # Remove heavy keys from list data
+    for list_key in ['results', 'enriched_results']:
+        if list_key in st.session_state and st.session_state[list_key]:
+            for item in st.session_state[list_key]:
+                if isinstance(item, dict):
+                    for heavy_key in heavy_cols:
+                        item.pop(heavy_key, None)
+
+    # Clear filtered_out if it exists (legacy)
+    for key in ['filtered_out', 'f2_filtered_out', 'original_results_df']:
+        if key in st.session_state:
+            del st.session_state[key]
+
+    # Clear debug data
+    for key in ['_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols', '_debug_valid_urls']:
+        if key in st.session_state:
+            del st.session_state[key]
+
+    gc.collect()
+
 
 def _get_session_file():
     """Get per-user session file path."""
@@ -400,11 +444,16 @@ def _get_session_key():
 def _build_session_data():
     """Build session data dict from current session state."""
     session_data = {}
+    # MEMORY OPTIMIZATION: Only save essential keys, avoid redundant copies
+    # - Don't save 'results' (list) when we have 'results_df' (DataFrame) - they're the same data
+    # - Don't save 'enriched_results' when we have 'enriched_df'
+    # - Don't save 'original_results_df' - it's a backup that bloats memory
+    # - Don't save 'passed_candidates_df' - can be reconstructed from enriched_df
     keys_to_save = [
-        'results', 'results_df', 'enriched_results', 'enriched_df',
-        'screening_results', 'filtered_results', 'passed_candidates_df',
+        'results_df', 'enriched_df',  # Only save DataFrames, not list duplicates
+        'screening_results',  # Essential - screening is expensive
         'filter_stats', 'f2_filter_stats', 'last_load_count', 'last_load_file',
-        'user_sheet_url', 'original_results_df',
+        'user_sheet_url',
         'active_screening_prompt', 'active_screening_role',
         'jd_screening', 'extra_requirements'
     ]
@@ -437,6 +486,13 @@ def _restore_session_data(session_data: dict):
             st.session_state[key] = item['data']
         else:
             st.session_state[key] = item['data']
+
+    # MEMORY OPTIMIZATION: Reconstruct list versions from DataFrames (for code that expects them)
+    # These are derived views, not stored copies
+    if 'results_df' in st.session_state and isinstance(st.session_state['results_df'], pd.DataFrame):
+        st.session_state['results'] = st.session_state['results_df'].to_dict('records')
+    if 'enriched_df' in st.session_state and isinstance(st.session_state['enriched_df'], pd.DataFrame):
+        st.session_state['enriched_results'] = st.session_state['enriched_df'].to_dict('records')
 
 
 def save_session_state(to_db: bool = False):
@@ -539,11 +595,19 @@ with st.sidebar:
     with col_clear:
         if st.button("Clear", key="sidebar_clear_session", help="Clear saved session"):
             clear_session_file()
-            for key in ['results', 'results_df', 'enriched_results', 'enriched_df', 'screening_results',
-                        'passed_candidates_df', 'filter_stats', 'f2_filter_stats', 'original_results_df',
-                        'active_screening_prompt', 'active_screening_role', 'jd_screening', 'extra_requirements']:
+            # Clear all data-heavy session state keys
+            keys_to_clear = [
+                'results', 'results_df', 'enriched_results', 'enriched_df', 'screening_results',
+                'passed_candidates_df', 'filter_stats', 'f2_filter_stats', 'original_results_df',
+                'active_screening_prompt', 'active_screening_role', 'jd_screening', 'extra_requirements',
+                'filtered_out', 'f2_filtered_out', 'screening_batch_state', 'screening_batch_progress',
+                '_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols'
+            ]
+            for key in keys_to_clear:
                 if key in st.session_state:
                     del st.session_state[key]
+            import gc
+            gc.collect()
             st.success("Cleared!")
             st.rerun()
     st.divider()
@@ -2811,6 +2875,15 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
     stats['final'] = len(df)
     stats['total_removed'] = original_count - len(df)
 
+    # MEMORY OPTIMIZATION: Strip heavy columns from filtered_out DataFrames
+    # Keep only essential columns for display and restore
+    heavy_cols = ['raw_crustdata', 'raw_data', 'past_positions', 'education_details', 'certifications']
+    for filter_name, filter_df in filtered_out.items():
+        if isinstance(filter_df, pd.DataFrame):
+            cols_to_drop = [c for c in heavy_cols if c in filter_df.columns]
+            if cols_to_drop:
+                filtered_out[filter_name] = filter_df.drop(columns=cols_to_drop)
+
     return df, stats, filtered_out
 
 
@@ -3470,6 +3543,10 @@ with st.sidebar:
         if st.button("🔄 Clear All & Reboot", type="secondary", use_container_width=True):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
+            # Also clear caches
+            st.cache_data.clear()
+            import gc
+            gc.collect()
             st.rerun()
     st.divider()
 
@@ -3540,7 +3617,7 @@ with tab_upload:
                             col1, col2, col3 = st.columns(3)
                             with col1:
                                 if enriched_count > 0 and st.button(f"Load Enriched ({enriched_count})", key="resume_enriched"):
-                                    profiles = get_profiles_by_status(db_client, "enriched", limit=1000)
+                                    profiles = get_profiles_by_status(db_client, "enriched", limit=500)  # Reduced for memory
                                     if profiles:
                                         df = profiles_to_dataframe(profiles)
                                         # Strip raw_data to save memory
@@ -3551,12 +3628,13 @@ with tab_upload:
                                         st.session_state['results_df'] = df
                                         st.session_state['enriched_results'] = profiles
                                         st.session_state['enriched_df'] = df
+                                        cleanup_memory()
                                         st.success(f"Loaded {len(profiles)} enriched profiles!")
                                         st.rerun()
 
                             with col2:
                                 if screened_count > 0 and st.button(f"Load Screened ({screened_count})", key="resume_screened"):
-                                    profiles = get_profiles_by_status(db_client, "screened", limit=1000)
+                                    profiles = get_profiles_by_status(db_client, "screened", limit=500)  # Reduced for memory
                                     if profiles:
                                         df = profiles_to_dataframe(profiles)
                                         # Strip raw_data to save memory
@@ -3582,17 +3660,19 @@ with tab_upload:
                                                 'concerns': []
                                             })
                                         st.session_state['screening_results'] = screening_results
+                                        cleanup_memory()
                                         st.success(f"Loaded {len(profiles)} screened profiles!")
                                         st.rerun()
 
                             with col3:
                                 all_count = enriched_count + screened_count
                                 if st.button(f"Load All ({all_count})", key="resume_all"):
-                                    profiles = get_all_profiles(db_client, limit=2000)
+                                    profiles = get_all_profiles(db_client, limit=500)  # Reduced for memory
                                     if profiles:
                                         df = profiles_to_dataframe(profiles)
                                         st.session_state['results'] = profiles
                                         st.session_state['results_df'] = df
+                                        cleanup_memory()
                                         st.success(f"Loaded {len(profiles)} profiles!")
                                         st.rerun()
                 except Exception as e:
@@ -4522,7 +4602,13 @@ with tab_filter:
                 st.session_state['results_df'] = filtered_df
                 st.session_state['results'] = filtered_df.to_dict('records')
                 st.session_state['filter_stats'] = stats
-                st.session_state['filtered_out'] = filtered_out
+                # MEMORY OPTIMIZATION: Only store counts per filter, not full DataFrames
+                # Full filtered data can be reconstructed by re-running filters if needed
+                st.session_state['filtered_out_counts'] = {k: len(v) for k, v in filtered_out.items()}
+                # Don't store filtered_out DataFrames - saves significant memory
+                if 'filtered_out' in st.session_state:
+                    del st.session_state['filtered_out']
+                cleanup_memory()  # Aggressive memory cleanup
                 save_session_state()  # Save for restore
 
             st.success(f"Filtering complete! {stats['final']} candidates remaining")
@@ -4762,63 +4848,19 @@ with tab_filter:
                 mime="text/csv"
             )
 
-    # Review filtered candidates section
-    if 'filtered_out' in st.session_state and st.session_state['filtered_out']:
+    # Review filtered candidates section - MEMORY OPTIMIZED: only show counts
+    if 'filtered_out_counts' in st.session_state and st.session_state['filtered_out_counts']:
         st.divider()
-        st.markdown("### Review Filtered Candidates")
-        st.caption("View candidates removed by each filter and restore selected ones")
+        st.markdown("### Filtered Candidates Summary")
+        st.caption("Counts of candidates removed by each filter (data not stored to save memory)")
 
-        filtered_out = st.session_state['filtered_out']
-        filter_names = [k for k, v in filtered_out.items() if len(v) > 0]
+        counts = st.session_state['filtered_out_counts']
+        filter_names = [k for k, v in counts.items() if v > 0]
 
         if filter_names:
-            selected_filter = st.selectbox("Select filter to review:", filter_names)
-
-            if selected_filter and selected_filter in filtered_out:
-                filter_df = filtered_out[selected_filter]
-                st.info(f"**{len(filter_df)}** candidates removed by: {selected_filter}")
-
-                # Show key columns for review
-                display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'education', 'public_url']
-                available_cols = [c for c in display_cols if c in filter_df.columns]
-
-                if available_cols:
-                    st.dataframe(
-                        filter_df[available_cols],
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "public_url": st.column_config.LinkColumn("LinkedIn")
-                        }
-                    )
-
-                # Restore functionality
-                st.markdown("**Restore candidates:**")
-                restore_indices = st.multiselect(
-                    f"Select rows to restore (by index):",
-                    options=list(range(len(filter_df))),
-                    format_func=lambda i: f"{filter_df.iloc[i].get('first_name', '')} {filter_df.iloc[i].get('last_name', '')} - {filter_df.iloc[i].get('current_company', '')}"
-                )
-
-                if st.button("Restore Selected", key="restore_btn"):
-                    if restore_indices:
-                        # Get candidates to restore
-                        to_restore = filter_df.iloc[restore_indices]
-
-                        # Add back to main results
-                        current_df = st.session_state['results_df']
-                        restored_df = pd.concat([current_df, to_restore], ignore_index=True)
-                        st.session_state['results_df'] = restored_df
-                        st.session_state['results'] = restored_df.to_dict('records')
-
-                        # Remove from filtered_out
-                        remaining = filter_df.drop(filter_df.index[restore_indices])
-                        st.session_state['filtered_out'][selected_filter] = remaining
-
-                        st.success(f"Restored {len(restore_indices)} candidates!")
-                        st.rerun()
-                    else:
-                        st.warning("Select candidates to restore first")
+            for filter_name in filter_names:
+                st.markdown(f"- **{filter_name}**: {counts[filter_name]} removed")
+            st.info("💡 To restore candidates, reload original data and re-apply filters with different settings")
         else:
             st.info("No candidates were filtered out")
 
@@ -5699,14 +5741,16 @@ with tab_filter2:
                         else:
                             st.warning(f"No searchable columns found. Available: {list(df.columns)}")
 
-                # Store results
+                # Store results - MEMORY OPTIMIZED: don't store f2_filtered_out
                 st.session_state['passed_candidates_df'] = df.reset_index(drop=True)
-                st.session_state['f2_filtered_out'] = filtered_out
+                # Don't store f2_filtered_out - it contains full profile data and uses too much memory
+                if 'f2_filtered_out' in st.session_state:
+                    del st.session_state['f2_filtered_out']
                 st.session_state['f2_filter_stats'] = {
                     'original': original_count,
                     'total_removed': original_count - len(df),
                     'final': len(df),
-                    'removed_by': removed,
+                    'removed_by': removed,  # This already has counts
                     'priority_count': len(priority_matches)
                 }
 
@@ -5716,6 +5760,7 @@ with tab_filter2:
                         st.caption(f"  - {reason}: {count} removed")
                 if priority_matches and uni_filter_mode == "Prioritize (move to top)":
                     st.info(f"🎓 {len(priority_matches)} candidates from target universities (shown first)")
+                cleanup_memory()  # Aggressive memory cleanup
                 save_session_state()  # Save for restore
                 st.rerun()
 
@@ -5778,41 +5823,8 @@ with tab_filter2:
             csv_data = display_df.to_csv(index=False)
             st.download_button("Download Passed (CSV)", csv_data, "passed_profiles.csv", "text/csv", key="download_passed")
 
-        # Show filtered out candidates
-        if 'f2_filtered_out' in st.session_state and st.session_state['f2_filtered_out']:
-            st.divider()
-            st.markdown("### Filtered Out Candidates")
-            st.caption("Review candidates removed by each filter")
-
-            filtered_out = st.session_state['f2_filtered_out']
-            filter_names = [k for k, v in filtered_out.items() if len(v) > 0]
-
-            if filter_names:
-                selected_filter = st.selectbox("Select filter to review:", filter_names, key="f2_review_filter")
-                if selected_filter:
-                    filtered_profiles = filtered_out[selected_filter]
-
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.warning(f"**{len(filtered_profiles)}** profiles removed by: {selected_filter}")
-                    with col2:
-                        show_all_cols = st.checkbox("Show all columns", value=False, key="f2_filtered_show_all")
-
-                    review_df = pd.DataFrame(filtered_profiles)
-                    if show_all_cols:
-                        st.dataframe(review_df.head(50), use_container_width=True, hide_index=True,
-                                    column_config={
-                                        "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
-                                        "public_url": st.column_config.LinkColumn("LinkedIn")
-                                    })
-                        st.caption(f"Showing {min(50, len(review_df))} of {len(review_df)} profiles | {len(review_df.columns)} columns")
-                    else:
-                        display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'all_employers', 'all_schools', 'skills', 'linkedin_url']
-                        available_cols = [c for c in display_cols if c in review_df.columns]
-                        st.dataframe(review_df[available_cols].head(50), use_container_width=True, hide_index=True,
-                                    column_config={
-                                        "linkedin_url": st.column_config.LinkColumn("LinkedIn")
-                                    })
+        # Show filtered out candidates - MEMORY OPTIMIZED: only show counts
+        # Counts are already in f2_filter_stats['removed_by']
 
         # ===== SalesQL Email Enrichment =====
         st.divider()
@@ -6530,6 +6542,12 @@ with tab_screening:
                         # Clear filtered_out (stores full DataFrame copies)
                         if 'filtered_out' in st.session_state:
                             del st.session_state['filtered_out']
+                        # Clear screening_batch_state (stores profiles copy during screening)
+                        if 'screening_batch_state' in st.session_state:
+                            del st.session_state['screening_batch_state']
+                        # Clear original_results_df backup to save memory
+                        if 'original_results_df' in st.session_state:
+                            del st.session_state['original_results_df']
                         # Clear debug data
                         for _debug_key in ['_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols']:
                             if _debug_key in st.session_state:
@@ -6899,7 +6917,7 @@ with tab_database:
                 st.markdown("#### Browse Profiles")
 
                 # Fetch all profiles once
-                all_profiles = get_all_profiles(db_client, limit=2000)
+                all_profiles = get_all_profiles(db_client, limit=500)  # Reduced for memory
 
                 if all_profiles:
                     df = profiles_to_dataframe(all_profiles)
@@ -7035,15 +7053,15 @@ with tab_database:
                 if st.button("Load to Session", key="db_load_btn"):
                     load_profiles = []
                     if load_selection == "Strong Fit":
-                        load_profiles = get_profiles_by_fit_level(db_client, "Strong Fit", limit=1000)
+                        load_profiles = get_profiles_by_fit_level(db_client, "Strong Fit", limit=500)  # Reduced for memory
                     elif load_selection == "Good Fit":
-                        load_profiles = get_profiles_by_fit_level(db_client, "Good Fit", limit=1000)
+                        load_profiles = get_profiles_by_fit_level(db_client, "Good Fit", limit=500)  # Reduced for memory
                     elif load_selection == "All Screened":
                         from db import get_profiles_by_status
-                        load_profiles = get_profiles_by_status(db_client, "screened", limit=1000)
+                        load_profiles = get_profiles_by_status(db_client, "screened", limit=500)  # Reduced for memory
                     elif load_selection == "All Enriched":
                         from db import get_profiles_by_status
-                        load_profiles = get_profiles_by_status(db_client, "enriched", limit=1000)
+                        load_profiles = get_profiles_by_status(db_client, "enriched", limit=500)  # Reduced for memory
 
                     if load_profiles:
                         load_df = profiles_to_dataframe(load_profiles)

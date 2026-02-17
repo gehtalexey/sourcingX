@@ -215,7 +215,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Load API keys
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=60, max_entries=3)  # Limit cache size
 def load_config():
     """Load config from config.json or Streamlit secrets (for cloud deployment)."""
     config = {}
@@ -323,7 +323,7 @@ def cleanup_memory():
     import gc
 
     # Remove heavy columns from DataFrames
-    heavy_cols = ['raw_crustdata', 'raw_data', 'education_details', 'certifications']
+    heavy_cols = ['raw_crustdata', 'raw_data', 'education_details', 'certifications', 'past_positions_raw']
     for df_key in ['results_df', 'enriched_df', 'passed_candidates_df']:
         if df_key in st.session_state and isinstance(st.session_state[df_key], pd.DataFrame):
             df = st.session_state[df_key]
@@ -331,13 +331,16 @@ def cleanup_memory():
             if cols_to_drop:
                 st.session_state[df_key] = df.drop(columns=cols_to_drop)
 
-    # Remove heavy keys from list data
+    # MEMORY OPTIMIZATION: Clear list versions - they're duplicates of DataFrames
+    # Lists can be reconstructed via get_profiles_list() when needed
     for list_key in ['results', 'enriched_results']:
-        if list_key in st.session_state and st.session_state[list_key]:
-            for item in st.session_state[list_key]:
-                if isinstance(item, dict):
-                    for heavy_key in heavy_cols:
-                        item.pop(heavy_key, None)
+        if list_key in st.session_state:
+            del st.session_state[list_key]
+
+    # Clear redundant DataFrame copies
+    # passed_candidates_df is same as results_df after filtering
+    if 'passed_candidates_df' in st.session_state:
+        del st.session_state['passed_candidates_df']
 
     # Clear filtered_out if it exists (legacy)
     for key in ['filtered_out', 'f2_filtered_out', 'original_results_df']:
@@ -349,7 +352,39 @@ def cleanup_memory():
         if key in st.session_state:
             del st.session_state[key]
 
+    # Clear screening batch state if not actively screening
+    if 'screening_batch_state' in st.session_state and not st.session_state.get('screening_batch_mode'):
+        del st.session_state['screening_batch_state']
+
     gc.collect()
+
+
+def get_profiles_df() -> pd.DataFrame:
+    """Get the current profiles DataFrame. Single source of truth."""
+    # Priority: enriched_df > results_df > empty
+    if 'enriched_df' in st.session_state and st.session_state['enriched_df'] is not None:
+        df = st.session_state['enriched_df']
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return df
+    if 'results_df' in st.session_state and st.session_state['results_df'] is not None:
+        df = st.session_state['results_df']
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return df
+    return pd.DataFrame()
+
+
+def get_profiles_list() -> list:
+    """Get profiles as list. Derived from DataFrame - NOT stored separately."""
+    df = get_profiles_df()
+    if df.empty:
+        return []
+    return df.to_dict('records')
+
+
+def get_profile_count() -> int:
+    """Get current profile count without loading full data."""
+    df = get_profiles_df()
+    return len(df)
 
 
 def _get_session_file():
@@ -1016,7 +1051,7 @@ def get_file_size_from_phantombuster(api_key: str, agent_id: str, csv_name: str)
         return 0
 
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=300, max_entries=3)  # Cache for 5 minutes, limit size
 def fetch_phantombuster_agents(api_key: str) -> dict:
     """Fetch list of all PhantomBuster agents.
 
@@ -3512,20 +3547,8 @@ with st.sidebar:
 
         if _has_raw:
             if st.button("⚡ Strip Raw Data (saves memory)", use_container_width=True, type="primary"):
-                for _df_key in ['results_df', 'enriched_df']:
-                    if _df_key in st.session_state and isinstance(st.session_state[_df_key], pd.DataFrame):
-                        if 'raw_crustdata' in st.session_state[_df_key].columns:
-                            st.session_state[_df_key] = st.session_state[_df_key].drop(columns=['raw_crustdata'])
-                # Also strip from results list
-                if 'results' in st.session_state and st.session_state['results']:
-                    for r in st.session_state['results']:
-                        if isinstance(r, dict) and 'raw_crustdata' in r:
-                            del r['raw_crustdata']
-                if 'enriched_results' in st.session_state and st.session_state['enriched_results']:
-                    for r in st.session_state['enriched_results']:
-                        if isinstance(r, dict) and 'raw_crustdata' in r:
-                            del r['raw_crustdata']
-                st.success("Raw data stripped!")
+                cleanup_memory()  # Use centralized cleanup
+                st.success("Memory optimized!")
                 st.rerun()
 
         if st.button("🗑️ Clear Debug Data", use_container_width=True):
@@ -3558,7 +3581,7 @@ api_key = load_api_key()
 has_crust_key = api_key and api_key != "YOUR_CRUSTDATA_API_KEY_HERE"
 
 # Show data status in header (always render to keep widget tree stable for tabs)
-_profile_count = len(st.session_state.get('results') or [])
+_profile_count = get_profile_count()
 st.info(f"📊 **{_profile_count}** profiles loaded" if _profile_count else "No profiles loaded — start from the Load tab")
 
 # Create tabs
@@ -3721,9 +3744,8 @@ with tab_upload:
 
     # ===== Preview =====
     # Shows loaded results from PhantomBuster or CSV upload
-    if 'results' in st.session_state and st.session_state['results']:
-        results_df = st.session_state.get('results_df')
-        if results_df is not None and not results_df.empty:
+    results_df = get_profiles_df()
+    if not results_df.empty:
             st.divider()
             st.markdown("### Preview")
 
@@ -3913,7 +3935,7 @@ with tab_upload:
                                 st.rerun()
 
                     # Show current loaded count if any
-                    existing_count = len(st.session_state.get('results', []))
+                    existing_count = get_profile_count()
                     if existing_count > 0:
                         st.caption(f"Currently loaded: **{existing_count}** profiles")
 
@@ -4869,9 +4891,10 @@ with tab_filter:
     st.markdown("### Email Enrichment (SalesQL)")
     salesql_key = load_salesql_key()
     if salesql_key:
-        if 'results' in st.session_state and st.session_state['results']:
-            current_count = len(st.session_state['results_df'])
-            already_enriched = (st.session_state['results_df']['salesql_email'].notna() & (st.session_state['results_df']['salesql_email'] != '')).sum() if 'salesql_email' in st.session_state['results_df'].columns else 0
+        current_df = get_profiles_df()
+        if not current_df.empty:
+            current_count = len(current_df)
+            already_enriched = (current_df['salesql_email'].notna() & (current_df['salesql_email'] != '')).sum() if 'salesql_email' in current_df.columns else 0
             not_enriched = current_count - already_enriched
             st.caption(f"{current_count} profiles | {already_enriched} already have emails | {not_enriched} remaining")
 

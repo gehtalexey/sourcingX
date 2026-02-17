@@ -489,7 +489,7 @@ def _build_session_data():
         'filter_stats', 'f2_filter_stats', 'last_load_count', 'last_load_file',
         'user_sheet_url',
         'active_screening_prompt', 'active_screening_role',
-        'jd_screening', 'extra_requirements'
+        'jd_screening'
     ]
     for key in keys_to_save:
         if key in st.session_state and st.session_state[key] is not None:
@@ -633,7 +633,7 @@ with st.sidebar:
             keys_to_clear = [
                 'results', 'results_df', 'enriched_results', 'enriched_df', 'screening_results',
                 'passed_candidates_df', 'filter_stats', 'f2_filter_stats', 'original_results_df',
-                'active_screening_prompt', 'active_screening_role', 'jd_screening', 'extra_requirements',
+                'active_screening_prompt', 'active_screening_role', 'jd_screening',
                 'filtered_out', 'f2_filtered_out', 'screening_batch_state', 'screening_batch_progress',
                 '_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols'
             ]
@@ -3006,7 +3006,7 @@ def get_screening_prompt() -> str:
     return prompt
 
 
-def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_requirements: str = "", tracker: 'UsageTracker' = None, mode: str = "detailed", system_prompt: str = None) -> dict:
+def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker: 'UsageTracker' = None, mode: str = "detailed", system_prompt: str = None) -> dict:
     """Screen a profile against a job description using OpenAI.
 
     Args:
@@ -3277,6 +3277,7 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
 - **All Titles (career history)**: {', '.join(all_titles) if all_titles else 'N/A'}
 - **All Employers (career history)**: {', '.join(all_employers) if all_employers else 'N/A'}
 - **Skills**: {', '.join(skills_list[:30]) if skills_list else 'N/A'}
+- **Education**: {education_str or 'N/A'}
 - **Summary/About**: {summary[:500] if summary else 'N/A'}
 {work_history_warning}
 ## Work History (with calculated durations):
@@ -3295,28 +3296,15 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
         json_schema = '{"score": <1-10>, "fit": "<Strong Fit|Good Fit|Partial Fit|Not a Fit>", "summary": "<2-3 sentences about the candidate>", "why": "<2-3 sentences explaining the score>", "strengths": ["<strength1>", "<strength2>"], "concerns": ["<concern1>", "<concern2>"]}'
         max_tokens = 500
 
-    # Detect rejection keywords in JD or extra requirements
+    # Detect rejection keywords in screening requirements
     rejection_keywords = ['reject', 'exclude', 'don\'t want', 'do not want', 'must not', 'should not',
                           'not looking for', 'no candidates from', 'not interested in', 'disqualify', 'overqualified']
     must_have_keywords = ['must have', 'is a must', 'required', 'mandatory', 'must be mentioned', 'must include']
-    combined_text = (job_description + ' ' + (extra_requirements or '')).lower()
+    combined_text = job_description.lower()
     has_rejection_criteria = any(kw in combined_text for kw in rejection_keywords)
     has_must_have_criteria = any(kw in combined_text for kw in must_have_keywords)
 
-    # Build extra requirements section with strong rejection language
-    extra_req_section = ""
-    if extra_requirements:
-        extra_req_section = f"""
-## CRITICAL - Extra Requirements (HARD RULES - MUST enforce):
-{extra_requirements}
-
-ENFORCEMENT RULES:
-- If a requirement says "must have X" or "X is a must" → Candidate MUST show X in their profile or score ≤3
-- If a requirement says "reject Y" → If candidate matches Y → Score 1-2, mark as "Not a Fit"
-- These are DISQUALIFIERS, not preferences
-"""
-
-    # Add rejection enforcement if ANY rejection keywords found (in JD or extra requirements)
+    # Add rejection enforcement if ANY rejection keywords found
     rejection_warning = ""
     if has_rejection_criteria or has_must_have_criteria:
         rejection_warning = """
@@ -3358,11 +3346,18 @@ Past IDF/army service is MANDATORY in Israel and is a POSITIVE indicator.
 Do NOT mention it as a concern - it's a strength. Only reject if CURRENTLY serving.
 """
 
-    user_prompt = f"""Evaluate this candidate against the job description.
+    user_prompt = f"""Evaluate this candidate against the screening requirements below.
 
-## Job Description:
+## Screening Requirements:
 {job_description}
-{extra_req_section}{rejection_warning}
+{rejection_warning}
+IMPORTANT RULES:
+- Any "must have" requirement is a HARD filter. If the candidate clearly does NOT meet it, score 3 or below.
+- Use the "Work History" section above with calculated durations to determine years of experience. Do NOT say "duration not specified" when dates and durations are provided.
+- When work history dates are missing, infer from the number of positions, career trajectory, title seniority, and other signals. Make your BEST assessment — never default to "can't determine" or "insufficient data".
+- Differentiate scores: a candidate at a top company (Wiz, Rapyd, Fireblocks, Cybereason, etc.) with the right title should score higher than someone at an unknown company with the same title.
+- Be specific in your reasoning — reference actual companies, durations, and titles from the profile.
+
 ## Candidate Profile:
 {profile_summary}
 
@@ -3373,12 +3368,12 @@ Respond with ONLY valid JSON in this exact format:
         # Use provided prompt or fall back to default
         prompt_to_use = system_prompt if system_prompt else get_screening_prompt()
 
-        # Always append company description analysis and extra requirements enforcement
+        # Always append company description analysis and enforcement rules
         _company_desc_reminder = (
             "\n\n## Company Description Analysis (CRITICAL)\n"
             "The profile JSON includes `employer_linkedin_description` for each employer. "
             "You MUST read these descriptions to determine each company's industry/domain. "
-            "When the job description or extra requirements mention a specific industry "
+            "When the job description mentions a specific industry "
             "(e.g. cybersecurity, fintech, healthcare), verify from employer descriptions "
             "that the candidate actually worked in that industry. "
             "Do NOT rely only on company name recognition — read the descriptions. "
@@ -3408,6 +3403,25 @@ Respond with ONLY valid JSON in this exact format:
             prompt_to_use += _rejection_enforcement
         # Always add anti-hallucination warning
         prompt_to_use += _no_hallucination
+
+        # Always append assessment rules
+        _assessment_rules = (
+            "\n\n## Assessment Rules (MANDATORY)\n"
+            "1. NEVER say 'work history not specified', 'duration unclear', or 'insufficient data'. "
+            "The profile includes a pre-calculated work history with dates and durations. USE IT.\n"
+            "2. When dates are truly missing, infer experience from: number of positions, title progression, "
+            "company types, and skill depth. State your inference, don't punt.\n"
+            "3. 'Must have' requirements in the screening requirements are HARD filters. "
+            "If a candidate clearly fails a must-have → score 3 or below, regardless of other strengths.\n"
+            "4. DIFFERENTIATE scores. Two candidates should NOT get the same score unless they are truly equivalent. "
+            "Company reputation, title seniority, tenure, and skill depth should all create score differences.\n"
+            "5. Be SPECIFIC in summary/why — mention actual company names, years, titles. "
+            "Generic statements like 'strong background' without evidence are not acceptable.\n"
+            "6. LinkedIn profiles are NOT CVs. Sparse profiles from strong companies are still strong candidates. "
+            "Score based on available signals, not profile completeness."
+        )
+        if 'Assessment Rules' not in prompt_to_use:
+            prompt_to_use += _assessment_rules
 
         # Retry with exponential backoff on rate limit (429) errors
         response = None
@@ -3480,7 +3494,7 @@ Respond with ONLY valid JSON in this exact format:
 
 
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
-                          extra_requirements: str = "", max_workers: int = 50,
+                          max_workers: int = 50,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
                           system_prompt: str = None) -> list:
     """Screen multiple profiles in parallel using ThreadPoolExecutor.
@@ -3489,7 +3503,6 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         profiles: List of profile dicts to screen
         job_description: The job description to screen against
         openai_api_key: OpenAI API key (we create client per thread for safety)
-        extra_requirements: Additional screening criteria
         max_workers: Number of concurrent threads (default 50 for Tier 3)
         progress_callback: Function(completed, total, result) called after each profile
         cancel_flag: Dict with 'cancelled' key to check for cancellation
@@ -3514,7 +3527,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         # Create client per thread to avoid thread-safety issues
         client = OpenAI(api_key=openai_api_key)
         try:
-            result = screen_profile(profile, job_description, client, extra_requirements, tracker=tracker, mode=mode, system_prompt=system_prompt)
+            result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, system_prompt=system_prompt)
             # Add profile info to result
             name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
             if not name:
@@ -6168,24 +6181,14 @@ with tab_screening:
         else:
             st.caption(f"All {len(profiles)} profiles have full data for AI screening.")
 
-        # Job Description Input
-        st.markdown("### Job Description")
+        # AI Screening Requirements Input
+        st.markdown("### AI Screening Requirements")
         job_description = st.text_area(
-            "Paste the job description",
+            "Paste the screening requirements",
             height=150,
             key="jd_screening",
-            placeholder="Paste the full job description here..."
+            placeholder="Paste the job description, must-haves, and any specific criteria for AI screening..."
         )
-
-        # Extra Requirements (optional)
-        extra_requirements = ""  # Default value
-        with st.expander("Extra Requirements (optional)"):
-            extra_requirements = st.text_area(
-                "Additional must-have criteria",
-                height=100,
-                key="extra_requirements",
-                placeholder="e.g., Must have AWS experience, Hebrew speaker preferred, etc."
-            )
 
         # Role Detection and Prompt Selection
         st.markdown("### Screening Prompt")
@@ -6215,7 +6218,7 @@ with tab_screening:
                 options=role_options,
                 index=0,
                 key="screening_role_select",
-                help="Auto-detect picks the best prompt based on job description keywords"
+                help="Auto-detect picks the best prompt based on screening requirements keywords"
             )
 
         with col_detected:
@@ -6223,7 +6226,7 @@ with tab_screening:
                 if job_description:
                     st.success(f"Detected: **{detected_name}**")
                 else:
-                    st.info("Paste job description to auto-detect role")
+                    st.info("Paste screening requirements to auto-detect role")
 
         # Get the actual prompt to use
         if selected_role == 'Auto-detect':
@@ -6447,7 +6450,7 @@ with tab_screening:
                         test_mode = 'quick' if screening_mode == "Quick (cheaper)" else 'detailed'
                         test_prompt = st.session_state.get('active_screening_prompt', active_prompt)
                         st.write(f"Testing with first profile ({test_mode} mode, prompt: {active_name})...")
-                        result = screen_profile(profiles[0], job_description, client, extra_requirements, mode=test_mode, system_prompt=test_prompt)
+                        result = screen_profile(profiles[0], job_description, client, mode=test_mode, system_prompt=test_prompt)
                         st.write("Result:", result)
                     except Exception as e:
                         import traceback
@@ -6621,7 +6624,6 @@ with tab_screening:
                 batch_state = st.session_state.get('screening_batch_state', {})
                 profiles_to_screen = batch_state.get('profiles', [])
                 job_desc = batch_state.get('job_description', '')
-                extra_req = batch_state.get('extra_requirements', '')
                 screen_mode = batch_state.get('mode', 'detailed')
                 system_prompt = batch_state.get('system_prompt')
                 batch_size = 5  # Smaller batches for better memory management
@@ -6643,7 +6645,6 @@ with tab_screening:
                             batch_profiles,
                             job_desc,
                             openai_key,
-                            extra_requirements=extra_req,
                             max_workers=min(10, len(batch_profiles)),
                             mode=screen_mode,
                             system_prompt=system_prompt,
@@ -6816,7 +6817,6 @@ with tab_screening:
                 st.session_state['screening_batch_state'] = {
                     'profiles': profiles_to_screen,
                     'job_description': job_description,
-                    'extra_requirements': extra_requirements if extra_requirements else "",
                     'mode': 'quick' if screening_mode == "Quick (cheaper)" else 'detailed',
                     'system_prompt': st.session_state.get('active_screening_prompt', active_prompt),
                     'current_batch': 0,
@@ -6832,7 +6832,7 @@ with tab_screening:
                 st.info(f"{action} screening of {len(profiles_to_screen)} profiles in batches of 10...")
                 st.rerun()
         else:
-            st.warning("Please paste a job description to start screening")
+            st.warning("Please paste AI screening requirements to start screening")
 
         # Show screening results
         if 'screening_results' in st.session_state and st.session_state['screening_results']:

@@ -16,8 +16,6 @@ Screen enriched LinkedIn profiles against the provided job description. Provide 
 
 1. **Job Description**: User will provide via argument (file path) or paste directly
 2. **Enriched Profiles**: Use the filtered CSV at `filtered_profiles.csv` or ask user which file to use
-3. **Extra Requirements**: User may provide additional must-have criteria
-
 ## Output Format
 
 For each candidate, provide:
@@ -85,7 +83,7 @@ Give higher scores when candidate has:
 Enriched profile data includes `employer_linkedin_description` for each employer. You MUST read these descriptions carefully before scoring.
 
 - Use company descriptions to determine **what industry/domain** each company operates in (cybersecurity, fintech, healthcare, e-commerce, etc.)
-- When the job description or extra requirements mention a specific industry (e.g. "cybersecurity company", "fintech", "healthcare"), CHECK each employer's description to verify if the candidate has worked in that industry
+- When the job description mentions a specific industry (e.g. "cybersecurity company", "fintech", "healthcare"), CHECK each employer's description to verify if the candidate has worked in that industry
 - Do NOT rely only on company name recognition — many relevant companies are not well-known. Read the description to understand what the company actually does
 - If the job requires experience at a specific type of company (e.g. "must have cybersecurity company experience") and NO employer description matches that industry → this is a significant negative signal, score accordingly
 - Company industry match should be weighted heavily when the job description explicitly requires it
@@ -95,8 +93,7 @@ Enriched profile data includes `employer_linkedin_description` for each employer
 1. **Be Direct**: Don't sugarcoat. Give honest evaluations.
 2. **Use Evidence**: Reference specific profile data (years, skills, companies).
 3. **Be Calibrated**: A 10/10 should be rare. Most good candidates are 6-8.
-4. **Check Extra Requirements**: If user provides must-haves, evaluate against those first.
-5. **Company > Skills**: Strong company pedigree compensates for skill list gaps.
-6. **Full-stack OK**: Full-stack title with right stack is fine for backend roles.
+4. **Company > Skills**: Strong company pedigree compensates for skill list gaps.
+5. **Full-stack OK**: Full-stack title with right stack is fine for backend roles.
 
 **Note**: For generating personalized email subject lines and openers, use the `/email-opener` skill.

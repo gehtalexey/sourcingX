@@ -30,7 +30,7 @@ _COMPANY_DESCRIPTION_ANALYSIS = """
 ## Company Description Analysis (CRITICAL)
 The profile data includes `employer_linkedin_description` for each employer. You MUST read these descriptions carefully before scoring.
 - Use company descriptions to determine **what industry/domain** each company operates in (cybersecurity, fintech, healthcare, e-commerce, etc.)
-- When the job description or extra requirements mention a specific industry (e.g. "cybersecurity company", "fintech", "healthcare"), CHECK each employer's description to verify if the candidate has worked in that industry
+- When the job description mentions a specific industry (e.g. "cybersecurity company", "fintech", "healthcare"), CHECK each employer's description to verify if the candidate has worked in that industry
 - Do NOT rely only on company name recognition — many relevant companies are not well-known. Read the description to understand what the company actually does
 - If the job requires experience at a specific type of company (e.g. "must have cybersecurity company experience") and NO employer description matches that industry → this is a significant negative signal, score accordingly
 - Company industry match should be weighted heavily when the job description explicitly requires it"""

@@ -3312,9 +3312,11 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
 The requirements contain HARD RULES. These are NOT preferences - they are disqualifiers.
 
 ### REJECTION RULES (Score 1-2 if matched):
-1. "Reject overqualified/VP/Director/CTO/Head of" → Check CURRENT TITLE. If title contains VP, Director, CTO, Chief, Head of, or similar executive titles → Score 1-2, "Not a Fit"
+1. "Reject overqualified" → ONLY reject if CURRENT TITLE contains: VP, Director, CTO, Chief, Head of, Senior Manager, Group Manager, or C-level titles.
+   IMPORTANT: "Team Lead", "Tech Lead", "Team Leader", "Team Manager" are NOT overqualified — these are the TARGET level. Do NOT reject them.
 2. "Reject junior/students/freelancers" → If current role is Junior, Intern, Student, or Freelance → Score 1-2
-3. "Reject project companies" → If current company is consulting/outsourcing (Matrix, Tikal, Ness, Sela, etc.) → Score 1-2
+3. "Reject project companies" → If current company is consulting/outsourcing (Matrix, Tikal, Ness, Sela, Malam Team, Bynet, SQLink, etc.) → Score 1-2
+   IMPORTANT: Cloud-focused companies like AllCloud, DoiT, Cloudride are LEGITIMATE DevOps employers, NOT consulting firms. Do NOT reject them.
 4. "Reject [specific type]" → Apply literally to CURRENT position
 
 ### MUST-HAVE RULES — TIERED SCORING:

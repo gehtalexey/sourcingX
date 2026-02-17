@@ -4559,15 +4559,28 @@ with tab_filter:
                 key="include_title_keywords"
             )
 
-            # Duration filters (from Phantom data)
-            st.markdown("**Duration Filters:**")
-            dur_col1, dur_col2 = st.columns(2)
-            with dur_col1:
-                min_role_months = st.number_input("Min months in role", min_value=0, max_value=120, value=0, key="min_role_months")
-                min_company_months = st.number_input("Min months at company", min_value=0, max_value=120, value=0, key="min_company_months")
-            with dur_col2:
-                max_role_months = st.number_input("Max months in role", min_value=0, max_value=240, value=0, help="0 = no limit", key="max_role_months")
-                max_company_months = st.number_input("Max months at company", min_value=0, max_value=240, value=0, help="0 = no limit", key="max_company_months")
+            # Duration filters (only show if data has duration columns - typically PhantomBuster)
+            has_role_duration = 'durationInRole' in df.columns or 'current_years_in_role' in df.columns
+            has_company_duration = 'durationInCompany' in df.columns or 'current_years_at_company' in df.columns
+
+            min_role_months = 0
+            max_role_months = 0
+            min_company_months = 0
+            max_company_months = 0
+
+            if has_role_duration or has_company_duration:
+                st.markdown("**Duration Filters:**")
+                dur_col1, dur_col2 = st.columns(2)
+                with dur_col1:
+                    if has_role_duration:
+                        min_role_months = st.number_input("Min months in role", min_value=0, max_value=120, value=0, key="min_role_months")
+                    if has_company_duration:
+                        min_company_months = st.number_input("Min months at company", min_value=0, max_value=120, value=0, key="min_company_months")
+                with dur_col2:
+                    if has_role_duration:
+                        max_role_months = st.number_input("Max months in role", min_value=0, max_value=240, value=0, help="0 = no limit", key="max_role_months")
+                    if has_company_duration:
+                        max_company_months = st.number_input("Max months at company", min_value=0, max_value=240, value=0, help="0 = no limit", key="max_company_months")
 
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
         with btn_col1:

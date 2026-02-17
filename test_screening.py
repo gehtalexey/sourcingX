@@ -55,46 +55,39 @@ Reject project companies (consulting/outsourcing).
 # Test profiles - add profiles that were misclassified
 TEST_PROFILES = [
     {
+        "name": "Royee Tager",
+        "current_title": "DevOps Engineer",  # From DB - stale data
+        "current_company": "Luminate Security acquired by Symantec",
+        "headline": "DevOps Engineer at Luminate Security acquired by Symantec / Broadcom",
+        "all_employers": "Dell EMC XtremIO, eXelate, Hewlett Packard Enterprise, Jungo, Mavenir, Verint",
+        "all_titles": "DevOps & IT Engineer, DevOps Technical Lead, IT Specialist, System Integration, System Integration & Deployment, Unix & Linux System Administrator",
+        "skills": "Linux, Bash, Solaris, Apache, Red Hat Linux, Unix, Virtualization, Cloud Computing, VMware, RedHat, Scripting, Databases, NetApp, Storage, Windows Server, Puppet, CentOS, MySQL, Shell Scripting, IIS, Netbackup, Perl, CGI, NFS, DNS, Ubuntu, Xen, Subversion, Amazon Web Services (AWS), Operating Systems, Python, DevOps, Git, Jenkins, System Deployment, Docker, Ansible, Amazon EC2, Configuration Management, Github, Amazon S3, Vagrant, Tomcat, docker, Continuous Integration, Microservices, Kubernetes, Agile Methodologies, Apache Mesos, Big Data",
+        "summary": "Specialties: Linux & Unix OS (Red Hat, CentOS, Debain, Ubuntu, Solaris), Windows...",
+        "past_positions": """
+- DevOps Technical Lead at eXelate (Dec 2015 - Aug 2017)
+- DevOps & IT Engineer at Dell EMC XtremIO (Dec 2013 - Nov 2015)
+- IT Specialist at Jungo (Dec 2011 - Nov 2013)
+- Unix & Linux System Administrator at Hewlett Packard Enterprise (May 2009 - Nov 2011)
+- System Integration at Mavenir (Aug 2007 - Apr 2009)
+- System Integration & Deployment at Verint (Apr 2004 - Jul 2007)
+        """,
+        "expected_result": "PARTIAL FIT (5-6) - Has Kubernetes in skills, has DevOps Technical Lead experience, but NO Team Leader title. Data is stale/incomplete from Crustdata."
+    },
+    {
         "name": "Boaz Elgat",
         "current_title": "Head of DevOps",  # Should be REJECTED (overqualified)
         "current_company": "AI21 Labs",
+        "headline": "Head of DevOps at AI21 Labs",
         "all_employers": "AI21 Labs, JFrog, Transmit Security, Payoneer",
         "all_titles": "Head of DevOps, DevOps Team Lead, Senior DevOps Engineer",
         "skills": "Kubernetes, Terraform, AWS, GCP, Docker, CI/CD",
+        "summary": "",
         "past_positions": """
 - Head of DevOps at AI21 Labs (2022 - Present)
 - DevOps Team Lead at JFrog (2019 - 2022)
 - Senior DevOps Engineer at Transmit Security (2017 - 2019)
         """,
         "expected_result": "NOT A FIT - Title is 'Head of DevOps' which should be rejected as overqualified"
-    },
-    {
-        "name": "Roy Hadash",
-        "current_title": "Senior SRE Group Manager",
-        "current_company": "Microsoft",
-        "all_employers": "Microsoft, Elbit Systems, Unit 8200",
-        "all_titles": "Senior SRE Group Manager, Principal Engineering Manager, Engineering Manager",
-        "skills": "Azure, CI/CD, Python, Leadership",  # NO KUBERNETES!
-        "past_positions": """
-- Senior SRE Group Manager at Microsoft (2020 - Present)
-- Principal Engineering Manager at Microsoft (2017 - 2020)
-- Engineering Manager at Elbit Systems (2014 - 2017)
-        """,
-        "expected_result": "PARTIAL FIT or NOT A FIT - No Kubernetes mentioned (must-have), also may be overqualified"
-    },
-    {
-        "name": "Sagi Forbes",
-        "current_title": "DevOps Tech Lead",
-        "current_company": "SQream Technologies",
-        "all_employers": "SQream Technologies, Quantum Machines, ObserveIT, HPE",
-        "all_titles": "DevOps Tech Lead, DevOps Engineer, System Administrator",
-        "skills": "Kubernetes, Terraform, AWS, GCP, Docker, Jenkins, Python",
-        "past_positions": """
-- DevOps Tech Lead at SQream Technologies (2021 - Present) [3 years]
-- DevOps Engineer at Quantum Machines (2019 - 2021) [2 years]
-- DevOps Engineer at ObserveIT (2016 - 2019) [3 years]
-        """,
-        "expected_result": "GOOD FIT or STRONG FIT - Has Kubernetes, Tech Lead experience, 6+ years DevOps"
     },
 ]
 
@@ -130,15 +123,17 @@ def screen_profile_test(profile: dict, job_description: str, extra_requirements:
     """Screen a single profile and return the result."""
     client = OpenAI(api_key=OPENAI_KEY)
 
-    # Build profile summary
-    profile_summary = f"""
-Name: {profile.get('name', 'Unknown')}
-Current Title: {profile.get('current_title', 'N/A')}
-Current Company: {profile.get('current_company', 'N/A')}
-All Employers: {profile.get('all_employers', 'N/A')}
-All Titles: {profile.get('all_titles', 'N/A')}
-Skills: {profile.get('skills', 'N/A')}
-Work History:
+    # Build profile summary (matching dashboard.py format)
+    profile_summary = f"""## Key Profile Fields (READ THESE CAREFULLY):
+- **CURRENT TITLE**: {profile.get('current_title', 'N/A')}
+- **CURRENT COMPANY**: {profile.get('current_company', 'N/A')}
+- **Headline**: {profile.get('headline', 'N/A')}
+- **All Titles (career history)**: {profile.get('all_titles', 'N/A')}
+- **All Employers (career history)**: {profile.get('all_employers', 'N/A')}
+- **Skills**: {profile.get('skills', 'N/A')}
+- **Summary/About**: {profile.get('summary', 'N/A')}
+
+## Work History (with calculated durations):
 {profile.get('past_positions', 'N/A')}
 """
 
@@ -167,6 +162,16 @@ ENFORCEMENT RULES:
 1. "Kubernetes is a must" → Search the ENTIRE profile for "Kubernetes" or "K8s". If NOT found → Score ≤3
 2. "Must have N years experience" → Calculate from work history. If not met → Score ≤3
 3. "Must have team lead experience" → Check if ANY role had "lead", "manager" in title
+
+### HOW TO CHECK (use ALL available fields):
+- **CURRENT TITLE**: The candidate's current job title
+- **CURRENT COMPANY**: The candidate's current employer
+- **Headline**: Often contains current title and company
+- **All Titles (career history)**: Array of ALL job titles - check for leadership roles
+- **All Employers (career history)**: Array of ALL companies worked at
+- **Skills**: Array of skills - search for required technologies here
+- **Summary/About**: LinkedIn "About" section - may contain skills, experience details
+- **Work History**: Detailed positions with dates
 
 ### CRITICAL:
 - A candidate missing a MUST-HAVE can NEVER be "Strong Fit" or "Good Fit"

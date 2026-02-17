@@ -3182,219 +3182,6 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
         return str(value)[:max_len] if value else 'N/A'
 
     # Extract full work history with dates from raw_crustdata
-    def format_work_history(profile):
-        """Format work history with dates for accurate experience calculation.
-
-        Returns tuple: (formatted_history_str, lead_experience_months, devops_experience_months, lead_roles_list)
-        """
-        from datetime import datetime
-        from dateutil.relativedelta import relativedelta
-        import re
-
-        def parse_date(date_str):
-            """Parse ISO date string to datetime."""
-            if not date_str:
-                return None
-            try:
-                # Handle ISO format: "2019-04-01T00:00:00+00:00"
-                if 'T' in str(date_str):
-                    return datetime.fromisoformat(date_str.replace('+00:00', '').replace('Z', ''))
-                # Handle simple format: "2019-04"
-                return datetime.strptime(str(date_str)[:7], '%Y-%m')
-            except:
-                return None
-
-        def format_date(dt):
-            """Format datetime as 'Mon YYYY'."""
-            if not dt:
-                return ''
-            return dt.strftime('%b %Y')
-
-        def calc_duration(start_dt, end_dt):
-            """Calculate duration between dates."""
-            if not start_dt:
-                return ''
-            if not end_dt:
-                end_dt = datetime.now()
-            try:
-                rd = relativedelta(end_dt, start_dt)
-                parts = []
-                if rd.years:
-                    parts.append(f"{rd.years}y")
-                if rd.months:
-                    parts.append(f"{rd.months}m")
-                return ' '.join(parts) if parts else '<1m'
-            except:
-                return ''
-
-        def is_lead_role(title):
-            """Check if title indicates a leadership role."""
-            if not title:
-                return False
-            title_lower = title.lower()
-            lead_patterns = [
-                r'\blead\b', r'\bleader\b', r'\bmanager\b', r'\bhead\b', r'\bdirector\b',
-                r'\btl\b', r'\bteam\s*lead', r'\btech\s*lead', r'\bstaff\b', r'\bprincipal\b',
-                r'\bvp\b', r'\bchief\b', r'\bcto\b', r'\bcio\b'
-            ]
-            return any(re.search(p, title_lower) for p in lead_patterns)
-
-        def get_role_categories(title):
-            """Categorize a role into one or more categories. Returns list of category names."""
-            if not title:
-                return []
-            title_lower = title.lower()
-            categories = []
-
-            # Role category definitions - order matters (more specific first)
-            role_patterns = {
-                'DevOps/SRE/Platform': [
-                    r'devops', r'\bsre\b', r'site reliability', r'platform engineer',
-                    r'cloud engineer', r'devsecops', r'infrastructure engineer'
-                ],
-                'Backend/Software': [
-                    r'backend', r'back-end', r'software engineer', r'software developer',
-                    r'server.?side', r'\bjava\b', r'python developer', r'node\.?js',
-                    r'golang', r'\bgo\b developer', r'ruby', r'\.net', r'c\+\+', r'\bc#'
-                ],
-                'Frontend': [
-                    r'frontend', r'front-end', r'front end', r'react', r'angular', r'vue',
-                    r'javascript developer', r'ui developer', r'web developer'
-                ],
-                'Fullstack': [
-                    r'fullstack', r'full-stack', r'full stack'
-                ],
-                'Mobile': [
-                    r'mobile', r'ios', r'android', r'swift', r'kotlin', r'react native', r'flutter'
-                ],
-                'Data/ML/AI': [
-                    r'data engineer', r'data scientist', r'machine learning', r'\bml\b',
-                    r'\bai\b engineer', r'big data', r'data analyst', r'analytics engineer'
-                ],
-                'QA/Test': [
-                    r'\bqa\b', r'quality', r'test engineer', r'sdet', r'automation engineer',
-                    r'test automation', r'quality assurance'
-                ],
-                'Security/InfoSec': [
-                    r'security', r'infosec', r'cybersec', r'penetration', r'appsec',
-                    r'security engineer', r'soc analyst'
-                ],
-                'DBA/Database': [
-                    r'\bdba\b', r'database admin', r'database engineer'
-                ],
-                'SysAdmin/IT': [
-                    r'sysadmin', r'system admin', r'systems admin', r'it support',
-                    r'help desk', r'it specialist', r'network admin', r'linux admin'
-                ],
-                'Product/PM': [
-                    r'product manager', r'product owner', r'\bpm\b', r'program manager'
-                ],
-                'Design/UX': [
-                    r'designer', r'\bux\b', r'\bui\b', r'product design'
-                ]
-            }
-
-            for category, patterns in role_patterns.items():
-                if any(re.search(p, title_lower) for p in patterns):
-                    categories.append(category)
-
-            # If no specific category matched, mark as "Other"
-            if not categories:
-                categories.append('Other')
-
-            return categories
-
-        raw = profile.get('raw_crustdata') or profile.get('raw_data') or {}
-
-        # Try past_employers first (Crustdata format)
-        past_employers = raw.get('past_employers', [])
-        current_employers = raw.get('current_employers', [])
-        all_positions = current_employers + past_employers
-
-        if all_positions:
-            positions = []
-            total_months = 0
-            lead_months = 0
-            lead_roles = []  # Track lead roles for explicit reporting
-            category_months = {}  # Track months by role category
-            category_roles = {}  # Track role details by category
-
-            for emp in all_positions[:15]:  # Limit to 15 positions
-                if isinstance(emp, dict):
-                    title = emp.get('employee_title') or emp.get('title') or ''
-                    company = emp.get('employer_name') or emp.get('company_name') or ''
-                    start_str = emp.get('start_date') or emp.get('started_on') or ''
-                    end_str = emp.get('end_date') or emp.get('ended_on') or ''
-
-                    start_dt = parse_date(start_str)
-                    end_dt = parse_date(end_str)
-                    duration = calc_duration(start_dt, end_dt)
-
-                    # Track total experience
-                    role_months = 0
-                    if start_dt:
-                        end_for_calc = end_dt or datetime.now()
-                        role_months = (end_for_calc.year - start_dt.year) * 12 + (end_for_calc.month - start_dt.month)
-                        role_months = max(0, role_months)
-                        total_months += role_months
-
-                    # Track LEAD experience
-                    if is_lead_role(title) and role_months > 0:
-                        lead_months += role_months
-                        lead_roles.append(f"{title} at {company} ({duration})")
-
-                    # Track experience by category
-                    role_categories = get_role_categories(title)
-                    for cat in role_categories:
-                        if cat not in category_months:
-                            category_months[cat] = 0
-                            category_roles[cat] = []
-                        category_months[cat] += role_months
-                        if role_months > 0:
-                            category_roles[cat].append(f"{title} at {company} ({duration})")
-
-                    if title or company:
-                        start_fmt = format_date(start_dt) or '?'
-                        end_fmt = format_date(end_dt) or 'Present'
-                        # Mark lead roles with ⭐ and show categories
-                        lead_marker = " ⭐LEAD" if is_lead_role(title) else ""
-                        cat_marker = f" [{', '.join(role_categories)}]" if role_categories and role_categories != ['Other'] else ""
-                        pos_str = f"- {title} at {company} ({start_fmt} - {end_fmt})"
-                        if duration:
-                            pos_str += f" [{duration}]{lead_marker}{cat_marker}"
-                        positions.append(pos_str)
-
-            if positions:
-                total_years = round(total_months / 12, 1)
-                lead_years = lead_months / 12
-
-                # Format lead experience summary
-                lead_summary = f"**LEAD/MANAGEMENT EXPERIENCE: {lead_months} months ({lead_years:.1f} years)**"
-                if lead_roles:
-                    lead_summary += f"\n  Lead roles: {'; '.join(lead_roles)}"
-                else:
-                    lead_summary += "\n  Lead roles: NONE FOUND"
-
-                # Format experience by category
-                category_summary_lines = []
-                # Sort categories by months (descending)
-                sorted_categories = sorted(category_months.items(), key=lambda x: x[1], reverse=True)
-                for cat, months in sorted_categories:
-                    if months > 0 and cat != 'Other':
-                        years = months / 12
-                        roles_str = '; '.join(category_roles[cat][:3])  # Show top 3 roles
-                        if len(category_roles[cat]) > 3:
-                            roles_str += f" (+{len(category_roles[cat])-3} more)"
-                        category_summary_lines.append(f"**{cat.upper()} EXPERIENCE: {months} months ({years:.1f} years)**\n  Roles: {roles_str}")
-
-                category_summary = '\n'.join(category_summary_lines) if category_summary_lines else "No specific technical category detected"
-
-                header = f"Total experience: ~{total_years} years\n\n{lead_summary}\n\n{category_summary}\n\n"
-                return header + '\n'.join(positions)
-
-        # Fallback to past_positions field
-        return profile.get('past_positions', 'N/A')
-
     # Get full raw Crustdata JSON for comprehensive screening
     raw_crustdata = profile.get('raw_crustdata') or profile.get('raw_data') or {}
     if isinstance(raw_crustdata, str):
@@ -3439,47 +3226,18 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
     if len(raw_json_str) > 8000:  # Truncate if too large
         raw_json_str = raw_json_str[:8000] + "\n... (truncated)"
 
-    # Get formatted work history with calculated durations
-    work_history_formatted = format_work_history(profile)
-
-    # Extract key fields for easy reading
-    # Current position from profile (DB) or raw data
-    current_title = profile.get('current_title') or raw_crustdata.get('title') or 'N/A'
-    current_company = profile.get('current_company') or 'N/A'
-    # Also check current_employers array
-    current_employers = raw_crustdata.get('current_employers', [])
-    if current_employers and isinstance(current_employers, list) and len(current_employers) > 0:
-        emp = current_employers[0]
-        if isinstance(emp, dict):
-            current_title = emp.get('employee_title') or emp.get('title') or current_title
-            current_company = emp.get('employer_name') or emp.get('company_name') or current_company
-
-    headline = raw_crustdata.get('headline', 'N/A')
-    summary = raw_crustdata.get('summary', 'N/A')
-    all_titles = raw_crustdata.get('all_titles', [])
-    all_employers = raw_crustdata.get('all_employers', [])
-    skills_list = raw_crustdata.get('skills', [])
-
     # Check for missing work history
-    has_work_history = bool(work_history_formatted and work_history_formatted.strip() and work_history_formatted != 'N/A')
+    has_work_history = bool(
+        (raw_crustdata.get('past_employers') and len(raw_crustdata.get('past_employers', [])) > 0) or
+        (raw_crustdata.get('current_employers') and len(raw_crustdata.get('current_employers', [])) > 0)
+    )
     work_history_warning = ""
     if not has_work_history:
-        work_history_warning = "\n⚠️ WARNING: Work history data is MISSING or INCOMPLETE. Evaluate based on available fields (title, skills, headline) but note this limitation."
+        work_history_warning = "\n⚠️ WARNING: Work history (past_employers/current_employers) is MISSING. Score as Partial Fit (5-6) unless rejection criteria apply."
 
-    profile_summary = f"""## Key Profile Fields (READ THESE CAREFULLY):
-- **CURRENT TITLE** (AUTHORITATIVE): {current_title}
-- **CURRENT COMPANY**: {current_company}
-- **Headline** (may be stale - trust CURRENT TITLE above): {headline}
-- **All Titles (career history)**: {', '.join(all_titles) if all_titles else 'N/A'}
-- **All Employers (career history)**: {', '.join(all_employers) if all_employers else 'N/A'}
-- **Skills**: {', '.join(skills_list[:30]) if skills_list else 'N/A'}
-- **Education**: {education_str or 'N/A'}
-- **Summary/About**: {summary[:500] if summary else 'N/A'}
-{work_history_warning}
-## Work History (with calculated durations):
-{work_history_formatted}
-
-## Full Profile Data (JSON):
+    # Simplified prompt: only raw JSON + instructions
+    profile_summary = f"""{work_history_warning}
+## Candidate Profile (Raw JSON):
 ```json
 {raw_json_str}
 ```"""
@@ -3537,49 +3295,37 @@ Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requi
 
 **Score 1-2 (Not a Fit — hard reject)**: Candidate matches a REJECTION criterion (overqualified, junior, consulting company, etc.)
 
-### EXPERIENCE CALCULATION (PRE-CALCULATED + VERIFICATION):
+### EXPERIENCE CALCULATION (FROM RAW JSON):
 
-**We have PRE-CALCULATED experience values. You must VERIFY them against the raw JSON.**
+**Read the raw JSON and calculate experience directly:**
 
-The "Work History" section contains PRE-CALCULATED values by category:
-- **LEAD/MANAGEMENT EXPERIENCE: X months** - Total leadership experience (Lead, Manager, TL, Director, etc.)
-- **[CATEGORY] EXPERIENCE: X months** - Experience by role type (DevOps/SRE, Backend/Software, Frontend, QA/Test, Data/ML, Mobile, Security, etc.)
-- Roles marked with ⭐LEAD are leadership roles
-- Roles marked with [Category] show their role type
+**JSON Structure:**
+- `current_employers[]` - Current positions (end_date is null)
+- `past_employers[]` - Past positions with start_date and end_date
+- Each position has: `employee_title`, `employer_name`, `start_date`, `end_date`
 
-**YOUR JOB: VERIFY THE CALCULATIONS**
-1. READ the pre-calculated values from Work History section
-2. VERIFY by checking the raw JSON `current_employers` and `past_employers` arrays:
-   - Check `start_date` and `end_date` for each position
-   - Verify the duration calculation makes sense
-   - Verify the role was correctly classified (e.g., "DevOps Lead" should be both LEAD and DEVOPS)
-3. If the pre-calculated value looks CORRECT → USE IT for scoring
-4. If you find an ERROR in the calculation → Use your own calculation and NOTE the discrepancy
+**How to calculate duration:**
+- Parse `start_date` and `end_date` (format: "YYYY-MM-01T00:00:00+00:00")
+- If `end_date` is null → role is current, use today's date (Feb 2026)
+- Calculate: (end_year - start_year) * 12 + (end_month - start_month)
 
 **For "X years LEAD/TEAM LEAD experience" requirements:**
-- READ "LEAD/MANAGEMENT EXPERIENCE: X months" from Work History
-- VERIFY by checking roles marked ⭐LEAD - do the dates add up?
-- Compare months to requirement (2 years = 24 months)
-- Apply percentage-based scoring: 8/24 = 33% → Score 3-4
+- Find roles where `employee_title` contains: Lead, Leader, Manager, Head, Director, TL
+- SUM the durations of ALL matching roles
+- Compare to requirement (2 years = 24 months)
+- Example: "DevOps Team Lead" from 2022-08 to 2024-08 = 24 months ✓
 
-**For "X years [ROLE TYPE] experience" requirements (DevOps, Backend, Frontend, QA, etc.):**
-- READ the corresponding "[CATEGORY] EXPERIENCE: X months" from Work History
-- VERIFY by checking roles marked with that category in the JSON
-- Match the JD requirement to the appropriate category:
-  * "DevOps experience" → DEVOPS/SRE/PLATFORM EXPERIENCE
-  * "Backend experience" → BACKEND/SOFTWARE EXPERIENCE
-  * "Frontend experience" → FRONTEND EXPERIENCE
-  * "QA experience" → QA/TEST EXPERIENCE
-  * "Data/ML experience" → DATA/ML/AI EXPERIENCE
-- Compare months to requirement and apply percentage-based scoring
+**For "X years [ROLE TYPE] experience" (DevOps, Backend, Frontend, QA, etc.):**
+- DevOps roles: titles containing DevOps, SRE, Platform Engineer, Cloud Engineer
+- Backend roles: titles containing Backend, Software Engineer, Developer
+- Do NOT count as DevOps: SysAdmin, Storage Admin, QA, IT Support, DBA
+- SUM durations and compare to requirement
 
-### HOW TO VERIFY:
-- Check `start_date` and `end_date` in the JSON for each role
-- Calculate: (end_year - start_year) * 12 + (end_month - start_month)
-- If end_date is null/empty → role is current, use today's date
-- Sum durations for roles matching the category
-- **CURRENT TITLE** (AUTHORITATIVE): The candidate's ACTUAL current job title
-- **headline**: May be OUTDATED - trust CURRENT TITLE if they conflict
+**Apply percentage-based scoring:**
+- 100%+ of requirement → Score 7-10 (meets requirement)
+- 75-99% of requirement → Score 5-6 (close, with signal)
+- 50-74% of requirement → Score 4-5 (halfway)
+- <50% of requirement → Score 3-4 (far, signals cannot compensate)
 
 ### MISSING DATA HANDLING:
 - If work history (past_employers) is EMPTY but CURRENT TITLE shows "Team Lead" or "Tech Lead" → Give benefit of doubt for leadership
@@ -3608,14 +3354,13 @@ IMPORTANT RULES:
   * Fails a must-have AND has NO named strong signal → 3-4. The job title alone is NOT a signal.
   * Matches a rejection criterion → 1-2
 
-⚠️ CRITICAL - VERIFY EXPERIENCE CALCULATIONS:
-- The Work History section contains PRE-CALCULATED experience by category
-- You MUST VERIFY these calculations against the raw JSON data (current_employers, past_employers)
-- Check the start_date and end_date fields to verify durations are correct
-- If calculation is correct → USE IT. If you find an error → NOTE IT and use your own calculation.
-- Match the JD requirement to the appropriate category and compare months
-- For any "X years experience" requirement: Compare the relevant CATEGORY months to the requirement
-  * Required months = meets requirement (7-10)
+⚠️ CRITICAL - CALCULATE EXPERIENCE FROM RAW JSON:
+- Read `current_employers` and `past_employers` arrays in the JSON
+- Calculate duration for each role using start_date and end_date
+- For LEAD experience: sum durations where employee_title contains Lead/Manager/TL/Director
+- For ROLE experience: sum durations matching the role type (DevOps, Backend, etc.)
+- Compare total months to requirement and apply percentage-based scoring
+  * 100%+ = meets requirement (7-10)
   * 75%+ of required = close (5-6 with signal)
   * 50-75% of required = halfway (4-5)
   * <50% of required = far (3-4, signals cannot compensate)

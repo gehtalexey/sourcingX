@@ -3227,7 +3227,21 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
     # Get formatted work history with calculated durations
     work_history_formatted = format_work_history(profile)
 
-    profile_summary = f"""## Work History (with calculated durations):
+    # Extract key fields for easy reading
+    headline = raw_crustdata.get('headline', 'N/A')
+    summary = raw_crustdata.get('summary', 'N/A')
+    all_titles = raw_crustdata.get('all_titles', [])
+    all_employers = raw_crustdata.get('all_employers', [])
+    skills_list = raw_crustdata.get('skills', [])
+
+    profile_summary = f"""## Key Profile Fields (READ THESE CAREFULLY):
+- **Headline**: {headline}
+- **All Titles (career history)**: {', '.join(all_titles) if all_titles else 'N/A'}
+- **All Employers (career history)**: {', '.join(all_employers) if all_employers else 'N/A'}
+- **Skills**: {', '.join(skills_list[:30]) if skills_list else 'N/A'}
+- **Summary/About**: {summary[:500] if summary else 'N/A'}
+
+## Work History (with calculated durations):
 {work_history_formatted}
 
 ## Full Profile Data (JSON):
@@ -3282,10 +3296,14 @@ The requirements contain HARD RULES. These are NOT preferences - they are disqua
 2. "Must have N years of Y experience" → Calculate from work history. If not met → Score ≤3
 3. "Must have team lead experience in recent N years" → Check if ANY role in past N years had "lead", "manager", "head" in title
 
-### HOW TO CHECK:
-- For skills: Search profile text, skills list, job descriptions, certifications
-- For titles: Check current_title AND all past titles
-- For experience: Calculate from work history dates
+### HOW TO CHECK (use ALL available JSON fields):
+- **headline**: Often contains current title and company (e.g., "DevOps Engineer at Company")
+- **summary**: LinkedIn "About" section - may contain skills, experience details
+- **skills**: Array of skills - search for required technologies here
+- **all_titles**: Array of ALL job titles from career history - check for leadership roles
+- **all_employers**: Array of ALL companies worked at
+- **current_employers** + **past_employers**: Detailed work history with dates
+- For experience years: Calculate from work history dates in past_employers
 
 ### CRITICAL:
 - A candidate missing a MUST-HAVE requirement can NEVER be "Strong Fit" or "Good Fit"

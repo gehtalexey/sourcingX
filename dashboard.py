@@ -3038,6 +3038,26 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, extra_re
         except (json.JSONDecodeError, TypeError):
             raw = {}
 
+    # Check if Crustdata returned meaningful work history data
+    has_work_history = bool(
+        (raw.get('past_employers') and len(raw.get('past_employers', [])) > 0) or
+        (raw.get('current_employers') and len(raw.get('current_employers', [])) > 0)
+    )
+    has_career_data = bool(
+        raw.get('all_employers') or raw.get('all_titles') or has_work_history
+    )
+
+    # If raw data is missing or has no career info, skip screening
+    if not raw or not has_career_data:
+        return {
+            "score": 0,
+            "fit": "Missing Data",
+            "summary": "Crustdata did not return work history - re-enrich this profile before screening",
+            "strengths": [],
+            "concerns": ["No work history from Crustdata - cannot evaluate experience or leadership"],
+            "missing_data": True
+        }
+
     # Build past positions - the main source of candidate information
     past_positions_str = ''
     if raw and raw.get('past_employers'):
@@ -6844,6 +6864,18 @@ with tab_screening:
             # Filter and sort results
             filtered_results = [r for r in screening_results if r.get('fit') in fit_filter]
             sorted_results = sorted(filtered_results, key=lambda x: x.get('score', 0), reverse=True)
+
+            # Check for profiles with missing data
+            missing_data_profiles = [r for r in screening_results if r.get('fit') == 'Missing Data' or r.get('missing_data')]
+            if missing_data_profiles:
+                with st.expander(f"⚠️ {len(missing_data_profiles)} profiles skipped - Missing Crustdata", expanded=False):
+                    st.warning("These profiles have no work history from Crustdata. Re-enrich them to get complete data.")
+                    for p in missing_data_profiles[:20]:  # Show max 20
+                        name = p.get('name', 'Unknown')
+                        url = p.get('linkedin_url', '')
+                        st.markdown(f"- **{name}** - [Re-enrich]({url})")
+                    if len(missing_data_profiles) > 20:
+                        st.caption(f"... and {len(missing_data_profiles) - 20} more")
 
             col_info, col_toggle = st.columns([3, 1])
             with col_info:

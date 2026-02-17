@@ -6688,7 +6688,7 @@ with tab_screening:
                 screen_mode = batch_state.get('mode', 'detailed')
                 batch_ai_model = batch_state.get('ai_model', 'gpt-4o-mini')
                 system_prompt = batch_state.get('system_prompt')
-                batch_size = 5  # Smaller batches for better memory management
+                batch_size = 25  # 25 profiles × ~15KB = ~375KB memory per batch
                 current_batch = batch_state.get('current_batch', 0)
                 all_results = batch_state.get('results', [])
 
@@ -6716,12 +6716,12 @@ with tab_screening:
                         def _on_profile_screened(completed, total, result):
                             pass  # DB save happens in batch after screening completes
 
-                        # Screen this batch
+                        # Screen this batch (25 parallel API calls)
                         batch_results = screen_profiles_batch(
                             batch_profiles,
                             job_desc,
                             openai_key,
-                            max_workers=min(10, len(batch_profiles)),
+                            max_workers=min(25, len(batch_profiles)),
                             mode=screen_mode,
                             system_prompt=system_prompt,
                             ai_model=batch_ai_model,

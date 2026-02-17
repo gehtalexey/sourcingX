@@ -3527,7 +3527,43 @@ Respond with ONLY valid JSON in this exact format:
         }
 
 
-def fetch_raw_data_for_batch(profiles: list, enriched_results: list = None, db_client = None) -> None:
+def _ensure_raw_dict(raw):
+    """Parse raw_data if it's a JSON string, return dict or empty dict."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def build_raw_data_index(enriched_results: list) -> dict:
+    """Build a URL->raw_data index from enriched_results (call once at screening start).
+
+    Returns:
+        Dict mapping linkedin_url variants to raw_data dicts
+    """
+    raw_by_url = {}
+    if not enriched_results:
+        return raw_by_url
+
+    for ep in enriched_results:
+        raw = ep.get('raw_data') or ep.get('raw_crustdata')
+        if not raw:
+            continue
+        parsed_raw = _ensure_raw_dict(raw) if not isinstance(raw, dict) else raw
+        if not parsed_raw:
+            continue
+        # Index under all possible URL variants
+        for url_key in ['linkedin_flagship_url', 'linkedin_url', 'linkedin_profile_url']:
+            for source in [ep, parsed_raw]:
+                url = source.get(url_key, '') if isinstance(source, dict) else ''
+                if url:
+                    raw_by_url[url] = parsed_raw
+    return raw_by_url
+
+
+def fetch_raw_data_for_batch(profiles: list, raw_index: dict = None, db_client = None) -> None:
     """Fetch raw_data for a batch of profiles (memory-efficient, on-demand).
 
     Modifies profiles in-place to add raw_data/raw_crustdata.
@@ -3535,42 +3571,20 @@ def fetch_raw_data_for_batch(profiles: list, enriched_results: list = None, db_c
 
     Args:
         profiles: List of profile dicts to fetch raw_data for
-        enriched_results: Optional list of enriched profiles (from session state)
+        raw_index: Pre-built URL->raw_data index (from build_raw_data_index)
         db_client: Optional database client for fetching from DB
     """
-    def _ensure_raw_dict(raw):
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                return {}
-        return raw if isinstance(raw, dict) else {}
-
     # Find profiles missing raw_data
     missing = [p for p in profiles if not p.get('raw_crustdata') and not p.get('raw_data')]
     if not missing:
         return
 
-    # FIRST: Try enriched_results (has raw_data if fresh from enrichment)
-    if enriched_results:
-        raw_by_url = {}
-        for ep in enriched_results:
-            raw = ep.get('raw_data') or ep.get('raw_crustdata')
-            if not raw:
-                continue
-            parsed_raw = _ensure_raw_dict(raw) if not isinstance(raw, dict) else raw
-            if not parsed_raw:
-                continue
-            # Index under all possible URL variants
-            for url_key in ['linkedin_flagship_url', 'linkedin_url', 'linkedin_profile_url']:
-                for source in [ep, parsed_raw]:
-                    url = source.get(url_key, '') if isinstance(source, dict) else ''
-                    if url:
-                        raw_by_url[url] = parsed_raw
+    # FIRST: Use pre-built index (fast lookup)
+    if raw_index:
         for p in missing:
             url = p.get('linkedin_url', '')
-            if url and url in raw_by_url:
-                p['raw_crustdata'] = raw_by_url[url]
+            if url and url in raw_index:
+                p['raw_crustdata'] = raw_index[url]
 
     # SECOND: Fetch from DB for still-missing profiles
     still_missing = [p for p in profiles if not p.get('raw_crustdata') and not p.get('raw_data')]
@@ -6678,6 +6692,12 @@ with tab_screening:
                 current_batch = batch_state.get('current_batch', 0)
                 all_results = batch_state.get('results', [])
 
+                # Build raw_data index once (first batch only), reuse for all batches
+                raw_index = batch_state.get('raw_index')
+                if raw_index is None:
+                    raw_index = build_raw_data_index(st.session_state.get('enriched_results'))
+                    st.session_state['screening_batch_state']['raw_index'] = raw_index
+
                 start_idx = current_batch * batch_size
                 end_idx = min(start_idx + batch_size, len(profiles_to_screen))
                 batch_profiles = profiles_to_screen[start_idx:end_idx]
@@ -6688,7 +6708,7 @@ with tab_screening:
                         db_client = _get_db_client() if HAS_DATABASE else None
                         fetch_raw_data_for_batch(
                             batch_profiles,
-                            enriched_results=st.session_state.get('enriched_results'),
+                            raw_index=raw_index,
                             db_client=db_client
                         )
 

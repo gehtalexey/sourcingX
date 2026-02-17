@@ -3436,7 +3436,17 @@ Respond with ONLY valid JSON in this exact format:
             "5. Be SPECIFIC in summary/why — mention actual company names, years, titles. "
             "Generic statements like 'strong background' without evidence are not acceptable.\n"
             "6. LinkedIn profiles are NOT CVs. Sparse profiles from strong companies are still strong candidates. "
-            "Score based on available signals, not profile completeness."
+            "Score based on available signals, not profile completeness.\n"
+            "\n## Title Level Understanding (ALWAYS APPLY)\n"
+            "These titles are the SAME seniority level — treat them equivalently:\n"
+            "- Team Lead, Tech Lead, Team Leader, Team Manager, TL, Engineering Lead\n"
+            "These are NOT overqualified — they are hands-on leadership roles.\n"
+            "OVERQUALIFIED means: VP, Director, CTO, Chief, Head of, Senior Manager, Group Manager, C-level.\n"
+            "\n## Company Classifications (ALWAYS APPLY)\n"
+            "LEGITIMATE tech employers (do NOT penalize as consulting):\n"
+            "- Cloud/DevOps companies: AllCloud, DoiT, Cloudride, Opsfleet, develeap (for DevOps roles only if in a client-facing TL role)\n"
+            "- These companies employ DevOps engineers in real production environments.\n"
+            "CONSULTING/OUTSOURCING (penalize): Tikal, Matrix, Ness, Sela, Malam Team, Bynet, SQLink, Accenture, Infosys, Wipro, TCS.\n"
         )
         if 'Assessment Rules' not in prompt_to_use:
             prompt_to_use += _assessment_rules

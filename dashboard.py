@@ -2754,19 +2754,40 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
             df['_is_past'] = df['_norm_url'].isin(past_urls)
             df = df.drop(columns=['_norm_url'])
 
+        # Helper to normalize names for comparison
+        def normalize_name(name):
+            if pd.isna(name) or not name:
+                return ''
+            # Lowercase, strip, remove extra spaces
+            name = str(name).lower().strip()
+            name = ' '.join(name.split())  # Collapse multiple spaces
+            # Remove common special chars and emojis
+            import re
+            name = re.sub(r'[^\w\s]', '', name)  # Keep only alphanumeric and spaces
+            return name.strip()
+
         # Also try name matching (catches cases where URL format differs)
-        if 'Name' in past_df.columns:
-            past_names = set(str(name).lower().strip() for name in past_df['Name'].dropna() if str(name).strip())
+        name_col = None
+        for col in ['Name', 'name', 'Full Name', 'fullName', 'Candidate Name']:
+            if col in past_df.columns:
+                name_col = col
+                break
+
+        if name_col:
+            past_names = set(normalize_name(name) for name in past_df[name_col].dropna() if str(name).strip())
             if past_names:
                 # Try full name from 'name' column first
                 if 'name' in df.columns:
-                    df['_name_match'] = df['name'].fillna('').str.lower().str.strip().isin(past_names)
+                    df['_norm_name'] = df['name'].apply(normalize_name)
+                    df['_name_match'] = df['_norm_name'].isin(past_names)
                     df['_is_past'] = df['_is_past'] | df['_name_match']
-                    df = df.drop(columns=['_name_match'])
+                    df = df.drop(columns=['_norm_name', '_name_match'])
                 # Also try first_name + last_name
                 if 'first_name' in df.columns and 'last_name' in df.columns:
-                    df['_full_name'] = (df['first_name'].fillna('').str.lower().str.strip() + ' ' +
-                                       df['last_name'].fillna('').str.lower().str.strip())
+                    df['_full_name'] = df.apply(
+                        lambda r: normalize_name(f"{r.get('first_name', '')} {r.get('last_name', '')}"),
+                        axis=1
+                    )
                     df['_name_match'] = df['_full_name'].isin(past_names)
                     df['_is_past'] = df['_is_past'] | df['_name_match']
                     df = df.drop(columns=['_full_name', '_name_match'])
@@ -2776,8 +2797,11 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
             filtered_out['Past Candidates'] = df[df['_is_past']].drop(columns=['_is_past']).copy()
         df = df[~df['_is_past']].drop(columns=['_is_past'])
 
-        if stats['past_candidates'] == 0 and linkedin_col is None and 'Name' not in past_df.columns:
+        if stats['past_candidates'] == 0 and linkedin_col is None and name_col is None:
             stats['_skipped_filters'].append(f"past_candidates (sheet needs 'LinkedIn' or 'Name' column, has: {list(past_df.columns)})")
+        elif stats['past_candidates'] == 0:
+            # Columns exist but no matches - could be data format issue
+            stats['_skipped_filters'].append(f"past_candidates (0 matches - check name format in sheet vs candidates)")
 
     # 2. Blacklist filter
     if filters.get('blacklist'):

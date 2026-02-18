@@ -3427,6 +3427,33 @@ Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requi
 - If work history is MISSING, you CANNOT definitively say candidate lacks experience - mark as "Partial Fit" (5-6), not "Not a Fit"
 - Only score 1-2 if there's POSITIVE EVIDENCE of rejection criteria (e.g., title says "Junior", company is consulting firm)
 
+### INDUSTRY EXPERIENCE ANALYSIS:
+When the job description mentions industry requirements (e.g., "must have fintech experience", "healthcare background required", "cybersecurity industry"):
+
+**ALWAYS read `employer_linkedin_description` for EACH company (current AND past):**
+- Each employer object contains `employer_linkedin_description` with details about what the company does
+- This field tells you the company's industry, products, and focus areas
+
+**How to analyze industry fit:**
+1. Extract the required industry from job description (fintech, healthcare, cybersecurity, adtech, gaming, e-commerce, etc.)
+2. For EACH employer (current + past), read `employer_linkedin_description`
+3. Look for industry keywords, products, or services that match the requirement
+4. Credit ANY relevant industry experience (current OR past)
+
+**Examples:**
+- Requirement: "fintech experience" → Look for: payments, banking, financial services, credit, lending, crypto, trading
+- Requirement: "healthcare" → Look for: medical, health, pharma, biotech, hospital, patient care, clinical
+- Requirement: "cybersecurity" → Look for: security, threat, vulnerability, SOC, SIEM, endpoint protection, identity
+- Requirement: "adtech" → Look for: advertising, marketing tech, programmatic, DSP, SSP, ad serving
+
+**In your reasoning, state:**
+"INDUSTRY CHECK: [Company] - [brief description from employer_linkedin_description] → [MATCHES/NO MATCH] [required industry]"
+
+**Scoring for industry requirements:**
+- Has industry experience from current OR past employer → Meets requirement
+- No clear industry match but related field → Partial credit (mention in summary)
+- No industry experience found → Note as gap, apply must-have scoring rules
+
 ### CRITICAL:
 - A candidate missing a MUST-HAVE can NEVER be "Strong Fit" or "Good Fit" (max 6)
 - A candidate matching a REJECTION criterion is ALWAYS "Not a Fit" (Score 1-2)
@@ -3530,14 +3557,24 @@ Respond with ONLY valid JSON in this exact format:
 
         # Always append company description analysis and enforcement rules
         _company_desc_reminder = (
-            "\n\n## Company Description Analysis (CRITICAL)\n"
-            "The profile JSON includes `employer_linkedin_description` for each employer. "
-            "You MUST read these descriptions to determine each company's industry/domain. "
-            "When the job description mentions a specific industry "
-            "(e.g. cybersecurity, fintech, healthcare), verify from employer descriptions "
-            "that the candidate actually worked in that industry. "
-            "Do NOT rely only on company name recognition — read the descriptions. "
-            "If the job requires a specific industry and no employer matches → score accordingly."
+            "\n\n## Company Description & Industry Analysis (CRITICAL)\n"
+            "The profile JSON includes `employer_linkedin_description` for EACH employer (current AND past). "
+            "You MUST read these descriptions to determine each company's industry/domain.\n\n"
+            "**WHEN TO ANALYZE INDUSTRY:**\n"
+            "- Job mentions: fintech, healthcare, cybersecurity, adtech, gaming, e-commerce, SaaS, etc.\n"
+            "- Job says: 'must have [industry] experience', '[industry] background required'\n\n"
+            "**HOW TO ANALYZE:**\n"
+            "1. For EACH employer (current + past), read `employer_linkedin_description`\n"
+            "2. Look for keywords matching required industry:\n"
+            "   - Fintech: payments, banking, financial, credit, lending, trading, crypto\n"
+            "   - Healthcare: medical, health, pharma, biotech, clinical, patient\n"
+            "   - Cybersecurity: security, threat, vulnerability, SOC, SIEM, endpoint\n"
+            "   - Adtech: advertising, marketing tech, programmatic, DSP, ad serving\n"
+            "3. Credit ANY matching experience (current OR past counts!)\n\n"
+            "**IN YOUR REASONING, STATE:**\n"
+            "'INDUSTRY: [Company] → [industry from description] → MATCHES/NO MATCH'\n\n"
+            "Do NOT rely only on company name — READ the descriptions. "
+            "A company called 'TechCorp' could be in ANY industry."
         )
         _rejection_enforcement = (
             "\n\n## Rejection Criteria\n"

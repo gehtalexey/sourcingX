@@ -3253,13 +3253,11 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
             except:
                 pass
         current_employer_summary = f"""
-⚡⚡⚡ CURRENT EMPLOYER (WHERE THEY WORK NOW!) ⚡⚡⚡
+⚡ CURRENT EMPLOYER (pre-extracted from current_employers[]) ⚡
 Title: {ce_title}
 Company: {ce_company}
 Started: {ce_start[:10] if ce_start else 'Unknown'}
-Duration at current job: {ce_months} months ({ce_months/12:.1f} years)
-
-⚠️ USE THIS FOR "REJECT OVERQUALIFIED" - NOT past_employers!
+Duration: {ce_months} months ({ce_months/12:.1f} years)
 """
 
     # Pre-calculate LEAD experience
@@ -3309,18 +3307,25 @@ Duration at current job: {ce_months} months ({ce_months/12:.1f} years)
     lead_summary = ""
     if lead_roles:
         lead_summary = f"""
-📊 PRE-CALCULATED LEAD EXPERIENCE (DO NOT RECALCULATE!):
+📊 PRE-CALCULATED LEAD EXPERIENCE:
 {chr(10).join(lead_roles)}
 TOTAL LEAD (excluding consulting): {total_lead_months} months ({total_lead_months/12:.1f} years)
-Required: 24 months (2 years) → {"✅ MEETS REQUIREMENT" if total_lead_months >= 24 else "❌ BELOW REQUIREMENT"}
+vs Required 24 months → {"✅ MEETS" if total_lead_months >= 24 else "❌ BELOW (" + str(round(total_lead_months/24*100)) + "%)"}
+
+💡 Use these pre-calculated values. If they seem wrong, verify against raw JSON below.
+"""
+    else:
+        lead_summary = """
+📊 PRE-CALCULATED LEAD EXPERIENCE: No lead roles detected
+💡 Check raw JSON below - candidate may have lead roles with non-standard titles.
 """
 
     current_employer_summary += lead_summary
 
-    # Simplified prompt: only raw JSON + instructions
+    # Profile summary with pre-calculated hints + raw JSON fallback
     profile_summary = f"""{work_history_warning}
 {current_employer_summary}
-## Candidate Profile (Raw JSON):
+## Raw JSON (use to verify pre-calculated values if needed):
 ```json
 {raw_json_str}
 ```"""

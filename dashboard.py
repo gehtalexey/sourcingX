@@ -3319,7 +3319,34 @@ TOTAL (excluding consulting): {total_lead_months} months ({total_lead_months/12:
 💡 Check raw JSON - candidate may have leadership with non-standard titles.
 """
 
-    current_employer_summary += lead_summary
+    # Pre-calculate TOTAL CAREER EXPERIENCE (for "reject >X years" rules)
+    all_start_dates = []
+    for ce in current_employers:
+        start = ce.get('start_date', '')
+        if start:
+            all_start_dates.append(start)
+    for pe in raw_crustdata.get('past_employers', []):
+        start = pe.get('start_date', '')
+        if start:
+            all_start_dates.append(start)
+
+    total_experience_summary = ""
+    if all_start_dates:
+        try:
+            from datetime import datetime
+            earliest = min(all_start_dates)
+            earliest_dt = datetime.fromisoformat(earliest.replace('+00:00', '').replace('Z', ''))
+            total_months = (2026 - earliest_dt.year) * 12 + (2 - earliest_dt.month)
+            total_years = total_months / 12
+            total_experience_summary = f"""
+📅 TOTAL CAREER EXPERIENCE: {total_months} months ({total_years:.1f} years)
+   (Career started: {earliest[:10]})
+   ⚠️ If JD says "reject >X years experience", compare against this value!
+"""
+        except:
+            total_experience_summary = "\n📅 TOTAL CAREER EXPERIENCE: Could not calculate\n"
+
+    current_employer_summary += lead_summary + total_experience_summary
 
     # Profile summary with pre-calculated hints + raw JSON fallback
     profile_summary = f"""{work_history_warning}
@@ -3362,6 +3389,17 @@ The requirements contain HARD RULES. These are NOT preferences - they are disqua
 3. "Reject project companies" → If current company is consulting/outsourcing (Matrix, Tikal, Ness, Sela, Malam Team, Bynet, SQLink, etc.) → Score 1-2
    IMPORTANT: Cloud-focused companies like AllCloud, DoiT, Cloudride are LEGITIMATE DevOps/Cloud employers, NOT consulting firms. Do NOT reject them.
 4. "Reject [specific type]" → Apply literally to CURRENT position
+5. "Reject profiles with more than X years experience" or "max X years" → CALCULATE TOTAL EXPERIENCE:
+   - Sum ALL positions (current + past employers) to get total career length
+   - Find earliest start_date across all positions
+   - Calculate: (2026 - earliest_year) + (2 - earliest_month)/12 = total years
+   - If total > X years specified → Score 1-2 (HARD REJECT)
+   - Example: "Reject >12 years" and candidate started career in 2010 → 16 years total → REJECT
+   - This is a HARD rejection rule, not a soft preference!
+6. "Reject job hoppers" → Check for pattern of short tenures:
+   - Multiple positions with <1 year tenure = job hopper pattern
+   - 3+ jobs in 3 years without promotions = job hopper
+   - Exclude: internships, military service, acquisitions/mergers
 
 ### MUST-HAVE RULES — TIERED SCORING:
 A must-have requirement ("must have X", "X is a must") is critical but does NOT automatically mean score ≤3.

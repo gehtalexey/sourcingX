@@ -7176,15 +7176,6 @@ with tab_screening:
                                         norm = normalize_linkedin_url(db_url)
                                         if norm and norm != db_url:
                                             raw_index[norm] = row['raw_data']
-                            if response:
-                                for row in response:
-                                    if row.get('raw_data'):
-                                        db_url = row['linkedin_url']
-                                        raw_index[db_url] = row['raw_data']
-                                        # Also index by normalized version
-                                        norm = normalize_linkedin_url(db_url)
-                                        if norm:
-                                            raw_index[norm] = row['raw_data']
                     except Exception as e:
                         print(f"[Export] Failed to fetch raw_data from DB: {e}")
 
@@ -7202,8 +7193,7 @@ with tab_screening:
                     if raw:
                         r_copy['raw_data'] = json.dumps(raw, ensure_ascii=False) if isinstance(raw, dict) else str(raw)
                     else:
-                        # Debug: show what we tried to find
-                        r_copy['raw_data'] = f'NOT_FOUND:index_size={len(raw_index)}'
+                        r_copy['raw_data'] = ''
                     results_with_raw.append(r_copy)
                 return results_with_raw
 
@@ -7242,17 +7232,11 @@ with tab_screening:
                 )
 
             with export_col4:
-                # Add raw_data column directly for debugging
-                results_for_export = []
-                for r in sorted_results:
-                    r_copy = r.copy()
-                    r_copy['DEBUG_RAW_DATA_COLUMN_12345'] = 'HELLO_WORLD'
-                    results_for_export.append(r_copy)
-                full_df = pd.DataFrame(results_for_export)
+                full_df = pd.DataFrame(add_raw_data_to_results(sorted_results))
                 st.download_button(
                     f"All ({len(sorted_results)})",
                     full_df.to_csv(index=False),
-                    "screening_results_all_WITH_RAW.csv",
+                    "screening_results_all.csv",
                     "text/csv"
                 )
 

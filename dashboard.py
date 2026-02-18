@@ -3307,17 +3307,16 @@ Duration: {ce_months} months ({ce_months/12:.1f} years)
     lead_summary = ""
     if lead_roles:
         lead_summary = f"""
-📊 PRE-CALCULATED LEAD EXPERIENCE:
+📊 PRE-CALCULATED LEAD/MANAGEMENT EXPERIENCE:
 {chr(10).join(lead_roles)}
-TOTAL LEAD (excluding consulting): {total_lead_months} months ({total_lead_months/12:.1f} years)
-vs Required 24 months → {"✅ MEETS" if total_lead_months >= 24 else "❌ BELOW (" + str(round(total_lead_months/24*100)) + "%)"}
+TOTAL (excluding consulting): {total_lead_months} months ({total_lead_months/12:.1f} years)
 
-💡 Use these pre-calculated values. If they seem wrong, verify against raw JSON below.
+💡 Compare against job requirements. Verify against raw JSON if needed.
 """
     else:
         lead_summary = """
-📊 PRE-CALCULATED LEAD EXPERIENCE: No lead roles detected
-💡 Check raw JSON below - candidate may have lead roles with non-standard titles.
+📊 LEAD/MANAGEMENT EXPERIENCE: No lead/manager roles detected.
+💡 Check raw JSON - candidate may have leadership with non-standard titles.
 """
 
     current_employer_summary += lead_summary

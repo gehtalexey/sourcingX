@@ -3428,31 +3428,34 @@ Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requi
 - Only score 1-2 if there's POSITIVE EVIDENCE of rejection criteria (e.g., title says "Junior", company is consulting firm)
 
 ### INDUSTRY EXPERIENCE ANALYSIS:
-When the job description mentions industry requirements (e.g., "must have fintech experience", "healthcare background required", "cybersecurity industry"):
+When the job description mentions ANY industry requirement (fintech, healthcare, cybersecurity, automotive, gaming, retail, logistics, insurance, media, telecom, energy, manufacturing, defense, or ANY other industry):
 
 **ALWAYS read `employer_linkedin_description` for EACH company (current AND past):**
-- Each employer object contains `employer_linkedin_description` with details about what the company does
-- This field tells you the company's industry, products, and focus areas
+- Each employer object contains `employer_linkedin_description` with detailed info about what the company does
+- This field describes the company's products, services, customers, and market
 
-**How to analyze industry fit:**
-1. Extract the required industry from job description (fintech, healthcare, cybersecurity, adtech, gaming, e-commerce, etc.)
-2. For EACH employer (current + past), read `employer_linkedin_description`
-3. Look for industry keywords, products, or services that match the requirement
-4. Credit ANY relevant industry experience (current OR past)
+**FULL SEMANTIC ANALYSIS - NOT JUST KEYWORD MATCHING:**
+1. READ and UNDERSTAND what each company actually does from the description
+2. ANALYZE if the company operates in, serves, or is related to the required industry
+3. Use your knowledge to make smart connections:
+   - Company builds payment systems → Fintech (even if "fintech" not mentioned)
+   - Company sells to hospitals → Healthcare industry experience
+   - Company makes security software → Cybersecurity
+   - Company in food delivery → Restaurant/Logistics industry
+4. Consider the FULL business context, not just exact keyword matches
 
-**Examples:**
-- Requirement: "fintech experience" → Look for: payments, banking, financial services, credit, lending, crypto, trading
-- Requirement: "healthcare" → Look for: medical, health, pharma, biotech, hospital, patient care, clinical
-- Requirement: "cybersecurity" → Look for: security, threat, vulnerability, SOC, SIEM, endpoint protection, identity
-- Requirement: "adtech" → Look for: advertising, marketing tech, programmatic, DSP, SSP, ad serving
+**Credit ANY relevant experience:**
+- Current OR past employer in the industry = HAS industry experience
+- Even 1 year counts as industry exposure
+- B2B companies serving the industry = indirect but valid experience
 
 **In your reasoning, state:**
-"INDUSTRY CHECK: [Company] - [brief description from employer_linkedin_description] → [MATCHES/NO MATCH] [required industry]"
+"INDUSTRY: [Company] does [what they actually do] → [RELEVANT/NOT RELEVANT] to [required industry]"
 
 **Scoring for industry requirements:**
-- Has industry experience from current OR past employer → Meets requirement
-- No clear industry match but related field → Partial credit (mention in summary)
-- No industry experience found → Note as gap, apply must-have scoring rules
+- Has industry experience (direct or B2B) → Meets requirement
+- Related but not exact industry → Partial credit, mention in summary
+- No industry connection found → Note as gap, apply must-have scoring rules
 
 ### CRITICAL:
 - A candidate missing a MUST-HAVE can NEVER be "Strong Fit" or "Good Fit" (max 6)
@@ -3559,22 +3562,28 @@ Respond with ONLY valid JSON in this exact format:
         _company_desc_reminder = (
             "\n\n## Company Description & Industry Analysis (CRITICAL)\n"
             "The profile JSON includes `employer_linkedin_description` for EACH employer (current AND past). "
-            "You MUST read these descriptions to determine each company's industry/domain.\n\n"
-            "**WHEN TO ANALYZE INDUSTRY:**\n"
-            "- Job mentions: fintech, healthcare, cybersecurity, adtech, gaming, e-commerce, SaaS, etc.\n"
-            "- Job says: 'must have [industry] experience', '[industry] background required'\n\n"
-            "**HOW TO ANALYZE:**\n"
-            "1. For EACH employer (current + past), read `employer_linkedin_description`\n"
-            "2. Look for keywords matching required industry:\n"
-            "   - Fintech: payments, banking, financial, credit, lending, trading, crypto\n"
-            "   - Healthcare: medical, health, pharma, biotech, clinical, patient\n"
-            "   - Cybersecurity: security, threat, vulnerability, SOC, SIEM, endpoint\n"
-            "   - Adtech: advertising, marketing tech, programmatic, DSP, ad serving\n"
-            "3. Credit ANY matching experience (current OR past counts!)\n\n"
-            "**IN YOUR REASONING, STATE:**\n"
-            "'INDUSTRY: [Company] → [industry from description] → MATCHES/NO MATCH'\n\n"
-            "Do NOT rely only on company name — READ the descriptions. "
-            "A company called 'TechCorp' could be in ANY industry."
+            "You MUST read and analyze these descriptions thoroughly.\n\n"
+            "**WHEN THE JOB MENTIONS ANY INDUSTRY REQUIREMENT:**\n"
+            "Whether it's fintech, healthcare, cybersecurity, automotive, gaming, retail, logistics, "
+            "real estate, insurance, media, telecom, energy, manufacturing, or ANY other industry:\n\n"
+            "**FULL ANALYSIS REQUIRED:**\n"
+            "1. READ the complete `employer_linkedin_description` for EVERY employer (current + past)\n"
+            "2. UNDERSTAND what each company actually does - their products, services, market, customers\n"
+            "3. DETERMINE if the company operates in or serves the required industry\n"
+            "4. Consider INDIRECT matches: a DevOps engineer at a payments company HAS fintech experience\n"
+            "5. Consider B2B relationships: company selling to healthcare = healthcare industry experience\n\n"
+            "**SMART ANALYSIS - NOT JUST KEYWORDS:**\n"
+            "- 'Yum! Brands' description mentions KFC, Pizza Hut → Food/Restaurant industry\n"
+            "- 'H2O.ai' description mentions ML platform → AI/ML industry\n"
+            "- A company processing credit card payments → Fintech even if word 'fintech' not used\n"
+            "- A company making hospital software → Healthcare even without word 'healthcare'\n\n"
+            "**CREDIT ANY RELEVANT EXPERIENCE:**\n"
+            "Industry experience from ANY employer counts (current OR past). "
+            "Even 1 year at a relevant company = has industry experience.\n\n"
+            "**IN YOUR REASONING:**\n"
+            "'INDUSTRY: [Company] does [what they do] → [RELEVANT/NOT RELEVANT] to [required industry]'\n\n"
+            "Do NOT rely on company names — a company called 'TechCorp' could be in ANY industry. "
+            "READ and UNDERSTAND the descriptions."
         )
         _rejection_enforcement = (
             "\n\n## Rejection Criteria\n"

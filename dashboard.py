@@ -7142,6 +7142,71 @@ with tab_screening:
             # Export options
             st.markdown("### Export Results")
 
+            # Build raw_data index on-demand for CSV export (not stored in session_state)
+            def add_raw_data_to_results(results_list):
+                """Add raw_data column to results for CSV export (fetched on-demand from DB)."""
+                if not results_list:
+                    return []
+
+                # Try to get raw_data from database
+                raw_index = {}
+                db_client = _get_db_client() if HAS_DATABASE else None
+                if db_client:
+                    try:
+                        # Collect and normalize URLs
+                        urls_set = set()
+                        for r in results_list:
+                            orig_url = r.get('linkedin_url', '')
+                            if orig_url:
+                                urls_set.add(orig_url)
+                                norm_url = normalize_linkedin_url(orig_url)
+                                if norm_url:
+                                    urls_set.add(norm_url)
+
+                        if urls_set:
+                            # Fetch all profiles with raw_data, filter locally
+                            # More efficient than N individual queries
+                            response = db_client.select('profiles', 'linkedin_url,raw_data', limit=5000)
+                            if response:
+                                for row in response:
+                                    if row.get('raw_data') and row.get('linkedin_url'):
+                                        db_url = row['linkedin_url']
+                                        # Index by both original and normalized URL
+                                        raw_index[db_url] = row['raw_data']
+                                        norm = normalize_linkedin_url(db_url)
+                                        if norm and norm != db_url:
+                                            raw_index[norm] = row['raw_data']
+                            if response:
+                                for row in response:
+                                    if row.get('raw_data'):
+                                        db_url = row['linkedin_url']
+                                        raw_index[db_url] = row['raw_data']
+                                        # Also index by normalized version
+                                        norm = normalize_linkedin_url(db_url)
+                                        if norm:
+                                            raw_index[norm] = row['raw_data']
+                    except Exception as e:
+                        print(f"[Export] Failed to fetch raw_data from DB: {e}")
+
+                # Fallback: try enriched_results if DB didn't have data
+                if not raw_index:
+                    enriched_results = st.session_state.get('enriched_results', [])
+                    raw_index = build_raw_data_index(enriched_results) if enriched_results else {}
+
+                results_with_raw = []
+                for r in results_list:
+                    r_copy = r.copy()
+                    url = r.get('linkedin_url', '')
+                    # Try original URL, then normalized
+                    raw = raw_index.get(url) or raw_index.get(normalize_linkedin_url(url) or '') or {}
+                    if raw:
+                        r_copy['raw_data'] = json.dumps(raw, ensure_ascii=False) if isinstance(raw, dict) else str(raw)
+                    else:
+                        # Debug: show what we tried to find
+                        r_copy['raw_data'] = f'NOT_FOUND:index_size={len(raw_index)}'
+                    results_with_raw.append(r_copy)
+                return results_with_raw
+
             # Count by fit level
             strong_list = [r for r in screening_results if r.get('fit') == 'Strong Fit']
             good_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
@@ -7152,7 +7217,7 @@ with tab_screening:
             with export_col1:
                 st.download_button(
                     f"Strong Fit ({len(strong_list)})",
-                    pd.DataFrame(strong_list).to_csv(index=False) if strong_list else "",
+                    pd.DataFrame(add_raw_data_to_results(strong_list)).to_csv(index=False) if strong_list else "",
                     "screening_strong_fit.csv",
                     "text/csv",
                     disabled=len(strong_list) == 0
@@ -7161,7 +7226,7 @@ with tab_screening:
             with export_col2:
                 st.download_button(
                     f"Good Fit ({len(good_list)})",
-                    pd.DataFrame(good_list).to_csv(index=False) if good_list else "",
+                    pd.DataFrame(add_raw_data_to_results(good_list)).to_csv(index=False) if good_list else "",
                     "screening_good_fit.csv",
                     "text/csv",
                     disabled=len(good_list) == 0
@@ -7170,18 +7235,24 @@ with tab_screening:
             with export_col3:
                 st.download_button(
                     f"Partial Fit ({len(partial_list)})",
-                    pd.DataFrame(partial_list).to_csv(index=False) if partial_list else "",
+                    pd.DataFrame(add_raw_data_to_results(partial_list)).to_csv(index=False) if partial_list else "",
                     "screening_partial_fit.csv",
                     "text/csv",
                     disabled=len(partial_list) == 0
                 )
 
             with export_col4:
-                full_df = pd.DataFrame(sorted_results)
+                # Add raw_data column directly for debugging
+                results_for_export = []
+                for r in sorted_results:
+                    r_copy = r.copy()
+                    r_copy['DEBUG_RAW_DATA_COLUMN_12345'] = 'HELLO_WORLD'
+                    results_for_export.append(r_copy)
+                full_df = pd.DataFrame(results_for_export)
                 st.download_button(
                     f"All ({len(sorted_results)})",
                     full_df.to_csv(index=False),
-                    "screening_results_all.csv",
+                    "screening_results_all_WITH_RAW.csv",
                     "text/csv"
                 )
 

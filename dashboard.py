@@ -323,7 +323,7 @@ def cleanup_memory():
     import gc
 
     # Remove heavy columns from DataFrames
-    heavy_cols = ['raw_crustdata', 'raw_data', 'education_details', 'certifications', 'past_positions_raw']
+    heavy_cols = ['raw_crustdata', 'raw_data', 'raw_phantombuster', 'education_details', 'certifications', 'past_positions_raw']
     for df_key in ['results_df', 'enriched_df', 'passed_candidates_df']:
         if df_key in st.session_state and isinstance(st.session_state[df_key], pd.DataFrame):
             df = st.session_state[df_key]
@@ -332,9 +332,8 @@ def cleanup_memory():
                 st.session_state[df_key] = df.drop(columns=cols_to_drop)
 
     # MEMORY OPTIMIZATION: Clear list versions - they're duplicates of DataFrames
-    # BUT keep 'results' as it's used for data existence checks
-    # Lists can be reconstructed via get_profiles_list() when needed
-    for list_key in ['enriched_results']:  # Removed 'results' - needed for UI checks
+    # UI checks now use results_df directly
+    for list_key in ['results', 'enriched_results']:
         if list_key in st.session_state:
             del st.session_state[list_key]
 
@@ -521,12 +520,8 @@ def _restore_session_data(session_data: dict):
         else:
             st.session_state[key] = item['data']
 
-    # MEMORY OPTIMIZATION: Reconstruct list versions from DataFrames (for code that expects them)
-    # These are derived views, not stored copies
-    if 'results_df' in st.session_state and isinstance(st.session_state['results_df'], pd.DataFrame):
-        st.session_state['results'] = st.session_state['results_df'].to_dict('records')
-    if 'enriched_df' in st.session_state and isinstance(st.session_state['enriched_df'], pd.DataFrame):
-        st.session_state['enriched_results'] = st.session_state['enriched_df'].to_dict('records')
+    # MEMORY OPTIMIZATION: Don't reconstruct list versions - they duplicate DataFrames
+    # Code should use results_df / enriched_df directly
 
 
 def save_session_state(to_db: bool = False):
@@ -2048,7 +2043,8 @@ def normalize_phantombuster_columns(df: pd.DataFrame) -> pd.DataFrame:
                 'company_location': raw_pb.get('companyLocation') or '',
                 'current_years_in_role': normalized.get('current_years_in_role'),
                 'current_years_at_company': normalized.get('current_years_at_company'),
-                'raw_phantombuster': raw_pb,
+                # MEMORY: Don't store raw_phantombuster in display DataFrame
+                # It's 5-20KB per profile and not needed for filtering/display
             }
             normalized_records.append(display_record)
         else:
@@ -2672,10 +2668,24 @@ def filter_csv_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, dict, dict]:
-    """Apply pre-filters to candidates. Returns filtered df, stats, and filtered_out dict."""
+    """Apply pre-filters to candidates. Returns filtered df, stats, and filtered_out dict (lightweight)."""
     stats = {}
-    filtered_out = {}  # Store removed candidates by filter type
+    filtered_out = {}  # Store LIGHTWEIGHT removed candidates by filter type (display cols only)
     original_count = len(df)
+
+    # MEMORY: Only keep display columns in filtered_out (not full row copies)
+    _LIGHT_COLS = ['name', 'first_name', 'last_name', 'current_title', 'current_company', 'linkedin_url']
+
+    def _store_filtered(label, mask, temp_cols=None):
+        """Store lightweight version of filtered-out rows (max 100)."""
+        count = mask.sum()
+        if count > 0:
+            available = [c for c in _LIGHT_COLS if c in df.columns]
+            if available:
+                filtered_out[label] = df.loc[mask, available].head(100).copy()
+            else:
+                filtered_out[label] = df.loc[mask, list(df.columns)[:5]].head(100).copy()
+        return count
 
     df = df.copy()  # Avoid SettingWithCopyWarning
 
@@ -2798,8 +2808,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
                     df = df.drop(columns=['_full_name', '_name_match'])
 
         stats['past_candidates'] = df['_is_past'].sum()
-        if df['_is_past'].sum() > 0:
-            filtered_out['Past Candidates'] = df[df['_is_past']].drop(columns=['_is_past']).copy()
+        _store_filtered('Past Candidates', df['_is_past'])
         df = df[~df['_is_past']].drop(columns=['_is_past'])
 
         if stats['past_candidates'] == 0 and linkedin_col is None and name_col is None:
@@ -2814,7 +2823,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         if 'current_company' in df.columns:
             df['_blacklisted'] = df['current_company'].apply(lambda x: matches_list(x, blacklist))
             stats['blacklist'] = df['_blacklisted'].sum()
-            filtered_out['Blacklist Companies'] = df[df['_blacklisted']].drop(columns=['_blacklisted']).copy()
+            _store_filtered('Blacklist Companies', df['_blacklisted'])
             df = df[~df['_blacklisted']].drop(columns=['_blacklisted'])
         else:
             stats['_skipped_filters'].append('blacklist (missing current_company column)')
@@ -2825,7 +2834,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         if 'current_company' in df.columns:
             df['_not_relevant'] = df['current_company'].apply(lambda x: matches_list(x, not_relevant))
             stats['not_relevant_current'] = df['_not_relevant'].sum()
-            filtered_out['Not Relevant (Current)'] = df[df['_not_relevant']].drop(columns=['_not_relevant']).copy()
+            _store_filtered('Not Relevant (Current)', df['_not_relevant'])
             df = df[~df['_not_relevant']].drop(columns=['_not_relevant'])
         else:
             stats['_skipped_filters'].append('not_relevant (missing current_company column)')
@@ -2842,7 +2851,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
 
         df['_excluded_title'] = df['current_title'].apply(has_excluded_title)
         stats['excluded_titles'] = df['_excluded_title'].sum()
-        filtered_out['Excluded Titles'] = df[df['_excluded_title']].drop(columns=['_excluded_title']).copy()
+        _store_filtered('Excluded Titles', df['_excluded_title'])
         df = df[~df['_excluded_title']].drop(columns=['_excluded_title'])
 
     # 5. Include title keywords filter (only keep matching)
@@ -2858,7 +2867,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         df['_included_title'] = df['current_title'].apply(has_included_title)
         not_included = ~df['_included_title']
         stats['not_matching_titles'] = not_included.sum()
-        filtered_out['Not Matching Titles'] = df[not_included].drop(columns=['_included_title']).copy()
+        _store_filtered('Not Matching Titles', not_included)
         df = df[df['_included_title']].drop(columns=['_included_title'])
 
     # 6. Duration filters (from Phantom data)
@@ -2899,7 +2908,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         df['_role_months'] = df[role_col].apply(parse_duration_to_months)
         df['_role_too_short'] = df['_role_months'].apply(lambda x: x < min_months if pd.notna(x) else False)
         stats['role_too_short'] = df['_role_too_short'].sum()
-        filtered_out['Role Too Short'] = df[df['_role_too_short']].drop(columns=['_role_months', '_role_too_short'], errors='ignore').copy()
+        _store_filtered('Role Too Short', df['_role_too_short'])
         df = df[~df['_role_too_short']].drop(columns=['_role_months', '_role_too_short'], errors='ignore')
 
     # Max role duration
@@ -2908,7 +2917,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         df['_role_months'] = df[role_col].apply(parse_duration_to_months)
         df['_role_too_long'] = df['_role_months'].apply(lambda x: x > max_months if pd.notna(x) else False)
         stats['role_too_long'] = df['_role_too_long'].sum()
-        filtered_out['Role Too Long'] = df[df['_role_too_long']].drop(columns=['_role_months', '_role_too_long'], errors='ignore').copy()
+        _store_filtered('Role Too Long', df['_role_too_long'])
         df = df[~df['_role_too_long']].drop(columns=['_role_months', '_role_too_long'], errors='ignore')
 
     # Min company duration
@@ -2917,7 +2926,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         df['_company_months'] = df[company_col].apply(parse_duration_to_months)
         df['_company_too_short'] = df['_company_months'].apply(lambda x: x < min_months if pd.notna(x) else False)
         stats['company_too_short'] = df['_company_too_short'].sum()
-        filtered_out['Company Too Short'] = df[df['_company_too_short']].drop(columns=['_company_months', '_company_too_short'], errors='ignore').copy()
+        _store_filtered('Company Too Short', df['_company_too_short'])
         df = df[~df['_company_too_short']].drop(columns=['_company_months', '_company_too_short'], errors='ignore')
 
     # Max company duration
@@ -2926,7 +2935,7 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         df['_company_months'] = df[company_col].apply(parse_duration_to_months)
         df['_company_too_long'] = df['_company_months'].apply(lambda x: x > max_months if pd.notna(x) else False)
         stats['company_too_long'] = df['_company_too_long'].sum()
-        filtered_out['Company Too Long'] = df[df['_company_too_long']].drop(columns=['_company_months', '_company_too_long'], errors='ignore').copy()
+        _store_filtered('Company Too Long', df['_company_too_long'])
         df = df[~df['_company_too_long']].drop(columns=['_company_months', '_company_too_long'], errors='ignore')
 
     # 7. Universities filter (keep only top university graduates - only for enriched data)
@@ -2967,22 +2976,14 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         df['_top_uni'] = df['education'].apply(has_top_university)
         not_top_uni = ~df['_top_uni']
         stats['not_top_university'] = not_top_uni.sum()
-        filtered_out['Not Top University'] = df[not_top_uni].drop(columns=['_top_uni']).copy()
+        _store_filtered('Not Top University', not_top_uni)
         df = df[df['_top_uni']].drop(columns=['_top_uni'])
 
     stats['original'] = original_count
     stats['final'] = len(df)
     stats['total_removed'] = original_count - len(df)
 
-    # MEMORY OPTIMIZATION: Strip heavy columns from filtered_out DataFrames
-    # Keep only essential columns for display and restore
-    heavy_cols = ['raw_crustdata', 'raw_data', 'past_positions', 'education_details', 'certifications']
-    for filter_name, filter_df in filtered_out.items():
-        if isinstance(filter_df, pd.DataFrame):
-            cols_to_drop = [c for c in heavy_cols if c in filter_df.columns]
-            if cols_to_drop:
-                filtered_out[filter_name] = filter_df.drop(columns=cols_to_drop)
-
+    # filtered_out already contains only lightweight display columns (via _store_filtered)
     return df, stats, filtered_out
 
 
@@ -4088,9 +4089,7 @@ with tab_upload:
                                         for p in profiles:
                                             p.pop('raw_data', None)
                                             p.pop('raw_crustdata', None)
-                                        st.session_state['results'] = profiles
                                         st.session_state['results_df'] = df
-                                        st.session_state['enriched_results'] = profiles
                                         st.session_state['enriched_df'] = df
                                         cleanup_memory()
                                         st.success(f"Loaded {len(profiles)} enriched profiles!")
@@ -4105,9 +4104,7 @@ with tab_upload:
                                         for p in profiles:
                                             p.pop('raw_data', None)
                                             p.pop('raw_crustdata', None)
-                                        st.session_state['results'] = profiles
                                         st.session_state['results_df'] = df
-                                        st.session_state['enriched_results'] = profiles
                                         st.session_state['enriched_df'] = df
                                         screening_results = []
                                         for p in profiles:
@@ -4134,7 +4131,6 @@ with tab_upload:
                                     profiles = get_all_profiles(db_client, limit=500)  # Reduced for memory
                                     if profiles:
                                         df = profiles_to_dataframe(profiles)
-                                        st.session_state['results'] = profiles
                                         st.session_state['results_df'] = df
                                         cleanup_memory()
                                         st.success(f"Loaded {len(profiles)} profiles!")
@@ -4155,7 +4151,6 @@ with tab_upload:
             if pre_enriched_file.name.endswith('.json'):
                 pre_enriched_data = json.load(pre_enriched_file)
                 if isinstance(pre_enriched_data, list):
-                    st.session_state['results'] = pre_enriched_data
                     st.session_state['results_df'] = flatten_for_csv(pre_enriched_data)
                     st.success(f"Loaded **{len(pre_enriched_data)}** profiles!")
             else:
@@ -4170,7 +4165,6 @@ with tab_upload:
 
                 # PhantomBuster/CSV data stays in session state only (not saved to DB)
                 # DB save happens after Crustdata enrichment
-                st.session_state['results'] = df_uploaded.to_dict('records')
                 st.session_state['results_df'] = df_uploaded
                 save_session_state()  # Save for restore
 
@@ -4394,7 +4388,6 @@ with tab_upload:
 
                                         # PhantomBuster data stays in session state only (not saved to DB)
                                         # DB save happens after Crustdata enrichment
-                                        st.session_state['results'] = pb_df.to_dict('records')
                                         st.session_state['results_df'] = pb_df
                                         st.session_state['preview_page'] = 0  # Reset pagination
                                         st.session_state['last_load_count'] = len(pb_df)
@@ -4427,14 +4420,12 @@ with tab_upload:
                                             elif 'name' in combined_df.columns:
                                                 combined_df = combined_df.drop_duplicates(subset=['name'], keep='first')
                                             new_count = len(combined_df) - len(existing_df)
-                                            st.session_state['results'] = combined_df.to_dict('records')
                                             st.session_state['results_df'] = combined_df
                                             st.session_state['last_load_count'] = new_count
                                             st.session_state['last_load_file'] = filename
                                             st.session_state['last_load_mode'] = 'added'
                                             st.session_state['last_load_total'] = len(combined_df)
                                         else:
-                                            st.session_state['results'] = pb_df.to_dict('records')
                                             st.session_state['results_df'] = pb_df
                                             st.session_state['last_load_count'] = len(pb_df)
                                             st.session_state['last_load_file'] = filename
@@ -4652,7 +4643,6 @@ with tab_upload:
 
                         # PhantomBuster data stays in session state only (not saved to DB)
                         # DB save happens after Crustdata enrichment
-                        st.session_state['results'] = pb_df.to_dict('records')
                         st.session_state['results_df'] = pb_df
                         st.session_state['preview_page'] = 0
                         st.session_state['pb_launch_status'] = 'idle'
@@ -4759,7 +4749,7 @@ with tab_upload:
 
 # ========== TAB 2: Filter ==========
 with tab_filter:
-    if 'results' not in st.session_state or not st.session_state['results']:
+    if 'results_df' not in st.session_state or st.session_state.get('results_df') is None or (isinstance(st.session_state.get('results_df'), pd.DataFrame) and st.session_state['results_df'].empty):
         st.info("Upload data in the Upload tab first.")
     else:
         df = st.session_state['results_df']
@@ -4775,7 +4765,6 @@ with tab_filter:
             if st.button("Convert to Screening Format"):
                 filtered_df = filter_csv_columns(df)
                 st.session_state['results_df'] = filtered_df
-                st.session_state['results'] = filtered_df.to_dict('records')
                 save_session_state()  # Save for restore
                 st.rerun()
 
@@ -4986,9 +4975,8 @@ with tab_filter:
                 # Reset to original unfiltered data
                 original_df = st.session_state.get('original_results_df')
                 if original_df is not None and not original_df.empty:
-                    st.session_state['results_df'] = original_df.copy()
-                    st.session_state['results'] = original_df.to_dict('records')
-                    st.session_state['passed_candidates_df'] = original_df.copy()
+                    st.session_state['results_df'] = original_df
+                    st.session_state['passed_candidates_df'] = original_df
                     if 'filter_stats' in st.session_state:
                         del st.session_state['filter_stats']
                     if 'filtered_out' in st.session_state:
@@ -5079,28 +5067,24 @@ with tab_filter:
 
                 st.session_state['passed_candidates_df'] = filtered_df  # Store filtered results separately
                 st.session_state['results_df'] = filtered_df
-                st.session_state['results'] = filtered_df.to_dict('records')
                 st.session_state['filter_stats'] = stats
 
-                # MEMORY OPTIMIZATION: Store lightweight version of filtered-out candidates
-                # Only keep key columns (no raw_data), limit to 100 per category
-                lightweight_cols = ['name', 'first_name', 'last_name', 'current_title', 'current_company', 'linkedin_url', 'public_url']
-                filtered_out_light = {}
-                for filter_name, filter_df in filtered_out.items():
-                    if len(filter_df) > 0:
-                        # Get available columns
-                        available = [c for c in lightweight_cols if c in filter_df.columns]
-                        if available:
-                            # Take only first 100 rows and only lightweight columns
-                            light_df = filter_df[available].head(100).copy()
-                            filtered_out_light[filter_name] = light_df
-                        else:
-                            # Fallback: first 5 columns, 100 rows
-                            light_df = filter_df[list(filter_df.columns)[:5]].head(100).copy()
-                            filtered_out_light[filter_name] = light_df
-
-                st.session_state['filtered_out_counts'] = {k: len(v) for k, v in filtered_out.items()}
-                st.session_state['filtered_out_light'] = filtered_out_light
+                # filtered_out is already lightweight (display cols only, max 100 per category)
+                # Get real counts from stats (filtered_out DataFrames are capped at 100)
+                real_counts = {
+                    'Past Candidates': stats.get('past_candidates', 0),
+                    'Blacklist Companies': stats.get('blacklist', 0),
+                    'Not Relevant (Current)': stats.get('not_relevant_current', 0),
+                    'Excluded Titles': stats.get('excluded_titles', 0),
+                    'Not Matching Titles': stats.get('not_matching_titles', 0),
+                    'Role Too Short': stats.get('role_too_short', 0),
+                    'Role Too Long': stats.get('role_too_long', 0),
+                    'Company Too Short': stats.get('company_too_short', 0),
+                    'Company Too Long': stats.get('company_too_long', 0),
+                    'Not Top University': stats.get('not_top_university', 0),
+                }
+                st.session_state['filtered_out_counts'] = {k: real_counts.get(k, len(v)) for k, v in filtered_out.items()}
+                st.session_state['filtered_out_light'] = filtered_out
                 cleanup_memory()  # Aggressive memory cleanup
                 save_session_state()  # Save for restore
 
@@ -5456,7 +5440,6 @@ with tab_filter:
                         limit=enrich_count
                     )
                     st.session_state['results_df'] = enriched_df
-                    st.session_state['results'] = enriched_df.to_dict('records')
                     new_emails = enriched_df['salesql_email'].notna().sum() if 'salesql_email' in enriched_df.columns else 0
                     st.success(f"Done! {new_emails} profiles now have emails.")
                     st.rerun()
@@ -5490,7 +5473,7 @@ with tab_enrich:
         st.error("Supabase is not connected. Enrichment is disabled because results won't be saved. Check your supabase_url and supabase_key in secrets.")
     elif not has_crust_key:
         st.warning("Crust Data API key not configured. Add 'api_key' to config.json")
-    elif 'results' not in st.session_state or not st.session_state['results']:
+    elif 'results_df' not in st.session_state or not isinstance(st.session_state.get('results_df'), pd.DataFrame) or st.session_state['results_df'].empty:
         st.info("Load profiles first (tab 1). Filtering (tab 2) is optional.")
     else:
         # Use filtered data if available (from Filter+ tab), otherwise use loaded data
@@ -7042,11 +7025,7 @@ with tab_screening:
                             if _df_key in st.session_state and isinstance(st.session_state[_df_key], pd.DataFrame):
                                 if 'raw_crustdata' in st.session_state[_df_key].columns:
                                     st.session_state[_df_key] = st.session_state[_df_key].drop(columns=['raw_crustdata'])
-                        for _list_key in ['results', 'enriched_results']:
-                            if _list_key in st.session_state and st.session_state[_list_key]:
-                                for r in st.session_state[_list_key]:
-                                    if isinstance(r, dict) and 'raw_crustdata' in r:
-                                        del r['raw_crustdata']
+                        # MEMORY: list duplicates removed, no need to clean them
                         # Clear filtered_out (stores full DataFrame copies)
                         if 'filtered_out' in st.session_state:
                             del st.session_state['filtered_out']
@@ -7649,7 +7628,6 @@ with tab_database:
 
                     if load_profiles:
                         load_df = profiles_to_dataframe(load_profiles)
-                        st.session_state['results'] = load_profiles
                         st.session_state['results_df'] = load_df
                         st.success(f"Loaded **{len(load_profiles)}** profiles from database!")
                         st.rerun()

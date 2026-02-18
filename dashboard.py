@@ -3235,8 +3235,91 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
     if not has_work_history:
         work_history_warning = "\n⚠️ WARNING: Work history (past_employers/current_employers) is MISSING. Score as Partial Fit (5-6) unless rejection criteria apply."
 
+    # PRE-EXTRACT current employer to prevent AI confusion
+    current_employer_summary = ""
+    current_employers = raw_crustdata.get('current_employers', [])
+    if current_employers:
+        ce = current_employers[0]
+        ce_title = ce.get('employee_title', 'Unknown')
+        ce_company = ce.get('employer_name', 'Unknown')
+        ce_start = ce.get('start_date', '')
+        # Calculate months from start to Feb 2026
+        ce_months = 0
+        if ce_start:
+            try:
+                from datetime import datetime
+                start_dt = datetime.fromisoformat(ce_start.replace('+00:00', '').replace('Z', ''))
+                ce_months = (2026 - start_dt.year) * 12 + (2 - start_dt.month)
+            except:
+                pass
+        current_employer_summary = f"""
+⚡⚡⚡ CURRENT EMPLOYER (WHERE THEY WORK NOW!) ⚡⚡⚡
+Title: {ce_title}
+Company: {ce_company}
+Started: {ce_start[:10] if ce_start else 'Unknown'}
+Duration at current job: {ce_months} months ({ce_months/12:.1f} years)
+
+⚠️ USE THIS FOR "REJECT OVERQUALIFIED" - NOT past_employers!
+"""
+
+    # Pre-calculate LEAD experience
+    lead_keywords = ['lead', 'leader', 'manager', 'head', 'director', 'tl']
+    lead_roles = []
+    total_lead_months = 0
+
+    # Current employer lead check
+    for ce in current_employers:
+        title = (ce.get('employee_title') or '').lower()
+        if any(kw in title for kw in lead_keywords):
+            start = ce.get('start_date', '')
+            months = 0
+            if start:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
+                    months = (2026 - start_dt.year) * 12 + (2 - start_dt.month)
+                except:
+                    pass
+            lead_roles.append(f"CURRENT: {ce.get('employee_title')} @ {ce.get('employer_name')}: {months} months")
+            total_lead_months += months
+
+    # Past employer lead check
+    for pe in raw_crustdata.get('past_employers', []):
+        title = (pe.get('employee_title') or '').lower()
+        if any(kw in title for kw in lead_keywords):
+            start = pe.get('start_date', '')
+            end = pe.get('end_date', '')
+            months = 0
+            if start and end:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
+                    end_dt = datetime.fromisoformat(end.replace('+00:00', '').replace('Z', ''))
+                    months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
+                except:
+                    pass
+            company = pe.get('employer_name', '')
+            # Mark consulting companies
+            consulting = any(c in company.lower() for c in ['tikal', 'matrix', 'ness', 'sela', 'malam'])
+            suffix = " ⚠️CONSULTING" if consulting else ""
+            lead_roles.append(f"PAST: {pe.get('employee_title')} @ {company}: {months} months{suffix}")
+            if not consulting:
+                total_lead_months += months
+
+    lead_summary = ""
+    if lead_roles:
+        lead_summary = f"""
+📊 PRE-CALCULATED LEAD EXPERIENCE (DO NOT RECALCULATE!):
+{chr(10).join(lead_roles)}
+TOTAL LEAD (excluding consulting): {total_lead_months} months ({total_lead_months/12:.1f} years)
+Required: 24 months (2 years) → {"✅ MEETS REQUIREMENT" if total_lead_months >= 24 else "❌ BELOW REQUIREMENT"}
+"""
+
+    current_employer_summary += lead_summary
+
     # Simplified prompt: only raw JSON + instructions
     profile_summary = f"""{work_history_warning}
+{current_employer_summary}
 ## Candidate Profile (Raw JSON):
 ```json
 {raw_json_str}

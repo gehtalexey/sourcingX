@@ -7368,12 +7368,21 @@ with tab_screening:
             good_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
             partial_list = [r for r in screening_results if r.get('fit') == 'Partial Fit']
 
+            # Option to include raw_data (slower export)
+            include_raw_data = st.checkbox("Include raw data in export (slower)", value=False, key="include_raw_data_export")
+
+            # Helper to prepare export data
+            def prepare_export(results_list):
+                if include_raw_data:
+                    return add_raw_data_to_results(results_list)
+                return results_list
+
             export_col1, export_col2, export_col3, export_col4, export_col5 = st.columns(5)
 
             with export_col1:
                 st.download_button(
                     f"Strong Fit ({len(strong_list)})",
-                    pd.DataFrame(add_raw_data_to_results(strong_list)).to_csv(index=False) if strong_list else "",
+                    pd.DataFrame(prepare_export(strong_list)).to_csv(index=False) if strong_list else "",
                     "screening_strong_fit.csv",
                     "text/csv",
                     disabled=len(strong_list) == 0
@@ -7382,7 +7391,7 @@ with tab_screening:
             with export_col2:
                 st.download_button(
                     f"Good Fit ({len(good_list)})",
-                    pd.DataFrame(add_raw_data_to_results(good_list)).to_csv(index=False) if good_list else "",
+                    pd.DataFrame(prepare_export(good_list)).to_csv(index=False) if good_list else "",
                     "screening_good_fit.csv",
                     "text/csv",
                     disabled=len(good_list) == 0
@@ -7391,14 +7400,14 @@ with tab_screening:
             with export_col3:
                 st.download_button(
                     f"Partial Fit ({len(partial_list)})",
-                    pd.DataFrame(add_raw_data_to_results(partial_list)).to_csv(index=False) if partial_list else "",
+                    pd.DataFrame(prepare_export(partial_list)).to_csv(index=False) if partial_list else "",
                     "screening_partial_fit.csv",
                     "text/csv",
                     disabled=len(partial_list) == 0
                 )
 
             with export_col4:
-                full_df = pd.DataFrame(add_raw_data_to_results(sorted_results))
+                full_df = pd.DataFrame(prepare_export(sorted_results))
                 st.download_button(
                     f"All ({len(sorted_results)})",
                     full_df.to_csv(index=False),

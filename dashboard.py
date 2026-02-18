@@ -3352,6 +3352,27 @@ Do NOT mention it as a concern - it's a strength. Only reject if CURRENTLY servi
 
     user_prompt = f"""Evaluate this candidate against the screening requirements below.
 
+## ⛔ CRITICAL: CURRENT vs PAST EMPLOYERS - READ CAREFULLY ⛔
+
+The JSON has TWO SEPARATE arrays - you MUST distinguish them:
+
+1. **`current_employers[]`** = WHERE THEY WORK NOW (end_date is null)
+   - This is their CURRENT job
+   - Use this for "reject overqualified" checks
+   - Use this for CURRENT company evaluation
+
+2. **`past_employers[]`** = WHERE THEY WORKED BEFORE (end_date has a value)
+   - These are PREVIOUS jobs, NOT current
+   - Do NOT say "currently works at X" if X is in past_employers
+   - Past consulting experience does NOT disqualify if current job is different
+
+**COMMON MISTAKES TO AVOID:**
+- ❌ "Candidate currently works at Tikal" when Tikal is in past_employers
+- ❌ "Overqualified because they are VP at X" when VP role is in past_employers
+- ❌ Confusing current_employers with past_employers
+
+**BEFORE SCORING, STATE:** "Current employer: [name from current_employers[0]]"
+
 ## Screening Requirements:
 {job_description}
 {rejection_warning}
@@ -3379,13 +3400,20 @@ IMPORTANT RULES:
 - Add up months from Step 1, excluding Step 2
 - Example: "AT&T (20m) + Intel (26m) = 46 months total lead"
 
-**STEP 4: Add CURRENT role if it's a lead (IMPORTANT!):**
-- Check `current_employers[]` array in JSON (NOT past_employers)
-- Current roles have end_date = null, meaning still employed
-- Calculate duration: from start_date to TODAY (Feb 2026)
-- Example: current_employers shows "DevOps Lead @ Mate Security, start_date: 2024-03"
-  → Duration = Feb 2026 - Mar 2024 = 23 months
-  → ADD this to total lead time from past roles
+**STEP 4: Add CURRENT role if it's a lead (MOST IMPORTANT!):**
+- Look in `current_employers[]` array ONLY (NOT past_employers!)
+- Current roles have `end_date: null` meaning STILL EMPLOYED
+- Calculate duration: from start_date to TODAY (February 2026)
+- Formula: (2026 - start_year) × 12 + (2 - start_month)
+
+**EXAMPLE CALCULATION FOR CURRENT ROLE:**
+```
+current_employers[0]: "DevOps Tech Lead @ H2O.ai, start_date: 2022-07-01"
+Duration = (2026-2022) × 12 + (2-7) = 48 - 5 = 43 months
+```
+This candidate has 43 MONTHS (3.6 years) of lead experience from current role ALONE!
+
+⚠️ DO NOT say "lacks 2 years lead" if current_employers shows a lead role starting before 2024-02!
 
 **STEP 5: Apply percentage scoring:**
 - Total months ÷ required months = percentage
@@ -3394,9 +3422,14 @@ IMPORTANT RULES:
 - 50-74% → 4-5 (halfway)
 - <50% → 3-4 (far, signals cannot compensate)
 
-**IN YOUR REASONING, YOU MUST SHOW THE MATH:**
-"LEAD CALCULATION: [Past: Role1 @ Company1: Xm] + [Past: Role2 @ Company2: Ym] + [CURRENT: Role @ Company: Zm] = TOTAL Wm months (W÷24 = X%)"
-Example: "LEAD: [Past: DevOps Lead @ APEX: 9m] + [CURRENT: DevOps Lead @ Mate Security: 14m] = 23m total (23÷24 = 96%)"
+**IN YOUR REASONING, YOU MUST:**
+1. First state: "CURRENT EMPLOYER: [company from current_employers[0]]"
+2. Then show the math:
+"LEAD CALCULATION: [CURRENT: Role @ Company: Xm (start_date to Feb 2026)] + [Past: Role @ Company: Ym] = TOTAL Zm months (Z÷24 = X%)"
+
+Example:
+"CURRENT EMPLOYER: H2O.ai
+LEAD: [CURRENT: DevOps Tech Lead @ H2O.ai: 43m (2022-07 to 2026-02)] + [Past: none] = 43m total (43÷24 = 179%) ✓ MEETS 2yr requirement"
 
 ## Candidate Profile:
 {profile_summary}

@@ -4045,24 +4045,46 @@ def fetch_raw_data_for_batch(profiles: list, raw_index: dict = None, db_client =
     # SECOND: Fetch from DB for still-missing profiles
     still_missing = [p for p in profiles if not p.get('raw_crustdata') and not p.get('raw_data')]
     if still_missing and db_client:
-        try:
-            missing_urls = [p.get('linkedin_url', '') for p in still_missing if p.get('linkedin_url')]
-            if missing_urls:
-                # Fetch ONLY the profiles we need using 'in' filter
-                url_filter = ','.join(missing_urls)
+        missing_urls = [p.get('linkedin_url', '') for p in still_missing if p.get('linkedin_url')]
+        if missing_urls:
+            db_raw_by_url = {}
+            # Try batch fetch first (faster), fall back to individual fetches
+            try:
+                # Quote URLs to handle special chars in Supabase 'in' filter
+                quoted_urls = [f'"{u}"' for u in missing_urls]
+                url_filter = ','.join(quoted_urls)
                 db_profiles = db_client.select('profiles', 'linkedin_url,raw_data',
                                                {'linkedin_url': f'in.({url_filter})'},
                                                limit=len(missing_urls))
-                db_raw_by_url = {}
                 for dp in db_profiles:
                     if dp.get('linkedin_url'):
                         db_raw_by_url[dp['linkedin_url']] = _ensure_raw_dict(dp.get('raw_data'))
-                for p in still_missing:
-                    url = p.get('linkedin_url', '')
-                    if url and url in db_raw_by_url and db_raw_by_url[url]:
-                        p['raw_crustdata'] = db_raw_by_url[url]
-        except Exception as e:
-            print(f"[Screening] Failed to fetch raw data from DB: {e}")
+            except Exception as e:
+                print(f"[Screening] Batch fetch failed ({e}), trying individual fetches...")
+
+            # Fall back: fetch individually for any still missing
+            fetched_count = 0
+            for p in still_missing:
+                url = p.get('linkedin_url', '')
+                if url and url not in db_raw_by_url:
+                    try:
+                        from db import get_profile
+                        db_profile = get_profile(db_client, url)
+                        if db_profile and db_profile.get('raw_data'):
+                            db_raw_by_url[url] = _ensure_raw_dict(db_profile['raw_data'])
+                            fetched_count += 1
+                    except Exception:
+                        pass
+
+            # Apply fetched raw data to profiles
+            applied = 0
+            for p in still_missing:
+                url = p.get('linkedin_url', '')
+                if url and url in db_raw_by_url and db_raw_by_url[url]:
+                    p['raw_crustdata'] = db_raw_by_url[url]
+                    applied += 1
+            if applied < len(still_missing):
+                print(f"[Screening] Warning: {len(still_missing) - applied} profiles still missing raw data after DB fetch")
 
 
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
@@ -7190,11 +7212,16 @@ with tab_screening:
                     with st.status(f"Processing batch {current_batch + 1} ({screen_mode} mode)...", expanded=True) as status:
                         # Fetch raw_data for this batch only (memory efficient)
                         db_client = _get_db_client() if HAS_DATABASE else None
+                        missing_before = sum(1 for p in batch_profiles if not p.get('raw_crustdata') and not p.get('raw_data'))
                         fetch_raw_data_for_batch(
                             batch_profiles,
                             raw_index=raw_index,
                             db_client=db_client
                         )
+                        missing_after = sum(1 for p in batch_profiles if not p.get('raw_crustdata') and not p.get('raw_data'))
+                        if missing_before > 0:
+                            fetched = missing_before - missing_after
+                            st.write(f"📦 Fetched raw data for {fetched}/{missing_before} profiles from DB" + (f" ({missing_after} still missing)" if missing_after > 0 else ""))
 
                         # Progress callback (DB save deferred to batch at end)
                         def _on_profile_screened(completed, total, result):

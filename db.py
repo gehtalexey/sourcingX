@@ -49,8 +49,9 @@ class SupabaseClient:
             return response.json()
         return {}
 
-    def select(self, table: str, columns: str = '*', filters: dict = None, limit: int = 50000) -> list:
-        """Select rows from a table. Auto-paginates past Supabase 1000-row server limit."""
+    def select(self, table: str, columns: str = '*', filters: dict = None, limit: int = 5000) -> list:
+        """Select rows from a table. Auto-paginates past Supabase 1000-row server limit.
+        Default limit reduced to 5000 to prevent OOM on large datasets."""
         PAGE_SIZE = 1000
         params = {'select': columns}
         if filters:

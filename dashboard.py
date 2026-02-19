@@ -215,7 +215,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Load API keys
-@st.cache_data(ttl=60, max_entries=3)  # Limit cache size
+@st.cache_data(ttl=3600, max_entries=3)  # Config rarely changes - cache for 1 hour
 def load_config():
     """Load config from config.json or Streamlit secrets (for cloud deployment)."""
     config = {}
@@ -685,8 +685,9 @@ def _screening_session_start():
     counter = _get_screening_counter()
     with counter['lock']:
         counter['active'] += 1
-        # Scale workers: 50 for 1 user, 25 for 2, 16 for 3, etc. Min 5.
-        workers = max(5, 50 // counter['active'])
+        # Scale workers: 15 for 1 user, 7 for 2, 5 for 3, etc. Min 3.
+        # Capped at 15 to prevent thread explosion and memory fragmentation.
+        workers = max(3, 15 // counter['active'])
         return workers
 
 
@@ -3846,7 +3847,7 @@ def fetch_raw_data_for_batch(profiles: list, raw_index: dict = None, db_client =
 
 
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
-                          max_workers: int = 50,
+                          max_workers: int = 15,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
                           system_prompt: str = None, ai_model: str = "gpt-4o-mini") -> list:
     """Screen multiple profiles in parallel using ThreadPoolExecutor.
@@ -3855,7 +3856,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         profiles: List of profile dicts to screen
         job_description: The job description to screen against
         openai_api_key: OpenAI API key (we create client per thread for safety)
-        max_workers: Number of concurrent threads (default 50 for Tier 3)
+        max_workers: Number of concurrent threads (default 15, scales with concurrent users)
         progress_callback: Function(completed, total, result) called after each profile
         cancel_flag: Dict with 'cancelled' key to check for cancellation
         system_prompt: Custom system prompt for screening
@@ -4065,7 +4066,7 @@ with tab_upload:
                     if db_client:
                         from db import get_profiles_by_status
 
-                        @st.cache_data(ttl=120)
+                        @st.cache_data(ttl=120, max_entries=3)
                         def _get_db_restore_counts():
                             c = _get_db_client()
                             return (
@@ -4297,7 +4298,7 @@ with tab_upload:
 
             if selected_agent:
                 # Load search history for this agent (cached to avoid DB call on every rerun)
-                @st.cache_data(ttl=60)
+                @st.cache_data(ttl=300, max_entries=5)
                 def _load_search_history_cached(agent_id):
                     return load_search_history(agent_id=agent_id)
 
@@ -5615,7 +5616,7 @@ with tab_enrich:
 
                 # Check for recently enriched profiles in database (within ENRICHMENT_REFRESH_MONTHS)
                 # Cached to avoid fetching 50K+ URLs on every tab load
-                @st.cache_data(ttl=300, show_spinner=False)
+                @st.cache_data(ttl=300, max_entries=3, show_spinner=False)
                 def _get_cached_enriched_urls(_months):
                     """Fetch recently enriched URLs from DB (cached 5 min)."""
                     db_client = _get_db_client()
@@ -5731,15 +5732,23 @@ with tab_enrich:
                                         import datetime as dt
                                         cutoff_date = (dt.datetime.utcnow() - dt.timedelta(days=refresh_months * 30)).isoformat()
 
-                                        # Paginate to get all profiles
+                                        # Paginate to get all profiles (capped at 5000 to prevent OOM)
                                         all_db_profiles = []
                                         offset = 0
                                         page_size = 1000
+                                        max_total_profiles = 5000
                                         while True:
+                                            if len(all_db_profiles) >= max_total_profiles:
+                                                st.warning(f"Capped at {max_total_profiles} profiles to prevent memory issues.")
+                                                break
                                             filters = {'enriched_at': f'gte.{cutoff_date}', 'offset': str(offset)}
                                             batch = db_client.select('profiles', '*', filters, limit=page_size)
                                             if not batch:
                                                 break
+                                            # MEMORY FIX: Strip heavy raw data immediately after loading
+                                            for p in batch:
+                                                p.pop('raw_data', None)
+                                                p.pop('raw_crustdata', None)
                                             all_db_profiles.extend(batch)
                                             if len(batch) < page_size:
                                                 break
@@ -5800,12 +5809,10 @@ with tab_enrich:
 
                                         if matched_profiles:
                                             enriched_df = profiles_to_dataframe(matched_profiles)
-                                            # Strip raw_data from profiles to save memory (will fetch from DB when screening)
-                                            for p in matched_profiles:
-                                                p.pop('raw_data', None)
-                                                p.pop('raw_crustdata', None)
-                                            st.session_state['enriched_results'] = matched_profiles
+                                            # MEMORY FIX: Only store the DataFrame, not the list (saves ~50MB per 1000 profiles)
                                             st.session_state['enriched_df'] = enriched_df
+                                            if 'enriched_results' in st.session_state:
+                                                del st.session_state['enriched_results']
                                             save_session_state()
                                             st.success(f"Loaded **{len(matched_profiles)}** enriched profiles for screening! (from {len(all_profiles)} in DB, {len(skipped_variations)} variations)")
                                             st.balloons()
@@ -5910,12 +5917,13 @@ with tab_enrich:
                             st.write(f"- Result samples: {match_debug.get('result_samples', [])}")
 
                         if successful:
-                            # Save enriched data separately - don't overwrite original loaded data
-                            # Note: raw_data stays in enriched_results here (fresh from API)
-                            # It will be available for immediate screening without DB fetch
-                            st.session_state['enriched_results'] = successful
+                            # Save enriched data - DataFrame is the single source of truth
+                            # raw_data is saved to DB during enrichment, will be fetched from DB when screening
                             enriched_df = flatten_for_csv(successful)
                             st.session_state['enriched_df'] = enriched_df
+                            # MEMORY FIX: Don't store list version (enriched_results) - saves ~50MB per 1000 profiles
+                            if 'enriched_results' in st.session_state:
+                                del st.session_state['enriched_results']
                             save_session_state()  # Save for restore
 
                             # Debug: show what was created
@@ -6137,7 +6145,7 @@ with tab_filter2:
                                     employers = [e.strip().lower() for e in str(employers_data).split(',')]
                                 return any(emp in not_relevant_companies for emp in employers)
                             mask = df['all_employers'].apply(has_not_relevant_employer)
-                            filtered_out['Not Relevant Companies'] = df[mask].to_dict('records')
+                            # MEMORY FIX: Store only count, not full records (saves 10-50MB)
                             removed['Not Relevant Companies'] = mask.sum()
                             df = df[~mask]
 
@@ -6198,7 +6206,7 @@ with tab_filter2:
 
                             if uni_filter_mode == "Require (filter others out)":
                                 mask = ~df['_target_uni']
-                                filtered_out['Non-Target Universities'] = df[mask].drop(columns=['_target_uni']).to_dict('records')
+                                # MEMORY FIX: Store only count, not full records
                                 removed['Non-Target Universities'] = mask.sum()
                                 df = df[df['_target_uni']]
                                 df = df.drop(columns=['_target_uni'])
@@ -6216,7 +6224,7 @@ with tab_filter2:
                             text = ' '.join(str(row[c]) for c in available_search_cols if row.get(c) is not None).lower()
                             return any(kw in text for kw in keywords)
                         mask = df.apply(has_include_keyword, axis=1)
-                        filtered_out['Missing Title Keywords'] = df[~mask].to_dict('records')
+                        # MEMORY FIX: Store only count, not full records
                         removed['Missing Title Keywords'] = (~mask).sum()
                         df = df[mask]
 
@@ -6230,7 +6238,7 @@ with tab_filter2:
                             text = ' '.join(str(row[c]) for c in available_search_cols if row.get(c) is not None).lower()
                             return any(kw in text for kw in keywords)
                         mask = df.apply(has_exclude_keyword, axis=1)
-                        filtered_out['Excluded Title Keywords'] = df[mask].to_dict('records')
+                        # MEMORY FIX: Store only count, not full records
                         removed['Excluded Title Keywords'] = mask.sum()
                         df = df[~mask]
 
@@ -6275,7 +6283,7 @@ with tab_filter2:
                             mask = df.apply(has_required_keywords, axis=1)
                             logic_label = "all" if skills_logic == "AND" else "any"
                             filter_name = f'Missing Keywords in {scope_label} ({logic_label})'
-                            filtered_out[filter_name] = df[~mask].to_dict('records')
+                            # MEMORY FIX: Store only count, not full records
                             removed[filter_name] = (~mask).sum()
                             df = df[mask]
                         else:
@@ -6911,9 +6919,16 @@ with tab_screening:
                 all_results = batch_state.get('results', [])
 
                 # Build raw_data index once (first batch only), reuse for all batches
+                # Note: raw_data is fetched from DB per-batch by fetch_raw_data_for_batch()
+                # so we only need the index as a fast pre-lookup cache
                 raw_index = batch_state.get('raw_index')
                 if raw_index is None:
-                    raw_index = build_raw_data_index(st.session_state.get('enriched_results'))
+                    # Try enriched_df first (may have raw_data if fresh from API enrichment)
+                    enriched_df_src = st.session_state.get('enriched_df')
+                    if enriched_df_src is not None and not enriched_df_src.empty and 'raw_data' in enriched_df_src.columns:
+                        raw_index = build_raw_data_index(enriched_df_src.to_dict('records'))
+                    else:
+                        raw_index = {}  # DB fetch in fetch_raw_data_for_batch() will handle it
                     st.session_state['screening_batch_state']['raw_index'] = raw_index
 
                 start_idx = current_batch * batch_size
@@ -6934,12 +6949,12 @@ with tab_screening:
                         def _on_profile_screened(completed, total, result):
                             pass  # DB save happens in batch after screening completes
 
-                        # Screen this batch (Tier 3: 50 parallel API calls)
+                        # Screen this batch - use dynamic workers (scales with concurrent users)
                         batch_results = screen_profiles_batch(
                             batch_profiles,
                             job_desc,
                             openai_key,
-                            max_workers=min(50, len(batch_profiles)),
+                            max_workers=min(max_workers, len(batch_profiles)),
                             mode=screen_mode,
                             system_prompt=system_prompt,
                             ai_model=batch_ai_model,
@@ -7362,10 +7377,12 @@ with tab_screening:
                     except Exception as e:
                         print(f"[Export] Failed to fetch raw_data from DB: {e}")
 
-                # Fallback: try enriched_results if DB didn't have data
+                # Fallback: try enriched_df if DB didn't have data
                 if not raw_index:
-                    enriched_results = st.session_state.get('enriched_results', [])
-                    raw_index = build_raw_data_index(enriched_results) if enriched_results else {}
+                    enriched_df_fallback = st.session_state.get('enriched_df')
+                    if enriched_df_fallback is not None and not enriched_df_fallback.empty and 'raw_data' in enriched_df_fallback.columns:
+                        enriched_records = enriched_df_fallback.to_dict('records')
+                        raw_index = build_raw_data_index(enriched_records) if enriched_records else {}
 
                 results_with_raw = []
                 for r in results_list:

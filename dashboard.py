@@ -4385,12 +4385,14 @@ with tab_upload:
                                 profiles = get_profiles_by_status(db_client, "enriched", limit=500)  # Reduced for memory
                                 if profiles:
                                     df = profiles_to_dataframe(profiles)
-                                    # Strip raw_data to save memory (will fetch from DB when screening)
-                                    for p in profiles:
-                                        p.pop('raw_data', None)
-                                        p.pop('raw_crustdata', None)
                                     st.session_state['results_df'] = df
                                     st.session_state['enriched_df'] = df
+                                    # Cache raw profile dicts so screening doesn't re-fetch from DB
+                                    # Only for small sets (<= 500) to save memory
+                                    if len(profiles) <= 500:
+                                        st.session_state['enriched_profiles_raw'] = {
+                                            p.get('linkedin_url', ''): p for p in profiles if p.get('raw_data')
+                                        }
                                     cleanup_memory()
                                     st.success(f"Loaded {len(profiles)} enriched profiles!")
                                     st.rerun()
@@ -6714,16 +6716,30 @@ with tab_screening:
                 if isinstance(v, float) and math.isnan(v):
                     p[k] = ''
 
-        # Keep raw_data if profiles already have it (avoids unnecessary DB re-fetch)
-        # Only strip for large sets (500+) to save memory on Streamlit Cloud
+        # Restore raw_data from cached profile dicts (avoids re-fetching from DB)
+        raw_cache = st.session_state.get('enriched_profiles_raw', {})
+        if raw_cache:
+            restored = 0
+            for p in profiles:
+                url = p.get('linkedin_url', '')
+                if url and not p.get('raw_data') and not p.get('raw_crustdata') and url in raw_cache:
+                    cached = raw_cache[url]
+                    if cached.get('raw_data'):
+                        p['raw_crustdata'] = cached['raw_data']
+                        restored += 1
+            if restored > 0:
+                pass  # raw_data restored silently from cache
+
+        # Check raw_data availability
         has_raw = sum(1 for p in profiles if p.get('raw_data') or p.get('raw_crustdata'))
         if len(profiles) > 500 and has_raw > 0:
             for p in profiles:
                 p.pop('raw_data', None)
                 p.pop('raw_crustdata', None)
+            has_raw = 0
             st.caption(f"{len(profiles)} profiles ready for screening (raw data will be fetched per-batch to save memory)")
         elif has_raw > 0:
-            st.caption(f"{len(profiles)} profiles ready for screening ({has_raw} with raw data — will screen immediately)")
+            st.caption(f"{len(profiles)} profiles ready for screening ({has_raw}/{len(profiles)} with raw data)")
         else:
             st.caption(f"{len(profiles)} profiles ready for screening (raw data will be fetched from DB)")
 
@@ -7861,6 +7877,11 @@ with tab_database:
                     if load_profiles:
                         load_df = profiles_to_dataframe(load_profiles)
                         st.session_state['results_df'] = load_df
+                        # Cache raw profile dicts so screening doesn't re-fetch from DB
+                        if len(load_profiles) <= 500:
+                            st.session_state['enriched_profiles_raw'] = {
+                                p.get('linkedin_url', ''): p for p in load_profiles if p.get('raw_data')
+                            }
                         st.success(f"Loaded **{len(load_profiles)}** profiles from database!")
                         st.rerun()
                     else:

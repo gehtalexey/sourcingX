@@ -3046,12 +3046,8 @@ def get_screening_prompt_for_role(role_type: str = None, job_description: str = 
             return DEFAULT_PROMPTS[role_type]['prompt'], role_type, DEFAULT_PROMPTS[role_type]['name']
 
     # Auto-detect from job description
-    if job_description and db_client:
-        matched = match_prompt_by_keywords(db_client, job_description)
-        if matched:
-            return matched['prompt_text'], matched['role_type'], matched.get('name', matched['role_type'].title())
-
-    # Auto-detect using default prompts (no DB)
+    # Always use DEFAULT_PROMPTS keywords for detection (code keywords are kept up to date)
+    # Then check if DB has a customized prompt TEXT for the detected role
     if job_description:
         jd_lower = job_description.lower()
         best_match = None
@@ -3064,6 +3060,11 @@ def get_screening_prompt_for_role(role_type: str = None, job_description: str = 
                 best_score = score
                 best_match = role_key
         if best_score >= 2 and best_match:
+            # Check if DB has a customized prompt for this role (user may have edited it)
+            if db_client:
+                db_prompt = get_screening_prompt_by_role(db_client, best_match)
+                if db_prompt:
+                    return db_prompt['prompt_text'], best_match, db_prompt.get('name', DEFAULT_PROMPTS[best_match]['name'])
             return DEFAULT_PROMPTS[best_match]['prompt'], best_match, DEFAULT_PROMPTS[best_match]['name']
 
     # Fall back to general/default

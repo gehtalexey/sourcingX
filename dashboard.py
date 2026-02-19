@@ -3406,6 +3406,81 @@ Skills: Frontend=[{', '.join(fe_found[:5])}] Backend=[{', '.join(be_found[:5])}]
 💡 LinkedIn skills are often incomplete. Check raw JSON employer descriptions and role context.
 """
 
+    # Pre-calculate DEVOPS/PLATFORM experience (for "X years DevOps" requirements)
+    devops_title_keywords = ['devops', 'sre', 'site reliability', 'platform engineer', 'infrastructure engineer', 'cloud engineer', 'cloud architect', 'release engineer', 'build engineer']
+    not_devops_keywords = ['sysadmin', 'system admin', 'helpdesk', 'help desk', 'desktop support', 'it support', 'storage admin', 'dba', 'database admin']
+    devops_skill_signals = ['kubernetes', 'k8s', 'terraform', 'ansible', 'docker', 'aws', 'gcp', 'azure', 'ci/cd', 'jenkins', 'argocd', 'helm', 'prometheus', 'grafana', 'linux', 'cloudformation', 'pulumi']
+    has_devops_skills = sum(1 for s in devops_skill_signals if s in skills_lower_str) >= 3
+
+    devops_roles = []
+    total_devops_months = 0
+
+    # Current employer devops check
+    for ce in current_employers:
+        title = (ce.get('employee_title') or '').lower()
+        is_explicit_devops = any(kw in title for kw in devops_title_keywords)
+        is_excluded = any(kw in title for kw in not_devops_keywords)
+        if is_explicit_devops and not is_excluded:
+            start = ce.get('start_date', '')
+            months = 0
+            if start:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
+                    months = (2026 - start_dt.year) * 12 + (2 - start_dt.month)
+                except:
+                    pass
+            devops_roles.append(f"CURRENT: {ce.get('employee_title')} @ {ce.get('employer_name')}: {months} months")
+            total_devops_months += months
+
+    # Past employer devops check
+    for pe in raw_crustdata.get('past_employers', []):
+        title = (pe.get('employee_title') or '').lower()
+        is_explicit_devops = any(kw in title for kw in devops_title_keywords)
+        is_excluded = any(kw in title for kw in not_devops_keywords)
+        if is_explicit_devops and not is_excluded:
+            start = pe.get('start_date', '')
+            end = pe.get('end_date', '')
+            months = 0
+            if start and end:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
+                    end_dt = datetime.fromisoformat(end.replace('+00:00', '').replace('Z', ''))
+                    months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
+                except:
+                    pass
+            company = pe.get('employer_name', '')
+            consulting = any(c in company.lower() for c in ['tikal', 'matrix', 'ness', 'sela', 'malam', 'bynet', 'sqlink'])
+            # Cloud-focused consulting is OK for DevOps
+            cloud_consulting = any(c in company.lower() for c in ['allcloud', 'doit', 'cloudride', 'opsfleet', 'terasky'])
+            suffix = " ⚠️CONSULTING" if consulting and not cloud_consulting else ""
+            devops_roles.append(f"PAST: {pe.get('employee_title')} @ {company}: {months} months{suffix}")
+            if not consulting or cloud_consulting:
+                total_devops_months += months
+
+    devops_summary = ""
+    if devops_roles:
+        devops_skills_found = [s for s in devops_skill_signals if s in skills_lower_str]
+        devops_summary = f"""
+📊 PRE-CALCULATED DEVOPS/PLATFORM EXPERIENCE:
+{chr(10).join(devops_roles)}
+TOTAL (excluding body-shop consulting): {total_devops_months} months ({total_devops_months/12:.1f} years)
+DevOps Skills: [{', '.join(devops_skills_found[:8])}]
+💡 SRE, Platform Engineer, Cloud Engineer, Infrastructure Engineer = DevOps experience.
+"""
+    elif has_devops_skills:
+        devops_skills_found = [s for s in devops_skill_signals if s in skills_lower_str]
+        devops_summary = f"""
+📊 DEVOPS EXPERIENCE: No explicit DevOps/SRE/Platform titles, but candidate has strong DevOps skills:
+   Skills: {', '.join(devops_skills_found[:8])}
+💡 Engineer with strong infra/cloud skills may have DevOps experience under a generic title. Check raw JSON.
+"""
+    else:
+        devops_summary = """
+📊 DEVOPS EXPERIENCE: No DevOps/SRE/Platform titles or skills detected from LinkedIn.
+"""
+
     # Pre-calculate TOTAL CAREER EXPERIENCE (for "reject >X years" rules)
     all_start_dates = []
     for ce in current_employers:
@@ -3433,7 +3508,7 @@ Skills: Frontend=[{', '.join(fe_found[:5])}] Backend=[{', '.join(be_found[:5])}]
         except:
             total_experience_summary = "\n📅 TOTAL CAREER EXPERIENCE: Could not calculate\n"
 
-    current_employer_summary += lead_summary + fullstack_summary + total_experience_summary
+    current_employer_summary += lead_summary + fullstack_summary + devops_summary + total_experience_summary
 
     # Profile summary with pre-calculated hints + raw JSON fallback
     profile_summary = f"""{work_history_warning}
@@ -3535,9 +3610,12 @@ Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requi
   * TOTAL: 24 months from PayPal only
 
 **For "X years [ROLE TYPE] experience" (DevOps, Backend, Frontend, Fullstack, QA, etc.):**
-- DevOps roles: titles containing DevOps, SRE, Platform Engineer, Cloud Engineer, Infrastructure
-- Backend roles: titles containing Backend, Software Engineer, Developer
-- Do NOT count as DevOps: SysAdmin, Storage Admin, QA, IT Support, DBA, Network Admin
+- DevOps roles: titles containing DevOps, SRE, Site Reliability, Platform Engineer, Cloud Engineer, Infrastructure Engineer, Cloud Architect, Release Engineer
+- Backend roles: titles containing Backend, Software Engineer, Developer (at product companies)
+- Frontend roles: titles containing Frontend, Front-End, UI Engineer, Web Developer (with modern frameworks)
+- Do NOT count as DevOps: SysAdmin, Storage Admin, QA, IT Support, DBA, Network Admin, Desktop Support
+- Cloud-focused consulting (AllCloud, DoiT, Cloudride, Opsfleet) = legitimate DevOps employers, NOT consulting
+- CHECK the pre-calculated DEVOPS EXPERIENCE section above — it already analyzed titles + skills
 
 **FULLSTACK roles — CRITICAL (most engineers don't have "Full Stack" in title):**
 - DEFINITELY fullstack: titles containing "Full Stack", "Fullstack", "Full-Stack"
@@ -3697,6 +3775,28 @@ If pre-calculated total is close (≥75%) and candidate has strong signals → s
 
 **SHOW YOUR MATH:**
 "FULLSTACK: [CURRENT: Software Engineer @ Monday.com: 36m] + [PAST: Developer @ Startup: 24m] = 60m total (60÷48 = 125%) ✓ MEETS 4yr requirement"
+
+⚠️ DEVOPS/PLATFORM EXPERIENCE CALCULATION (when JD requires "X years DevOps/SRE/Platform"):
+
+**Titles that COUNT as DevOps experience:**
+1. DevOps Engineer, Senior DevOps Engineer — obviously counts
+2. SRE / Site Reliability Engineer — this IS DevOps experience
+3. Platform Engineer, Infrastructure Engineer — this IS DevOps experience
+4. Cloud Engineer, Cloud Architect — this IS DevOps experience
+5. Release Engineer, Build Engineer (if CI/CD focused)
+
+**Titles that DO NOT count:**
+- SysAdmin, System Administrator (unless modernized with cloud/K8s)
+- IT Support, Helpdesk, Desktop Support — NEVER DevOps
+- DBA, Storage Admin, Network Admin — different specialization
+- QA, Software Engineer — unless doing infra work
+
+**Cloud-focused consulting companies (AllCloud, DoiT, Cloudride, Opsfleet, Terasky) are LEGITIMATE DevOps employers — do NOT exclude them as consulting.**
+
+**USE the pre-calculated DEVOPS EXPERIENCE section above** — it already analyzed all roles.
+
+**SHOW YOUR MATH:**
+"DEVOPS: [CURRENT: SRE @ Wiz: 30m] + [PAST: DevOps Engineer @ Startup: 24m] = 54m total (54÷36 = 150%) ✓ MEETS 3yr requirement"
 
 ## Candidate Profile:
 {profile_summary}

@@ -3524,6 +3524,7 @@ DevOps Skills: [{', '.join(devops_skills_found[:8])}]
             all_positions_info.append((start, end, is_mil, pe.get('employer_name', '')))
 
     total_experience_summary = ""
+    experience_years_for_rejection = None  # Will be set to the number AI should use for "reject >X years"
     if all_positions_info:
         try:
             from datetime import datetime
@@ -3554,6 +3555,27 @@ DevOps Skills: [{', '.join(devops_skills_found[:8])}]
             industry_months = max(0, total_months - military_months)
             industry_years = industry_months / 12
 
+            # The number to use for "reject >X years" rules
+            experience_years_for_rejection = industry_years if military_months > 0 else total_years
+
+            # Extract max-years threshold from JD (e.g., "reject >15 years", "more than 15 years")
+            import re
+            max_years_match = re.search(
+                r'(?:reject|exclude|no|max(?:imum)?|more\s+than|over|exceed)[^.]*?(\d{1,2})\s*(?:total\s+)?years?\s*(?:of\s+)?(?:total\s+)?(?:experience|exp)?',
+                job_description.lower()
+            )
+            jd_max_years = int(max_years_match.group(1)) if max_years_match else None
+
+            # Build experience threshold verdict (pre-computed in Python, not by AI)
+            threshold_verdict = ""
+            if jd_max_years:
+                if experience_years_for_rejection > jd_max_years:
+                    threshold_verdict = f"""
+🚫🚫🚫 EXPERIENCE LIMIT CHECK: {experience_years_for_rejection:.1f} years > {jd_max_years} years → ❌ EXCEEDS LIMIT — HARD REJECT (score 1-2) 🚫🚫🚫"""
+                else:
+                    threshold_verdict = f"""
+✅✅✅ EXPERIENCE LIMIT CHECK: {experience_years_for_rejection:.1f} years ≤ {jd_max_years} years → ✅ PASSES — DO NOT REJECT FOR EXPERIENCE ✅✅✅"""
+
             if military_months > 0:
                 mil_detail_str = chr(10).join(f"   {d}" for d in military_details)
                 total_experience_summary = f"""
@@ -3562,12 +3584,13 @@ DevOps Skills: [{', '.join(devops_skills_found[:8])}]
    💼 INDUSTRY EXPERIENCE (excluding military): {industry_months} months ({industry_years:.1f} years)
    ⚠️ For "reject >X years" rules → use INDUSTRY EXPERIENCE ({industry_years:.1f} years), NOT total with military!
    ⚠️ Israeli military is mandatory service (age 18-21), NOT professional experience.
+{threshold_verdict}
 """
             else:
                 total_experience_summary = f"""
 📅 TOTAL CAREER EXPERIENCE: {total_months} months ({total_years:.1f} years)
    (Career started: {earliest[:10]})
-   ⚠️ For "reject >X years" rules → compare against {total_years:.1f} years.
+{threshold_verdict}
 """
         except:
             total_experience_summary = "\n📅 TOTAL CAREER EXPERIENCE: Could not calculate\n"
@@ -3616,14 +3639,12 @@ The requirements contain HARD RULES. These are NOT preferences - they are disqua
 3. "Reject project companies" → If current company is consulting/outsourcing (Matrix, Tikal, Ness, Sela, Malam Team, Bynet, SQLink, etc.) → Score 1-2
    IMPORTANT: Cloud-focused companies like AllCloud, DoiT, Cloudride are LEGITIMATE DevOps/Cloud employers, NOT consulting firms. Do NOT reject them.
 4. "Reject [specific type]" → Apply literally to CURRENT position
-5. "Reject profiles with more than X years experience" or "max X years" → USE THE PRE-CALCULATED VALUES ABOVE:
-   - Check the "📅 TOTAL CAREER EXPERIENCE" or "💼 INDUSTRY EXPERIENCE" section above
-   - If military service is detected, use INDUSTRY EXPERIENCE (excluding military), NOT total career span
-   - Israeli military is mandatory service (age 18-21) and does NOT count as professional experience for this check
-   - Compare the pre-calculated number DIRECTLY against the JD's limit. Do NOT recalculate yourself.
-   - Example: Pre-calc says "INDUSTRY EXPERIENCE: 14.3 years" and JD says "reject >15 years" → 14.3 < 15 → DOES NOT EXCEED → do NOT reject
-   - Example: Pre-calc says "TOTAL: 16.2 years" (no military) and JD says "reject >15 years" → 16.2 > 15 → REJECT
-   - This is a HARD rejection rule, but ONLY when the number ACTUALLY exceeds the limit!
+5. "Reject profiles with more than X years experience" or "max X years" → THE SYSTEM HAS ALREADY CHECKED THIS FOR YOU:
+   - Look for the "✅✅✅ EXPERIENCE LIMIT CHECK" or "🚫🚫🚫 EXPERIENCE LIMIT CHECK" verdict in the pre-calculated section above
+   - If it says ✅ PASSES → DO NOT reject for experience. The candidate is WITHIN the limit. Period.
+   - If it says 🚫 EXCEEDS → HARD REJECT (score 1-2). The candidate exceeds the limit.
+   - DO NOT recalculate experience yourself. DO NOT override the pre-calculated verdict. The numbers are computed by code and are CORRECT.
+   - If no verdict is shown, check the "📅 TOTAL CAREER EXPERIENCE" number and compare DIRECTLY against the JD's limit.
 6. "Reject job hoppers" → Check for pattern of short tenures:
    - Multiple positions with <1 year tenure = job hopper pattern
    - 3+ jobs in 3 years without promotions = job hopper
@@ -3650,47 +3671,29 @@ Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requi
 
 **Score 1-2 (Not a Fit — hard reject)**: Candidate matches a REJECTION criterion (overqualified, junior, consulting company, etc.)
 
-### EXPERIENCE CALCULATION (FROM RAW JSON):
+### TOTAL EXPERIENCE — USE PRE-CALCULATED VALUES ONLY:
+⚠️⚠️⚠️ TOTAL CAREER EXPERIENCE has been pre-calculated by code above (📅 section).
+DO NOT recalculate total years yourself. The pre-calculated number is CORRECT.
+If an EXPERIENCE LIMIT CHECK verdict (✅ or 🚫) is shown above, FOLLOW IT — do not override.
 
-**Read the raw JSON and calculate experience directly:**
-
-**JSON Structure:**
-- `current_employers[]` - Current positions (end_date is null)
-- `past_employers[]` - Past positions with start_date and end_date
-- Each position has: `employee_title`, `employer_name`, `start_date`, `end_date`
-
-**How to calculate duration:**
-- Parse `start_date` and `end_date` (format: "YYYY-MM-01T00:00:00+00:00")
-- If `end_date` is null → role is current, use today's date (Feb 2026)
-- Calculate: (end_year - start_year) * 12 + (end_month - start_month)
+### ROLE-SPECIFIC EXPERIENCE CALCULATION:
+For role-specific requirements (lead, fullstack, devops, etc.), use the pre-calculated sections above.
+If you need to verify, you may check the raw JSON positions, but for TOTAL EXPERIENCE always trust the pre-calculated value.
 
 **For "X years LEAD/TEAM LEAD experience" requirements:**
-- Find roles where `employee_title` contains: Lead, Leader, Manager, Head, Director, TL
-- EXCLUDE: Consulting firms (Tikal, Matrix, Ness), non-tech lead roles (Branch Manager, Sales), IC roles (Lead Developer without team)
-- SUM qualifying lead roles ONLY
-- Compare to requirement (2 years = 24 months)
-- Example calculation:
-  * "DevOps Lead @ PayPal: 2022-08 to 2024-08 = 24 months" ✓ (counts)
-  * "Tech Lead @ Tikal: 2020-12 to 2024-09 = 45 months" ✗ (consulting, excluded)
-  * "Branch Manager @ Postal Co: 2019-01 to 2021-01 = 24 months" ✗ (non-tech, excluded)
-  * TOTAL: 24 months from PayPal only
+- USE the pre-calculated LEAD/MANAGEMENT EXPERIENCE section above
+- If verifying: Find roles where `employee_title` contains Lead, Leader, Manager, Head, Director, TL
+- EXCLUDE: Consulting firms (Tikal, Matrix, Ness), non-tech lead roles, IC roles
 
 **For "X years [ROLE TYPE] experience" (DevOps, Backend, Frontend, Fullstack, QA, etc.):**
-- DevOps roles: titles containing DevOps, SRE, Site Reliability, Platform Engineer, Cloud Engineer, Infrastructure Engineer, Cloud Architect, Release Engineer
-- Backend roles: titles containing Backend, Software Engineer, Developer (at product companies)
-- Frontend roles: titles containing Frontend, Front-End, UI Engineer, Web Developer (with modern frameworks)
-- Do NOT count as DevOps: SysAdmin, Storage Admin, QA, IT Support, DBA, Network Admin, Desktop Support
+- USE the pre-calculated DEVOPS/FULLSTACK EXPERIENCE sections above
 - Cloud-focused consulting (AllCloud, DoiT, Cloudride, Opsfleet) = legitimate DevOps employers, NOT consulting
-- CHECK the pre-calculated DEVOPS EXPERIENCE section above — it already analyzed titles + skills
 
 **FULLSTACK roles — CRITICAL (most engineers don't have "Full Stack" in title):**
 - DEFINITELY fullstack: titles containing "Full Stack", "Fullstack", "Full-Stack"
-- VERY LIKELY fullstack: "Software Engineer", "Senior Software Engineer", "Developer", "Senior Developer", "Web Developer" at a startup/product company IF the candidate also has BOTH frontend skills (React, Vue, Angular, TypeScript, Next.js) AND backend skills (Node.js, Python, Go, Java, APIs, databases)
-- At Israeli startups (<500 employees), "Software Engineer" = fullstack by default
-- CHECK the pre-calculated FULLSTACK EXPERIENCE section above — it already analyzed titles + skills
-- DO NOT require "Full Stack" in the title to count as fullstack experience!
-
-- SUM durations and compare to requirement
+- VERY LIKELY fullstack: "Software Engineer" / "Developer" at startup/product company IF candidate has BOTH frontend skills (React, Vue, Angular) AND backend skills (Node.js, Python, Go, Java, SQL)
+- At Israeli startups, "Software Engineer" = fullstack by default
+- USE the pre-calculated FULLSTACK EXPERIENCE section — it already analyzed titles + skills
 
 **Apply percentage-based scoring:**
 - 100%+ of requirement → Score 7-10 (meets requirement)
@@ -3779,7 +3782,10 @@ IMPORTANT RULES:
   * Fails a must-have AND has NO named strong signal → 3-4. The job title alone is NOT a signal.
   * Matches a rejection criterion → 1-2
 
-⚠️ CRITICAL - CALCULATE EXPERIENCE FROM RAW JSON (SHOW YOUR MATH):
+⚠️ CRITICAL - VERIFY ROLE-SPECIFIC EXPERIENCE (SHOW YOUR MATH):
+⚠️ TOTAL CAREER EXPERIENCE is pre-calculated above (📅 section). DO NOT recalculate it. Trust the pre-calculated number.
+⚠️ If an EXPERIENCE LIMIT CHECK (✅/🚫) verdict is shown, FOLLOW IT without override.
+Below is how to verify LEAD and role-specific experience only:
 
 **STEP 1: List each LEAD role with exact dates and duration:**
 - Find roles where employee_title contains: Lead, Leader, Manager, Head, Director, TL
@@ -3912,7 +3918,7 @@ Respond with ONLY valid JSON in this exact format:
             "STRICT RULES:\n"
             "1. ONLY mention companies that EXPLICITLY appear in current_employers or past_employers\n"
             "2. ONLY mention job titles that EXPLICITLY appear in employee_title fields\n"
-            "3. Use the 'Total experience: ~X years' from Work History - do NOT calculate your own\n"
+            "3. Use the pre-calculated 📅 TOTAL CAREER EXPERIENCE value - do NOT calculate your own total years. If ✅/🚫 EXPERIENCE LIMIT CHECK is shown, FOLLOW that verdict.\n"
             "4. If a role (like 'Team Leader') is NOT listed, do NOT claim they have it\n"
             "5. Company descriptions/about text do NOT indicate employment - only current_employers and past_employers lists count\n"
             "6. Do NOT confuse company descriptions (e.g., 'Unity acquired ironSource') with the candidate's work history\n"
@@ -4367,73 +4373,27 @@ with tab_upload:
                         @st.cache_data(ttl=120, max_entries=3)
                         def _get_db_restore_counts():
                             c = _get_db_client()
-                            return (
-                                c.count('profiles', {'status': 'eq.enriched'}),
-                                c.count('profiles', {'status': 'eq.screened'}),
-                            )
+                            return c.count('profiles', {'status': 'eq.enriched'})
 
-                        enriched_count, screened_count = _get_db_restore_counts()
+                        enriched_count = _get_db_restore_counts()
 
-                        if enriched_count > 0 or screened_count > 0:
+                        if enriched_count > 0:
                             st.markdown("**From Database**")
-                            st.caption("Load enriched or screened profiles from Supabase")
+                            st.caption("Load enriched profiles from Supabase (screening is always fresh per JD)")
 
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                if enriched_count > 0 and st.button(f"Load Enriched ({enriched_count})", key="resume_enriched"):
-                                    profiles = get_profiles_by_status(db_client, "enriched", limit=500)  # Reduced for memory
-                                    if profiles:
-                                        df = profiles_to_dataframe(profiles)
-                                        # Strip raw_data to save memory (will fetch from DB when screening)
-                                        for p in profiles:
-                                            p.pop('raw_data', None)
-                                            p.pop('raw_crustdata', None)
-                                        st.session_state['results_df'] = df
-                                        st.session_state['enriched_df'] = df
-                                        cleanup_memory()
-                                        st.success(f"Loaded {len(profiles)} enriched profiles!")
-                                        st.rerun()
-
-                            with col2:
-                                if screened_count > 0 and st.button(f"Load Screened ({screened_count})", key="resume_screened"):
-                                    profiles = get_profiles_by_status(db_client, "screened", limit=500)  # Reduced for memory
-                                    if profiles:
-                                        df = profiles_to_dataframe(profiles)
-                                        # Strip raw_data to save memory (will fetch from DB when screening)
-                                        for p in profiles:
-                                            p.pop('raw_data', None)
-                                            p.pop('raw_crustdata', None)
-                                        st.session_state['results_df'] = df
-                                        st.session_state['enriched_df'] = df
-                                        screening_results = []
-                                        for p in profiles:
-                                            screening_results.append({
-                                                'name': p.get('name', '') or f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
-                                                'score': p.get('screening_score', 0),
-                                                'fit': p.get('screening_fit_level', ''),
-                                                'summary': p.get('screening_summary', ''),
-                                                'why': p.get('screening_reasoning', ''),
-                                                'current_title': p.get('current_title', ''),
-                                                'current_company': p.get('current_company', ''),
-                                                'linkedin_url': p.get('linkedin_url', ''),
-                                                'strengths': [],
-                                                'concerns': []
-                                            })
-                                        st.session_state['screening_results'] = screening_results
-                                        cleanup_memory()
-                                        st.success(f"Loaded {len(profiles)} screened profiles!")
-                                        st.rerun()
-
-                            with col3:
-                                all_count = enriched_count + screened_count
-                                if st.button(f"Load All ({all_count})", key="resume_all"):
-                                    profiles = get_all_profiles(db_client, limit=500)  # Reduced for memory
-                                    if profiles:
-                                        df = profiles_to_dataframe(profiles)
-                                        st.session_state['results_df'] = df
-                                        cleanup_memory()
-                                        st.success(f"Loaded {len(profiles)} profiles!")
-                                        st.rerun()
+                            if st.button(f"Load Enriched ({enriched_count})", key="resume_enriched"):
+                                profiles = get_profiles_by_status(db_client, "enriched", limit=500)  # Reduced for memory
+                                if profiles:
+                                    df = profiles_to_dataframe(profiles)
+                                    # Strip raw_data to save memory (will fetch from DB when screening)
+                                    for p in profiles:
+                                        p.pop('raw_data', None)
+                                        p.pop('raw_crustdata', None)
+                                    st.session_state['results_df'] = df
+                                    st.session_state['enriched_df'] = df
+                                    cleanup_memory()
+                                    st.success(f"Loaded {len(profiles)} enriched profiles!")
+                                    st.rerun()
                 except Exception as e:
                     st.caption(f"Database restore unavailable: {e}")
 
@@ -6754,13 +6714,18 @@ with tab_screening:
                 if isinstance(v, float) and math.isnan(v):
                     p[k] = ''
 
-        # Strip any existing raw_data to save memory - will be fetched per-batch
-        for p in profiles:
-            p.pop('raw_data', None)
-            p.pop('raw_crustdata', None)
-
-        # Show profile count (raw_data will be fetched per-batch during screening)
-        st.caption(f"{len(profiles)} profiles ready for screening (data fetched per-batch for memory efficiency)")
+        # Keep raw_data if profiles already have it (avoids unnecessary DB re-fetch)
+        # Only strip for large sets (500+) to save memory on Streamlit Cloud
+        has_raw = sum(1 for p in profiles if p.get('raw_data') or p.get('raw_crustdata'))
+        if len(profiles) > 500 and has_raw > 0:
+            for p in profiles:
+                p.pop('raw_data', None)
+                p.pop('raw_crustdata', None)
+            st.caption(f"{len(profiles)} profiles ready for screening (raw data will be fetched per-batch to save memory)")
+        elif has_raw > 0:
+            st.caption(f"{len(profiles)} profiles ready for screening ({has_raw} with raw data — will screen immediately)")
+        else:
+            st.caption(f"{len(profiles)} profiles ready for screening (raw data will be fetched from DB)")
 
         # AI Screening Requirements Input
         st.markdown("### AI Screening Requirements")
@@ -7095,30 +7060,10 @@ with tab_screening:
                     st.caption(f"Processing batch {current_batch}... Click Cancel to stop and keep completed results.")
                 with col2:
                     if st.button("⏹ Cancel", type="secondary", key="cancel_screening"):
-                        # Save partial results before cancelling
+                        # Keep partial results in session (not saved to DB — screening is always fresh per JD)
                         partial_results = st.session_state.get('screening_batch_state', {}).get('results', [])
                         if partial_results:
                             st.session_state['screening_results'] = partial_results
-                            # Save partial results to DB (batch)
-                            if HAS_DATABASE:
-                                try:
-                                    db_client = _get_db_client()
-                                    if db_client:
-                                        batch_rows = [
-                                            {
-                                                'linkedin_url': r.get('linkedin_url') or r.get('public_url'),
-                                                'score': r.get('score', 0),
-                                                'fit_level': r.get('fit', ''),
-                                                'summary': r.get('summary', ''),
-                                                'reasoning': r.get('why', ''),
-                                            }
-                                            for r in partial_results
-                                            if (r.get('linkedin_url') or r.get('public_url')) and r.get('fit') != 'Error'
-                                        ]
-                                        update_profile_screening_batch(db_client, batch_rows)
-                                except Exception as e:
-                                    import logging
-                                    logging.error(f"Failed to save partial screening results to DB: {e}")
                         st.session_state['screening_cancelled'] = True
                         st.session_state['screening_batch_mode'] = False
                         if st.session_state.get('_screening_active'):
@@ -7136,20 +7081,14 @@ with tab_screening:
 
             if existing_results and not screening_in_progress:
                 # Find profiles not yet screened
-                screened_urls = set(r.get('linkedin_url', '') for r in existing_results if r.get('linkedin_url'))
-                unscreened_profiles = [p for p in profiles if p.get('linkedin_url', '') not in screened_urls]
-
-                st.info(f"📊 **{len(existing_results)}** profiles already screened | **{len(unscreened_profiles)}** remaining")
+                # Always screen fresh for each JD — no skipping "already screened"
+                st.info(f"📊 **{len(existing_results)}** profiles screened in current session | **{len(profiles)}** total profiles loaded")
 
                 col1, col2, col3 = st.columns([2, 2, 1])
                 with col1:
-                    if unscreened_profiles:
-                        continue_button = st.button(f"▶️ Continue ({len(unscreened_profiles)} left)", type="primary", key="continue_screening")
-                    else:
-                        start_button = st.button("🔄 Screen All Again", type="primary", key="start_screening")
+                    start_button = st.button("🔄 Screen All Fresh", type="primary", key="start_screening")
                 with col2:
-                    if unscreened_profiles:
-                        start_button = st.button("🔄 Screen All Fresh", key="start_screening")
+                    pass  # Reserved for future use
                 with col3:
                     if st.button("🗑️ Clear", key="clear_screening_results"):
                         st.session_state['screening_results'] = []
@@ -7208,39 +7147,9 @@ with tab_screening:
                             st.session_state['rescreen_selected_urls'] = selected_urls
                             rescreen_selected_button = True
             else:
-                # Check if profiles have previous screening scores in DB
-                db_screened_count = sum(1 for p in profiles if p.get('screening_score') and p.get('screening_score') > 0)
-                if db_screened_count > 0 and not screening_in_progress:
-                    st.info(f"📊 **{db_screened_count}** of {len(profiles)} profiles have previous screening scores in the database.")
-                    col1, col2, col3 = st.columns([2, 2, 1])
-                    with col1:
-                        start_button = st.button("🔄 Screen All Fresh", type="primary", key="start_screening", disabled=screening_in_progress)
-                    with col2:
-                        if st.button("📥 Load Previous Results", key="load_db_screening"):
-                            # Restore screening results from profile data
-                            restored_results = []
-                            for p in profiles:
-                                if p.get('screening_score') and p.get('screening_score') > 0:
-                                    restored_results.append({
-                                        'name': p.get('name', '') or f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
-                                        'score': p.get('screening_score', 0),
-                                        'fit': p.get('screening_fit_level', ''),
-                                        'summary': p.get('screening_summary', ''),
-                                        'why': p.get('screening_reasoning', ''),
-                                        'current_title': p.get('current_title', ''),
-                                        'current_company': p.get('current_company', ''),
-                                        'linkedin_url': p.get('linkedin_url', ''),
-                                        'strengths': [],
-                                        'concerns': []
-                                    })
-                            st.session_state['screening_results'] = restored_results
-                            st.success(f"Loaded {len(restored_results)} previous screening results!")
-                            st.rerun()
-                    with col3:
-                        st.caption("Fresh = new JD/prompt")
-                else:
-                    start_disabled = screening_in_progress
-                    start_button = st.button("Start Screening", type="primary", key="start_screening", disabled=start_disabled)
+                # Always screen fresh — no loading previous results from DB
+                start_disabled = screening_in_progress
+                start_button = st.button("Start Screening", type="primary", key="start_screening", disabled=start_disabled)
 
             # Continue batch processing if in progress
             if screening_in_progress and not st.session_state.get('screening_cancelled', False):
@@ -7274,16 +7183,16 @@ with tab_screening:
 
                 if batch_profiles:
                     with st.status(f"Processing batch {current_batch + 1} ({screen_mode} mode)...", expanded=True) as status:
-                        # Fetch raw_data for this batch only (memory efficient)
-                        db_client = _get_db_client() if HAS_DATABASE else None
+                        # Only fetch raw_data from DB if profiles don't already have it
                         missing_before = sum(1 for p in batch_profiles if not p.get('raw_crustdata') and not p.get('raw_data'))
-                        fetch_raw_data_for_batch(
-                            batch_profiles,
-                            raw_index=raw_index,
-                            db_client=db_client
-                        )
-                        missing_after = sum(1 for p in batch_profiles if not p.get('raw_crustdata') and not p.get('raw_data'))
                         if missing_before > 0:
+                            db_client = _get_db_client() if HAS_DATABASE else None
+                            fetch_raw_data_for_batch(
+                                batch_profiles,
+                                raw_index=raw_index,
+                                db_client=db_client
+                            )
+                            missing_after = sum(1 for p in batch_profiles if not p.get('raw_crustdata') and not p.get('raw_data'))
                             fetched = missing_before - missing_after
                             st.write(f"📦 Fetched raw data for {fetched}/{missing_before} profiles from DB" + (f" ({missing_after} still missing)" if missing_after > 0 else ""))
 
@@ -7350,28 +7259,8 @@ with tab_screening:
                         st.session_state['screening_batch_mode'] = False
                         st.session_state['screening_results'] = all_results
 
-                        # Save to DB
-                        db_saved = 0
-                        if HAS_DATABASE:
-                            try:
-                                db_client = _get_db_client()
-                                if db_client:
-                                    batch_rows = [
-                                        {
-                                            'linkedin_url': r.get('linkedin_url') or r.get('public_url'),
-                                            'score': r.get('score', 0),
-                                            'fit_level': r.get('fit', ''),
-                                            'summary': r.get('summary', ''),
-                                            'reasoning': r.get('why', ''),
-                                        }
-                                        for r in all_results
-                                        if (r.get('linkedin_url') or r.get('public_url')) and r.get('fit') != 'Error'
-                                    ]
-                                    stats = update_profile_screening_batch(db_client, batch_rows)
-                                    db_saved = stats.get('saved', 0)
-                            except Exception as e:
-                                import logging
-                                logging.error(f"Failed to save screening results to DB: {e}")
+                        # Screening results are kept in session only — not saved to DB
+                        # Each JD requires fresh screening, so cached DB scores are not useful
 
                         if st.session_state.get('_screening_active'):
                             _screening_session_end()
@@ -7397,13 +7286,12 @@ with tab_screening:
                             if _debug_key in st.session_state:
                                 del st.session_state[_debug_key]
 
-                        db_msg = f" ({db_saved} saved to DB)" if db_saved > 0 else ""
-                        st.success(f"✅ Screening complete! {len(all_results)} profiles{db_msg} (memory optimized)")
+                        st.success(f"✅ Screening complete! {len(all_results)} profiles screened fresh")
                         send_notification("Screening Complete", f"Screened {len(all_results)} profiles")
                         save_session_state()  # Save for restore
                         st.rerun()
 
-            if start_button or continue_button or rescreen_selected_button:
+            if start_button or rescreen_selected_button:
                 # Validate OpenAI API key before starting (uses free models.list endpoint)
                 try:
                     test_client = OpenAI(api_key=openai_key)
@@ -7440,16 +7328,8 @@ with tab_screening:
                                                 p['raw_crustdata'] = db_profile['raw_data']
                                         except:
                                             pass
-                elif continue_button:
-                    # Continue: only screen profiles not yet screened
-                    existing_results = st.session_state.get('screening_results', [])
-                    screened_urls = set(r.get('linkedin_url', '') for r in existing_results if r.get('linkedin_url'))
-                    unscreened = [p for p in profiles if p.get('linkedin_url', '') not in screened_urls]
-                    profiles_to_screen = unscreened[:screen_count]
-                    # Keep existing results to append to
-                    initial_results = existing_results.copy()
                 else:
-                    # Start fresh
+                    # Always screen fresh — each JD gets a fresh evaluation
                     profiles_to_screen = profiles[:screen_count]
                     initial_results = []
 
@@ -7469,16 +7349,16 @@ with tab_screening:
                     'ai_model': ai_model,
                     'system_prompt': st.session_state.get('active_screening_prompt', active_prompt),
                     'current_batch': 0,
-                    'results': initial_results,  # Start with existing results if continuing
-                    'is_continue': continue_button  # Flag to know we're continuing
+                    'results': initial_results,  # Start with existing results if re-screening selected
+                    'is_continue': False  # Always fresh screening
                 }
                 st.session_state['screening_batch_progress'] = {
                     'completed': len(initial_results),
                     'total': len(initial_results) + len(profiles_to_screen)
                 }
 
-                action = "Re-screening" if rescreen_selected_button else ("Continuing" if continue_button else "Starting")
-                st.info(f"{action} screening of {len(profiles_to_screen)} profiles in batches of 10...")
+                action = "Re-screening selected" if rescreen_selected_button else "Starting fresh screening"
+                st.info(f"{action}: {len(profiles_to_screen)} profiles in batches...")
                 st.rerun()
         else:
             st.warning("Please paste AI screening requirements to start screening")
@@ -7969,19 +7849,12 @@ with tab_database:
                 st.markdown("#### Load from Database")
                 st.caption("Load profiles from database into the current session for processing")
 
-                load_options = ["Strong Fit", "Good Fit", "All Screened", "All Enriched"]
+                load_options = ["All Enriched"]
                 load_selection = st.selectbox("Load profiles", load_options, key="db_load_select")
 
                 if st.button("Load to Session", key="db_load_btn"):
                     load_profiles = []
-                    if load_selection == "Strong Fit":
-                        load_profiles = get_profiles_by_fit_level(db_client, "Strong Fit", limit=500)  # Reduced for memory
-                    elif load_selection == "Good Fit":
-                        load_profiles = get_profiles_by_fit_level(db_client, "Good Fit", limit=500)  # Reduced for memory
-                    elif load_selection == "All Screened":
-                        from db import get_profiles_by_status
-                        load_profiles = get_profiles_by_status(db_client, "screened", limit=500)  # Reduced for memory
-                    elif load_selection == "All Enriched":
+                    if load_selection == "All Enriched":
                         from db import get_profiles_by_status
                         load_profiles = get_profiles_by_status(db_client, "enriched", limit=500)  # Reduced for memory
 

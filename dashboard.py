@@ -3091,10 +3091,10 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
         ai_model: OpenAI model to use (default: gpt-4o-mini)
     """
     # Validate profile has minimum useful data before calling OpenAI
-    name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
+    name = profile.get('name', '') or f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
     title = profile.get('current_title', '') or profile.get('headline', '')
     company = profile.get('current_company', '')
-    has_useful_data = bool(name and (title or company or profile.get('skills') or profile.get('past_positions') or profile.get('summary')))
+    has_useful_data = bool((name or title or company) and (title or company or profile.get('skills') or profile.get('past_positions') or profile.get('summary')))
 
     if not has_useful_data:
         return {
@@ -4123,7 +4123,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         try:
             result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, system_prompt=system_prompt, ai_model=ai_model)
             # Add profile info to result
-            name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
+            name = profile.get('name', '') or f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
             if not name:
                 name = profile.get('full_name', '') or profile.get('fullName', '') or f"Profile {index}"
             result['name'] = name
@@ -4139,7 +4139,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                 "summary": f"Screen error: {str(e)[:80]}",
                 "strengths": [],
                 "concerns": [],
-                "name": profile.get('first_name', '') or profile.get('fullName', '') or f"Profile {index}",
+                "name": profile.get('name', '') or profile.get('first_name', '') or profile.get('fullName', '') or f"Profile {index}",
                 "current_title": "",
                 "current_company": "",
                 "linkedin_url": "",
@@ -4351,7 +4351,7 @@ with tab_upload:
                                         screening_results = []
                                         for p in profiles:
                                             screening_results.append({
-                                                'name': f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
+                                                'name': p.get('name', '') or f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
                                                 'score': p.get('screening_score', 0),
                                                 'fit': p.get('screening_fit_level', ''),
                                                 'summary': p.get('screening_summary', ''),

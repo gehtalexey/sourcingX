@@ -7051,9 +7051,10 @@ with tab_screening:
                     if unscreened_profiles:
                         continue_button = st.button(f"▶️ Continue ({len(unscreened_profiles)} left)", type="primary", key="continue_screening")
                     else:
-                        st.success("All profiles screened!")
+                        start_button = st.button("🔄 Screen All Again", type="primary", key="start_screening")
                 with col2:
-                    start_button = st.button("🔄 Re-screen All", key="start_screening")
+                    if unscreened_profiles:
+                        start_button = st.button("🔄 Screen All Fresh", key="start_screening")
                 with col3:
                     if st.button("🗑️ Clear", key="clear_screening_results"):
                         st.session_state['screening_results'] = []

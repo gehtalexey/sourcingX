@@ -160,7 +160,13 @@ Not all "frontend engineers" are equal. Assess DEPTH of frontend expertise:
 
 FULLSTACK_ISRAEL = {
     'name': 'Fullstack - Israel',
-    'keywords': ['fullstack', 'full-stack', 'full stack', 'israel', 'tel aviv'],
+    'keywords': [
+        'fullstack', 'full-stack', 'full stack', 'full-stack engineer',
+        'full-stack software engineer', 'fullstack engineer', 'fullstack developer',
+        'full stack engineer', 'full stack developer',
+        'react', 'node', 'frontend', 'backend',
+        'israel', 'tel aviv', 'herzliya', 'raanana', 'petah tikva',
+    ],
     'prompt': f"""You are an expert technical recruiter for top Israeli startups. You screen fullstack engineers.
 
 ## Scoring Rubric

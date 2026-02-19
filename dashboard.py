@@ -2995,6 +2995,7 @@ def _score_keywords(keywords: list, text_lower: str) -> float:
     """Score keyword matches using word-boundary matching.
 
     Multi-word keywords (phrases) get 2 points each since they're more specific.
+    Longer phrases (3+ words) get 4 points — they're highly specific role matches.
     Single-word keywords get 1 point and use word-boundary regex to avoid
     false substring matches (e.g. 'go' matching inside 'going').
     Leadership keywords get bonus points to prioritize lead roles over IC roles.
@@ -3008,11 +3009,18 @@ def _score_keywords(keywords: list, text_lower: str) -> float:
     for kw in keywords:
         kw_lower = kw.lower()
         is_leadership = any(lk in kw_lower for lk in leadership_keywords) or kw_lower in leadership_keywords
+        word_count = len(kw_lower.split())
 
         if ' ' in kw_lower:
             # Multi-word phrase: substring match is fine
             if kw_lower in text_lower:
-                score += 3 if is_leadership else 2
+                if is_leadership:
+                    score += 3
+                elif word_count >= 3:
+                    # Long phrases like "full-stack software engineer" are very specific
+                    score += 4
+                else:
+                    score += 2
         else:
             # Single word: use word boundary to avoid false matches
             if re.search(r'\b' + re.escape(kw_lower) + r'\b', text_lower):

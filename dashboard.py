@@ -7122,8 +7122,39 @@ with tab_screening:
                             st.session_state['rescreen_selected_urls'] = selected_urls
                             rescreen_selected_button = True
             else:
-                start_disabled = screening_in_progress
-                start_button = st.button("Start Screening", type="primary", key="start_screening", disabled=start_disabled)
+                # Check if profiles have previous screening scores in DB
+                db_screened_count = sum(1 for p in profiles if p.get('screening_score') and p.get('screening_score') > 0)
+                if db_screened_count > 0 and not screening_in_progress:
+                    st.info(f"📊 **{db_screened_count}** of {len(profiles)} profiles have previous screening scores in the database.")
+                    col1, col2, col3 = st.columns([2, 2, 1])
+                    with col1:
+                        start_button = st.button("🔄 Screen All Fresh", type="primary", key="start_screening", disabled=screening_in_progress)
+                    with col2:
+                        if st.button("📥 Load Previous Results", key="load_db_screening"):
+                            # Restore screening results from profile data
+                            restored_results = []
+                            for p in profiles:
+                                if p.get('screening_score') and p.get('screening_score') > 0:
+                                    restored_results.append({
+                                        'name': p.get('name', '') or f"{p.get('first_name', '')} {p.get('last_name', '')}".strip(),
+                                        'score': p.get('screening_score', 0),
+                                        'fit': p.get('screening_fit_level', ''),
+                                        'summary': p.get('screening_summary', ''),
+                                        'why': p.get('screening_reasoning', ''),
+                                        'current_title': p.get('current_title', ''),
+                                        'current_company': p.get('current_company', ''),
+                                        'linkedin_url': p.get('linkedin_url', ''),
+                                        'strengths': [],
+                                        'concerns': []
+                                    })
+                            st.session_state['screening_results'] = restored_results
+                            st.success(f"Loaded {len(restored_results)} previous screening results!")
+                            st.rerun()
+                    with col3:
+                        st.caption("Fresh = new JD/prompt")
+                else:
+                    start_disabled = screening_in_progress
+                    start_button = st.button("Start Screening", type="primary", key="start_screening", disabled=start_disabled)
 
             # Continue batch processing if in progress
             if screening_in_progress and not st.session_state.get('screening_cancelled', False):

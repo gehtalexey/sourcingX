@@ -575,7 +575,7 @@ def get_usage_summary(client: SupabaseClient, days: int = None) -> dict:
         return {}
 
     summary = {
-        'crustdata': {'credits': 0, 'requests': 0, 'errors': 0},
+        'crustdata': {'credits': 0, 'cost_usd': 0.0, 'requests': 0, 'errors': 0},
         'salesql': {'lookups': 0, 'requests': 0, 'errors': 0},
         'openai': {'cost_usd': 0.0, 'tokens_input': 0, 'tokens_output': 0, 'requests': 0, 'errors': 0},
         'phantombuster': {'runs': 0, 'profiles_scraped': 0, 'errors': 0},
@@ -593,6 +593,7 @@ def get_usage_summary(client: SupabaseClient, days: int = None) -> dict:
 
         if provider == 'crustdata':
             summary[provider]['credits'] += log.get('credits_used') or 0
+            summary[provider]['cost_usd'] += log.get('cost_usd') or 0
         elif provider == 'salesql':
             summary[provider]['lookups'] += log.get('credits_used') or 0
         elif provider == 'openai':

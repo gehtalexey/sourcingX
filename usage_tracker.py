@@ -9,6 +9,15 @@ from typing import Optional
 from functools import wraps
 
 
+# Crustdata pricing: $1,500 USD for 150,000 credits (50,000 profiles at 3 credits each)
+CRUSTDATA_PRICING = {
+    'total_credits': 150_000,
+    'total_cost_usd': 1500.00,
+    'cost_per_credit': 0.01,       # $1,500 / 150,000 = $0.01 per credit
+    'cost_per_profile': 0.03,      # $0.01 * 3 credits = $0.03 per profile
+    'credits_per_profile': 3,
+}
+
 # OpenAI pricing (per 1M tokens) - gpt-4o-mini
 OPENAI_PRICING = {
     'gpt-4o-mini': {
@@ -109,12 +118,16 @@ class UsageTracker:
         """Log Crustdata enrichment usage.
 
         Crustdata charges 3 credits per profile enriched.
+        Pricing: $1,500 for 150,000 credits ($0.01/credit, $0.03/profile).
         """
+        credits = profiles_enriched * CRUSTDATA_PRICING['credits_per_profile']
+        cost_usd = credits * CRUSTDATA_PRICING['cost_per_credit']
         return self.log_usage(
             provider='crustdata',
             operation='enrich',
             request_count=1,
-            credits_used=profiles_enriched * 3,  # 3 credits per profile
+            credits_used=credits,
+            cost_usd=cost_usd,
             status=status,
             error_message=error_message,
             response_time_ms=response_time_ms,

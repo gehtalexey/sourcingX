@@ -3501,28 +3501,73 @@ DevOps Skills: [{', '.join(devops_skills_found[:8])}]
 """
 
     # Pre-calculate TOTAL CAREER EXPERIENCE (for "reject >X years" rules)
-    all_start_dates = []
+    # Also detect military/army service and show INDUSTRY experience separately
+    military_keywords = ['idf', 'israel defense', 'israeli defense', 'israeli air force',
+                         'air force', ' iaf', '- iaf', 'navy', 'army', 'military',
+                         'intelligence corps', 'combat', 'c4i', 'cyber security directorate',
+                         'mamram', 'unit 8200', 'talpiot', 'israeli navy', 'ground forces',
+                         'home front command', 'paratroopers', 'golani', 'givati',
+                         'infantry', 'brigade', 'ofek']
+    all_positions_info = []  # (start_date, end_date_or_now, is_military, employer_name)
     for ce in current_employers:
         start = ce.get('start_date', '')
+        emp_name = (ce.get('employer_name') or '').lower()
+        is_mil = any(kw in emp_name for kw in military_keywords)
         if start:
-            all_start_dates.append(start)
+            all_positions_info.append((start, None, is_mil, ce.get('employer_name', '')))
     for pe in raw_crustdata.get('past_employers', []):
         start = pe.get('start_date', '')
+        end = pe.get('end_date', '')
+        emp_name = (pe.get('employer_name') or '').lower()
+        is_mil = any(kw in emp_name for kw in military_keywords)
         if start:
-            all_start_dates.append(start)
+            all_positions_info.append((start, end, is_mil, pe.get('employer_name', '')))
 
     total_experience_summary = ""
-    if all_start_dates:
+    if all_positions_info:
         try:
             from datetime import datetime
-            earliest = min(all_start_dates)
+            # Calculate total career span
+            all_starts = [p[0] for p in all_positions_info]
+            earliest = min(all_starts)
             earliest_dt = datetime.fromisoformat(earliest.replace('+00:00', '').replace('Z', ''))
             total_months = (2026 - earliest_dt.year) * 12 + (2 - earliest_dt.month)
             total_years = total_months / 12
-            total_experience_summary = f"""
+
+            # Calculate military months
+            military_months = 0
+            military_details = []
+            for start, end, is_mil, emp_name in all_positions_info:
+                if is_mil:
+                    try:
+                        s_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
+                        if end:
+                            e_dt = datetime.fromisoformat(end.replace('+00:00', '').replace('Z', ''))
+                        else:
+                            e_dt = datetime(2026, 2, 1)
+                        months = (e_dt.year - s_dt.year) * 12 + (e_dt.month - s_dt.month)
+                        military_months += months
+                        military_details.append(f"🎖️ {emp_name}: {months} months ({months/12:.1f} years)")
+                    except:
+                        pass
+
+            industry_months = max(0, total_months - military_months)
+            industry_years = industry_months / 12
+
+            if military_months > 0:
+                mil_detail_str = chr(10).join(f"   {d}" for d in military_details)
+                total_experience_summary = f"""
+📅 TOTAL CAREER SPAN: {total_months} months ({total_years:.1f} years) — includes military
+{mil_detail_str}
+   💼 INDUSTRY EXPERIENCE (excluding military): {industry_months} months ({industry_years:.1f} years)
+   ⚠️ For "reject >X years" rules → use INDUSTRY EXPERIENCE ({industry_years:.1f} years), NOT total with military!
+   ⚠️ Israeli military is mandatory service (age 18-21), NOT professional experience.
+"""
+            else:
+                total_experience_summary = f"""
 📅 TOTAL CAREER EXPERIENCE: {total_months} months ({total_years:.1f} years)
    (Career started: {earliest[:10]})
-   ⚠️ If JD says "reject >X years experience", compare against this value!
+   ⚠️ For "reject >X years" rules → compare against {total_years:.1f} years.
 """
         except:
             total_experience_summary = "\n📅 TOTAL CAREER EXPERIENCE: Could not calculate\n"
@@ -3561,22 +3606,24 @@ DevOps Skills: [{', '.join(devops_skills_found[:8])}]
 The requirements contain HARD RULES. These are NOT preferences - they are disqualifiers.
 
 ### REJECTION RULES (Score 1-2 if matched):
-1. "Reject overqualified" → Compare candidate's CURRENT TITLE to the TARGET role in the job description:
-   - ALWAYS reject: VP, Director, CTO, Chief, Head of, Senior Manager, Group Manager, C-level titles
-   - If JD is for "Team Lead" / "Tech Lead" → Team Lead/Tech Lead is TARGET level, NOT overqualified
-   - If JD is for "Engineer" (no Lead) → Team Lead/Tech Lead MAY be overqualified. Score 3-4 (not hard reject) unless they explicitly want IC role.
-   Match the seniority level to what the JD asks for.
+1. "Reject overqualified" → ONLY reject titles the JD EXPLICITLY lists as overqualified:
+   - If JD says "reject VP, CTO, director, head of, group manager" → ONLY reject those EXACT levels
+   - Team Lead / Tech Lead / Staff Engineer → NOT overqualified unless JD EXPLICITLY says to reject them
+   - Senior Engineer → NEVER overqualified for an engineer role
+   - ⚡ If the JD mentions "tech lead" or "team lead" as the TARGET role → Team Lead IS what they want. DO NOT reject.
+   - ⚡ Read the JD's overqualified list LITERALLY. Do NOT expand it beyond what's written.
 2. "Reject junior/students/freelancers" → If current role is Junior, Intern, Student, or Freelance → Score 1-2
 3. "Reject project companies" → If current company is consulting/outsourcing (Matrix, Tikal, Ness, Sela, Malam Team, Bynet, SQLink, etc.) → Score 1-2
    IMPORTANT: Cloud-focused companies like AllCloud, DoiT, Cloudride are LEGITIMATE DevOps/Cloud employers, NOT consulting firms. Do NOT reject them.
 4. "Reject [specific type]" → Apply literally to CURRENT position
-5. "Reject profiles with more than X years experience" or "max X years" → CALCULATE TOTAL EXPERIENCE:
-   - Sum ALL positions (current + past employers) to get total career length
-   - Find earliest start_date across all positions
-   - Calculate: (2026 - earliest_year) + (2 - earliest_month)/12 = total years
-   - If total > X years specified → Score 1-2 (HARD REJECT)
-   - Example: "Reject >12 years" and candidate started career in 2010 → 16 years total → REJECT
-   - This is a HARD rejection rule, not a soft preference!
+5. "Reject profiles with more than X years experience" or "max X years" → USE THE PRE-CALCULATED VALUES ABOVE:
+   - Check the "📅 TOTAL CAREER EXPERIENCE" or "💼 INDUSTRY EXPERIENCE" section above
+   - If military service is detected, use INDUSTRY EXPERIENCE (excluding military), NOT total career span
+   - Israeli military is mandatory service (age 18-21) and does NOT count as professional experience for this check
+   - Compare the pre-calculated number DIRECTLY against the JD's limit. Do NOT recalculate yourself.
+   - Example: Pre-calc says "INDUSTRY EXPERIENCE: 14.3 years" and JD says "reject >15 years" → 14.3 < 15 → DOES NOT EXCEED → do NOT reject
+   - Example: Pre-calc says "TOTAL: 16.2 years" (no military) and JD says "reject >15 years" → 16.2 > 15 → REJECT
+   - This is a HARD rejection rule, but ONLY when the number ACTUALLY exceeds the limit!
 6. "Reject job hoppers" → Check for pattern of short tenures:
    - Multiple positions with <1 year tenure = job hopper pattern
    - 3+ jobs in 3 years without promotions = job hopper
@@ -6096,7 +6143,7 @@ with tab_enrich:
                     with col2:
                         batch_size = st.slider("Batch size", min_value=1, max_value=25, value=10, key="enrich_batch")
 
-                    st.caption("Each profile costs 3 Crustdata credits")
+                    st.caption("Each profile costs 3 Crustdata credits ($0.03/profile)")
 
                     if st.button("Start Enrichment", type="primary", key="start_enrich_tab"):
                         urls_to_process = urls_for_enrichment[:max_profiles]
@@ -8063,12 +8110,13 @@ with tab_usage:
 
                 with metric_cols[0]:
                     crustdata = summary.get('crustdata', {})
+                    crust_cost = crustdata.get('cost_usd', 0)
                     st.metric(
                         "Crustdata",
-                        f"{int(crustdata.get('credits', 0)):,} credits",
-                        help="3 credits per profile enriched"
+                        f"${crust_cost:.2f}",
+                        help="$1,500 for 150K credits (3 credits/profile, $0.03/profile)"
                     )
-                    st.caption(f"{crustdata.get('requests', 0)} requests")
+                    st.caption(f"{int(crustdata.get('credits', 0)):,} credits | {crustdata.get('requests', 0)} requests")
 
                 with metric_cols[1]:
                     salesql = summary.get('salesql', {})
@@ -8172,12 +8220,14 @@ with tab_usage:
                     # Pie chart for cost breakdown
                     st.markdown("#### Cost Breakdown")
                     cost_data = {
-                        'Provider': ['OpenAI'],
-                        'Cost': [summary.get('openai', {}).get('cost_usd', 0)]
+                        'Provider': ['Crustdata', 'OpenAI'],
+                        'Cost': [
+                            summary.get('crustdata', {}).get('cost_usd', 0),
+                            summary.get('openai', {}).get('cost_usd', 0),
+                        ]
                     }
-                    # Note: Crustdata and SalesQL costs would need pricing info to include
 
-                    if cost_data['Cost'][0] > 0:
+                    if sum(cost_data['Cost']) > 0:
                         fig_pie = px.pie(
                             pd.DataFrame(cost_data),
                             values='Cost',

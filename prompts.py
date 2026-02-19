@@ -80,8 +80,9 @@ BACKEND_ISRAEL = {
 - **Pure Hardware/Firmware Only**: Only disqualify if no software/backend work (C/C++ at software companies is valid backend experience)
 
 ## Experience Guidelines
-- Ideal: 4-10 years total experience
-- Army experience counts as ~half (2 years army = 1 year work experience)
+- Default ideal: 4-10 years (BUT if JD specifies different range like "6+ years" or "reject >15 years", the JD OVERRIDES this default)
+- ⚡ For "reject >X years" checks: use INDUSTRY EXPERIENCE from the pre-calculated section (excludes mandatory military service)
+- Army/military service: counts as ~half for SKILL assessment (2 years army ≈ 1 year work), but EXCLUDED from total when checking JD's max-years rejection rules
 - Company brand matters more than skill list for Israeli startups
 {_ISRAEL_SPARSE_PROFILE}
 
@@ -149,10 +150,11 @@ Not all "frontend engineers" are equal. Assess DEPTH of frontend expertise:
 - **Pure Backend claiming Frontend**: No evidence of UI/component work
 
 ## Experience Guidelines
-- Ideal: 4-10 years total experience
+- Default ideal: 4-10 years (BUT if JD specifies different range, the JD OVERRIDES this default)
+- ⚡ For "reject >X years" checks: use INDUSTRY EXPERIENCE from the pre-calculated section (excludes mandatory military service)
 - Look for React/TypeScript depth, not just usage
 - Company brand matters more than skill list for Israeli startups
-- Army experience counts as ~half (2 years army = 1 year work experience)
+- Army/military service: counts as ~half for SKILL assessment, but EXCLUDED from total when checking JD's max-years rejection rules
 - At Israeli startups, frontend engineers often do some backend too — this is a PLUS, not a disqualifier
 {_ISRAEL_SPARSE_PROFILE}
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
@@ -213,10 +215,11 @@ Most fullstack engineers do NOT have "Full Stack" in their title. When the JD re
 - **Old Stack Only**: jQuery + PHP, no modern framework experience
 
 ## Experience Guidelines
-- Ideal: 4-10 years total experience
+- Default ideal: 4-10 years (BUT if JD specifies different range like "6+ years" or "reject >15 years", the JD OVERRIDES this default)
+- ⚡ For "reject >X years" checks: use INDUSTRY EXPERIENCE from the pre-calculated section (excludes mandatory military service)
 - Must show competency on BOTH frontend and backend (via skills, titles, or company context)
 - Startups value true fullstack ownership
-- Army experience counts as ~half (2 years army = 1 year work experience)
+- Army/military service: counts as ~half for SKILL assessment, but EXCLUDED from total when checking JD's max-years rejection rules
 - Company brand matters more than skill list for Israeli startups
 {_ISRAEL_SPARSE_PROFILE}
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
@@ -286,10 +289,11 @@ DevOps titles vary wildly. These ALL count as DevOps experience:
 - **Storage/Network Only**: Pure storage admin or network admin without cloud
 
 ## Experience Guidelines
-- Ideal: 4-10 years total experience
+- Default ideal: 4-10 years (BUT if JD specifies different range, the JD OVERRIDES this default)
+- ⚡ For "reject >X years" checks: use INDUSTRY EXPERIENCE from the pre-calculated section (excludes mandatory military service)
 - Cloud-native experience is critical — on-prem only is a dealbreaker
 - Automation mindset > manual operations background
-- Army experience counts as ~half (2 years army = 1 year work experience)
+- Army/military service: counts as ~half for SKILL assessment, but EXCLUDED from total when checking JD's max-years rejection rules
 - Company brand matters — DevOps at Wiz handles different scale than DevOps at a 10-person startup
 {_ISRAEL_SPARSE_PROFILE}
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
@@ -356,10 +360,11 @@ Leadership titles vary significantly. Assess the REAL scope:
 - **Non-tech industries**: Telecom, banks, government, insurance (without modern tech stack)
 
 ## Experience Guidelines
-- Ideal: 6-12 years total, 2+ years in a lead role
+- Default ideal: 6-12 years total, 2+ years in a lead role (BUT if JD specifies different range, the JD OVERRIDES this default)
+- ⚡ For "reject >X years" checks: use INDUSTRY EXPERIENCE from the pre-calculated section (excludes mandatory military service)
 - Must balance technical depth + leadership breadth
 - Hands-on coding still expected at Israeli startups
-- Army experience counts as ~half (2 years army = 1 year work experience)
+- Army/military service: counts as ~half for SKILL assessment, but EXCLUDED from total when checking JD's max-years rejection rules
 - Officer/commander in elite unit = strong leadership signal
 - Company brand matters — TL at Wiz manages different caliber than TL at a body shop
 {_ISRAEL_SPARSE_PROFILE}
@@ -428,10 +433,11 @@ PM titles vary. Assess what they ACTUALLY did:
 - **Too Junior**: <2 years in actual PM role (associate PM with no ownership)
 
 ## Experience Guidelines
-- Ideal: 5-10 years total, including 3+ as PM
+- Default ideal: 5-10 years total, including 3+ as PM (BUT if JD specifies different range, the JD OVERRIDES this default)
+- ⚡ For "reject >X years" checks: use INDUSTRY EXPERIENCE from the pre-calculated section (excludes mandatory military service)
 - Technical depth is highly valued in Israeli startups — CS degree or engineering background is a strong differentiator
 - Look for ownership and impact evidence, not just titles
-- Army experience counts as ~half (2 years army = 1 year work experience)
+- Army/military service: counts as ~half for SKILL assessment, but EXCLUDED from total when checking JD's max-years rejection rules
 - Officer experience = strong signal for PM (leadership + decision-making under pressure)
 - B2B SaaS PM experience is more relevant than B2C for most Israeli startups
 {_ISRAEL_SPARSE_PROFILE_PM}

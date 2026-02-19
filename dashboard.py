@@ -3091,10 +3091,20 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker:
         ai_model: OpenAI model to use (default: gpt-4o-mini)
     """
     # Validate profile has minimum useful data before calling OpenAI
-    name = profile.get('name', '') or f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
-    title = profile.get('current_title', '') or profile.get('headline', '')
-    company = profile.get('current_company', '')
-    has_useful_data = bool((name or title or company) and (title or company or profile.get('skills') or profile.get('past_positions') or profile.get('summary')))
+    # Guard against pandas NaN values (float NaN is truthy, breaks string checks)
+    def _safe_str(val):
+        if val is None:
+            return ''
+        if isinstance(val, float):
+            import math
+            return '' if math.isnan(val) else str(val)
+        return str(val) if val else ''
+
+    name = _safe_str(profile.get('name')) or f"{_safe_str(profile.get('first_name'))} {_safe_str(profile.get('last_name'))}".strip()
+    title = _safe_str(profile.get('current_title')) or _safe_str(profile.get('headline'))
+    company = _safe_str(profile.get('current_company'))
+    linkedin_url = _safe_str(profile.get('linkedin_url'))
+    has_useful_data = bool((name or title or company or linkedin_url) and (title or company or profile.get('skills') or profile.get('past_positions') or profile.get('summary')))
 
     if not has_useful_data:
         return {
@@ -6689,6 +6699,13 @@ with tab_screening:
 
         # Convert DataFrame to dicts for screening
         profiles = profiles_df.to_dict('records')
+
+        # Clean up NaN values from pandas (NaN is truthy in Python, breaks checks)
+        import math
+        for p in profiles:
+            for k, v in p.items():
+                if isinstance(v, float) and math.isnan(v):
+                    p[k] = ''
 
         # Strip any existing raw_data to save memory - will be fetched per-batch
         for p in profiles:

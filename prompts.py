@@ -140,32 +140,53 @@ FULLSTACK_ISRAEL = {
 
 ## Scoring Rubric
 - **9-10**: Top-tier company + elite army/top university + modern stack both FE & BE + 4-10 years.
-- **7-8**: Strong company background + solid skills both sides.
-- **5-6**: Decent background but stronger on one side.
-- **3-4**: Weak company or clearly FE-only or BE-only.
-- **1-2**: Not a fit.
+- **7-8**: Strong company background + solid skills both sides. Top 20% candidate.
+- **5-6**: Decent background but stronger on one side, or close to meeting must-haves.
+- **3-4**: Weak company or clearly FE-only or BE-only with no cross-stack signals.
+- **1-2**: Not a fit. Multiple disqualifiers.
+
+## CRITICAL: How to Identify Fullstack Experience
+Most fullstack engineers do NOT have "Full Stack" in their title. When the JD requires "X years fullstack experience", count ANY engineering role where the candidate was doing BOTH frontend and backend work.
+
+**Roles that COUNT as fullstack experience:**
+- Any title with "Full Stack", "Fullstack", "Full-Stack" → definitely fullstack
+- "Software Engineer" / "Senior Software Engineer" / "Developer" / "Senior Developer" at a STARTUP or product company → very likely fullstack (Israeli startups expect engineers to work across the stack)
+- Any engineer who has BOTH frontend skills (React, Vue, Angular, TypeScript, Next.js, CSS) AND backend skills (Node.js, Python, Go, Java, APIs, databases, microservices) → infer as fullstack
+- At Israeli startups (especially <500 employees), most "Software Engineer" roles ARE fullstack by default
+
+**Roles that DO NOT count:**
+- Pure "Frontend Engineer" or "Backend Engineer" titles with ZERO evidence of the other side
+- QA, DevOps, Data Engineer, ML Engineer roles (unless combined with fullstack work)
+- Consulting/outsourcing company roles (Tikal, Matrix, Ness, Sela, etc.)
+
+**KEY RULE: Look at SKILLS + COMPANY CONTEXT, not just the title!**
+- A "Senior Software Engineer" at Monday.com with React + Node.js skills = fullstack
+- A "Software Developer" at Wiz with TypeScript + Python skills = fullstack
+- A "Backend Engineer" with React in their skills who worked at a startup = likely fullstack
 
 ## Score Boosters (+2 points each)
-1. **Top Tier Companies**: Wiz, Monday, Snyk, Wix, AppsFlyer, Fiverr, BigID, Cyera, AI21, Armis
-2. **Elite Army Unit**: 8200, Mamram (only if engineering role)
-3. **Top Universities**: Technion, Tel Aviv University, Hebrew University
+1. **Top Tier Companies**: Wiz, Monday, Snyk, Wix, AppsFlyer, Fiverr, BigID, Cyera, AI21, Armis, Run:AI
+2. **Elite Army Unit**: 8200, Mamram, Talpiot (only if engineering role - count as ~half years of experience)
+3. **Top Universities**: Technion, Tel Aviv University, Hebrew University, Ben-Gurion, Weizmann
 
 ## Score Boosters (+1 point each)
-1. **Good Companies**: Microsoft Israel, Palo Alto, Env0, Fireblocks, Check Point
-2. **Modern Stack Both Sides**: React/TS + Node/Python/Go, cloud experience
-3. **True Fullstack**: Evidence of owning features end-to-end
+1. **Good Companies**: Microsoft Israel, Palo Alto, JFrog, Env0, Fireblocks, Check Point, CyberArk, SentinelOne, Aqua Security, Tenable
+2. **Modern Stack Both Sides**: React/TS + Node/Python/Go, cloud experience, AI/ML integration
+3. **True Fullstack Ownership**: Evidence of owning features end-to-end, product-minded
 
 ## Auto-Disqualifiers (Score 3 or below)
-- **Agencies/IT/Consulting**: Tikal, Matrix, Ness, Sela, etc.
-- **Non-tech industries**: Telecom, banks, government
-- **One-sided Only**: Pure FE or pure BE claiming fullstack
-- **Job Hopper**: Multiple companies <1.5 years each
-- **Old Stack**: jQuery + PHP, no modern stack
+- **Agencies/IT/Consulting**: Tikal, Matrix, Ness, Sela, Malam Team, Bynet, SQLink, etc.
+- **Non-tech industries**: Telecom, banks, government, insurance (without modern tech stack)
+- **One-sided Only**: Pure FE or pure BE with NO skills or evidence on the other side
+- **Job Hopper**: Multiple companies <1.5 years each (exclude internships, military, acquisitions)
+- **Old Stack Only**: jQuery + PHP, no modern framework experience
 
 ## Experience Guidelines
 - Ideal: 4-10 years total experience
-- Must show competency on BOTH frontend and backend
+- Must show competency on BOTH frontend and backend (via skills, titles, or company context)
 - Startups value true fullstack ownership
+- Army experience counts as ~half (2 years army = 1 year work experience)
+- Company brand matters more than skill list for Israeli startups
 {_ISRAEL_SPARSE_PROFILE}
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }

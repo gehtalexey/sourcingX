@@ -3321,6 +3321,91 @@ TOTAL (excluding consulting): {total_lead_months} months ({total_lead_months/12:
 💡 Check raw JSON - candidate may have leadership with non-standard titles.
 """
 
+    # Pre-calculate FULLSTACK experience (for "X years fullstack" requirements)
+    fullstack_title_keywords = ['full stack', 'fullstack', 'full-stack']
+    likely_fullstack_keywords = ['software engineer', 'developer', 'web developer', 'software developer', 'application developer']
+    # Detect both-sides skills from Crustdata skills list
+    all_skills = raw_crustdata.get('skills') or []
+    skills_lower_str = ' '.join(s.lower() for s in all_skills) if all_skills else ''
+    fe_signals = ['react', 'vue', 'angular', 'frontend', 'front-end', 'next.js', 'css', 'html', 'javascript', 'typescript']
+    be_signals = ['node', 'python', 'go', 'golang', 'java', 'ruby', 'django', 'flask', 'express', 'fastapi', 'spring', 'sql', 'mongodb', 'postgresql', 'microservices', 'rest api', 'graphql']
+    has_fe_skills = any(s in skills_lower_str for s in fe_signals)
+    has_be_skills = any(s in skills_lower_str for s in be_signals)
+    has_both_sides = has_fe_skills and has_be_skills
+
+    fullstack_roles = []
+    total_fullstack_months = 0
+
+    # Current employer fullstack check
+    for ce in current_employers:
+        title = (ce.get('employee_title') or '').lower()
+        is_explicit_fs = any(kw in title for kw in fullstack_title_keywords)
+        is_likely_fs = any(kw in title for kw in likely_fullstack_keywords) and has_both_sides
+        if is_explicit_fs or is_likely_fs:
+            start = ce.get('start_date', '')
+            months = 0
+            if start:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
+                    months = (2026 - start_dt.year) * 12 + (2 - start_dt.month)
+                except:
+                    pass
+            reason = "explicit fullstack title" if is_explicit_fs else "engineering title + FE&BE skills"
+            fullstack_roles.append(f"CURRENT: {ce.get('employee_title')} @ {ce.get('employer_name')}: {months} months ({reason})")
+            total_fullstack_months += months
+
+    # Past employer fullstack check
+    for pe in raw_crustdata.get('past_employers', []):
+        title = (pe.get('employee_title') or '').lower()
+        is_explicit_fs = any(kw in title for kw in fullstack_title_keywords)
+        is_likely_fs = any(kw in title for kw in likely_fullstack_keywords) and has_both_sides
+        if is_explicit_fs or is_likely_fs:
+            start = pe.get('start_date', '')
+            end = pe.get('end_date', '')
+            months = 0
+            if start and end:
+                try:
+                    from datetime import datetime
+                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
+                    end_dt = datetime.fromisoformat(end.replace('+00:00', '').replace('Z', ''))
+                    months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
+                except:
+                    pass
+            company = pe.get('employer_name', '')
+            consulting = any(c in company.lower() for c in ['tikal', 'matrix', 'ness', 'sela', 'malam'])
+            suffix = " ⚠️CONSULTING" if consulting else ""
+            reason = "explicit fullstack title" if is_explicit_fs else "engineering title + FE&BE skills"
+            fullstack_roles.append(f"PAST: {pe.get('employee_title')} @ {company}: {months} months ({reason}){suffix}")
+            if not consulting:
+                total_fullstack_months += months
+
+    fullstack_summary = ""
+    if fullstack_roles:
+        fe_found = [s for s in fe_signals if s in skills_lower_str]
+        be_found = [s for s in be_signals if s in skills_lower_str]
+        fullstack_summary = f"""
+📊 PRE-CALCULATED FULLSTACK EXPERIENCE:
+{chr(10).join(fullstack_roles)}
+TOTAL (excluding consulting): {total_fullstack_months} months ({total_fullstack_months/12:.1f} years)
+Skills: Frontend=[{', '.join(fe_found[:5])}] Backend=[{', '.join(be_found[:5])}]
+💡 "Software Engineer"/"Developer" with BOTH FE & BE skills = fullstack. Title doesn't need to say "Full Stack".
+"""
+    elif has_both_sides:
+        fe_found = [s for s in fe_signals if s in skills_lower_str]
+        be_found = [s for s in be_signals if s in skills_lower_str]
+        fullstack_summary = f"""
+📊 FULLSTACK EXPERIENCE: No explicit fullstack/engineer titles matched, but candidate has BOTH sides:
+   Frontend skills: {', '.join(fe_found[:5])}
+   Backend skills: {', '.join(be_found[:5])}
+💡 Their engineering roles are likely fullstack even without the title. Check raw JSON for role details.
+"""
+    else:
+        fullstack_summary = """
+📊 FULLSTACK EXPERIENCE: No fullstack titles detected AND no clear both-sides skills from LinkedIn.
+💡 LinkedIn skills are often incomplete. Check raw JSON employer descriptions and role context.
+"""
+
     # Pre-calculate TOTAL CAREER EXPERIENCE (for "reject >X years" rules)
     all_start_dates = []
     for ce in current_employers:
@@ -3348,7 +3433,7 @@ TOTAL (excluding consulting): {total_lead_months} months ({total_lead_months/12:
         except:
             total_experience_summary = "\n📅 TOTAL CAREER EXPERIENCE: Could not calculate\n"
 
-    current_employer_summary += lead_summary + total_experience_summary
+    current_employer_summary += lead_summary + fullstack_summary + total_experience_summary
 
     # Profile summary with pre-calculated hints + raw JSON fallback
     profile_summary = f"""{work_history_warning}
@@ -3408,10 +3493,12 @@ A must-have requirement ("must have X", "X is a must") is critical but does NOT 
 Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requirement:
 
 **Score 7-10 (Good/Strong Fit)**: Candidate CLEARLY meets ALL must-have requirements with VERIFIED DURATIONS. No ambiguity.
+  - For "X years fullstack": Count ALL engineering roles where candidate did both FE+BE work (see FULLSTACK rules below). Title does NOT need to say "Full Stack".
 
 **Score 5-6 (Partial Fit — worth review)**: Candidate is CLOSE to meeting must-have (≥75% of required) AND has strong signals:
   - Example: Requirement is "2 years lead" and candidate has 18+ months → CLOSE, eligible for 5-6 with signal
-  - Strong signals: Top company (Wiz, Monday, Rapyd, Fireblocks, PayPal, Google, etc.), Elite army (8200, Mamram), Top university
+  - Example: Requirement is "4 years fullstack" and candidate has 3+ years as "Software Engineer" at startups with React + Node skills → CLOSE, eligible for 5-6
+  - Strong signals: Top company (Wiz, Monday, Rapyd, Fireblocks, PayPal, Google, JFrog, Microsoft, Palo Alto, etc.), Elite army (8200, Mamram), Top university
 
 **Score 4-5 (Weak Fit)**: Candidate is HALFWAY to meeting must-have (50-75% of required) with strong signals:
   - Example: Requirement is "2 years lead" and candidate has 12-18 months → 4-5 max even with PayPal background
@@ -3447,10 +3534,18 @@ Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requi
   * "Branch Manager @ Postal Co: 2019-01 to 2021-01 = 24 months" ✗ (non-tech, excluded)
   * TOTAL: 24 months from PayPal only
 
-**For "X years [ROLE TYPE] experience" (DevOps, Backend, Frontend, QA, etc.):**
+**For "X years [ROLE TYPE] experience" (DevOps, Backend, Frontend, Fullstack, QA, etc.):**
 - DevOps roles: titles containing DevOps, SRE, Platform Engineer, Cloud Engineer, Infrastructure
 - Backend roles: titles containing Backend, Software Engineer, Developer
 - Do NOT count as DevOps: SysAdmin, Storage Admin, QA, IT Support, DBA, Network Admin
+
+**FULLSTACK roles — CRITICAL (most engineers don't have "Full Stack" in title):**
+- DEFINITELY fullstack: titles containing "Full Stack", "Fullstack", "Full-Stack"
+- VERY LIKELY fullstack: "Software Engineer", "Senior Software Engineer", "Developer", "Senior Developer", "Web Developer" at a startup/product company IF the candidate also has BOTH frontend skills (React, Vue, Angular, TypeScript, Next.js) AND backend skills (Node.js, Python, Go, Java, APIs, databases)
+- At Israeli startups (<500 employees), "Software Engineer" = fullstack by default
+- CHECK the pre-calculated FULLSTACK EXPERIENCE section above — it already analyzed titles + skills
+- DO NOT require "Full Stack" in the title to count as fullstack experience!
+
 - SUM durations and compare to requirement
 
 **Apply percentage-based scoring:**
@@ -3587,6 +3682,21 @@ This candidate has 43 MONTHS (3.6 years) of lead experience from current role AL
 Example:
 "CURRENT EMPLOYER: H2O.ai
 LEAD: [CURRENT: DevOps Tech Lead @ H2O.ai: 43m (2022-07 to 2026-02)] + [Past: none] = 43m total (43÷24 = 179%) ✓ MEETS 2yr requirement"
+
+⚠️ FULLSTACK EXPERIENCE CALCULATION (when JD requires "X years fullstack"):
+
+**CRITICAL: Most fullstack engineers do NOT have "Full Stack" in their title!**
+Count these roles as fullstack experience:
+1. Any title with "Full Stack" / "Fullstack" / "Full-Stack" → definitely counts
+2. "Software Engineer" / "Senior Software Engineer" / "Developer" / "Senior Developer" at a startup/product company → counts IF candidate has BOTH frontend skills (React, Vue, Angular, TypeScript) AND backend skills (Node.js, Python, Go, Java, SQL, APIs)
+3. At Israeli startups, "Software Engineer" = fullstack by default (startups don't split FE/BE)
+
+**USE the pre-calculated FULLSTACK EXPERIENCE section above** — it already analyzed all roles.
+If pre-calculated total meets the requirement → candidate meets the fullstack must-have.
+If pre-calculated total is close (≥75%) and candidate has strong signals → score 5-6.
+
+**SHOW YOUR MATH:**
+"FULLSTACK: [CURRENT: Software Engineer @ Monday.com: 36m] + [PAST: Developer @ Startup: 24m] = 60m total (60÷48 = 125%) ✓ MEETS 4yr requirement"
 
 ## Candidate Profile:
 {profile_summary}

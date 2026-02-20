@@ -10,11 +10,12 @@ import json
 import re
 import requests
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Dict, Any, Tuple, TypeVar
 from pathlib import Path
 import pandas as pd
 
 from normalizers import normalize_linkedin_url
+from api_helpers import PaginatedResponse, APIErrorResponse, ErrorCode
 
 # Refresh threshold for re-enriching stale profiles
 ENRICHMENT_REFRESH_MONTHS = 3
@@ -156,6 +157,42 @@ class SupabaseClient:
         content_range = response.headers.get('Content-Range', '*/0')
         total = content_range.split('/')[-1]
         return int(total) if total != '*' else 0
+
+    def select_paginated(
+        self, table: str, columns: str = '*', filters: dict = None,
+        page: int = 1, page_size: int = 20, order_by: str = None
+    ) -> PaginatedResponse:
+        """Select rows with pagination support, returning a PaginatedResponse."""
+        page_size = min(max(1, page_size), 1000)
+        page = max(1, page)
+        offset = (page - 1) * page_size
+        params = {'select': columns, 'limit': page_size, 'offset': offset}
+        if filters:
+            for key, value in filters.items():
+                params[key] = value
+        if order_by:
+            params['order'] = order_by
+        total = self.count(table, filters)
+        items = self._request('GET', table, params=params)
+        if not isinstance(items, list):
+            items = [items] if items else []
+        return PaginatedResponse.create(items=items, total=total, page=page, page_size=page_size)
+
+    def select_with_error(self, table: str, columns: str = '*', filters: dict = None, limit: int = 1000):
+        """Select rows with consistent error handling. Returns (results, error)."""
+        try:
+            results = self.select(table, columns, filters, limit)
+            return results, None
+        except requests.HTTPError as e:
+            response = getattr(e, 'response', None)
+            if response is not None:
+                error = APIErrorResponse.from_http_error(response, 'supabase')
+            else:
+                error = APIErrorResponse(error_code=ErrorCode.DATABASE_ERROR.value, message=f'[supabase] {str(e)}')
+            return None, error
+        except Exception as e:
+            error = APIErrorResponse(error_code=ErrorCode.DATABASE_ERROR.value, message=f'[supabase] {str(e)}')
+            return None, error
 
 
 def get_supabase_client() -> Optional[SupabaseClient]:

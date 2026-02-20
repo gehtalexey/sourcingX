@@ -45,6 +45,22 @@ from normalizers import (
 )
 from helpers import format_past_positions, format_education
 
+# Error handling patterns (custom exceptions, retry decorator, circuit breaker)
+from error_handling import (
+    ApplicationError,
+    ExternalServiceError,
+    RateLimitError,
+    QuotaExceededError,
+    AuthenticationError,
+    ServiceUnavailableError,
+    CircuitOpenError,
+    retry_with_backoff,
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    get_service_circuit,
+    classify_http_error,
+)
+
 # Database module (Supabase integration)
 # Note: PhantomBuster data is NOT stored in DB - only Crustdata enriched profiles
 try:
@@ -86,6 +102,29 @@ try:
     HAS_AUTHENTICATOR = True
 except ImportError:
     HAS_AUTHENTICATOR = False
+
+# Security module - input validation, rate limiting, config security
+try:
+    from security import (
+        validate_linkedin_url as security_validate_linkedin_url,
+        validate_google_sheets_url,
+        validate_text_input,
+        validate_job_description,
+        validate_search_query,
+        sanitize_filename,
+        validate_config_security,
+        check_gitignore_security,
+        run_security_check,
+        get_rate_limiters,
+        ValidationError,
+        mask_secret,
+    )
+    HAS_SECURITY = True
+    _security_result = run_security_check(verbose=False)
+    if not _security_result['overall_secure']:
+        print('[Security] WARNING: Security issues detected.')
+except ImportError:
+    HAS_SECURITY = False
 
 
 def _start_keep_alive():
@@ -698,36 +737,12 @@ def _screening_session_end():
         counter['active'] = max(0, counter['active'] - 1)
 
 
-@st.cache_resource
-def _get_global_rate_limiter():
-    """Shared rate limiter across all user sessions.
-    Returns a dict with a lock and timestamp list for token-bucket limiting."""
-    return {
-        'lock': threading.Lock(),
-        'timestamps': [],  # Recent request timestamps
-        'max_per_minute': 140,  # Global cap (below 180 hard limit)
-    }
-
-
 def _global_rate_limit_wait():
     """Wait if needed to stay under the global SalesQL rate limit.
+    Uses the centralized RateLimiter from api_helpers (140/min, 5000/day).
     Call this BEFORE each SalesQL API request."""
-    limiter = _get_global_rate_limiter()
-    with limiter['lock']:
-        now = time.time()
-        cutoff = now - 60.0
-        # Prune old timestamps
-        limiter['timestamps'] = [t for t in limiter['timestamps'] if t > cutoff]
-        if len(limiter['timestamps']) >= limiter['max_per_minute']:
-            # Wait until the oldest request in the window expires
-            wait_time = limiter['timestamps'][0] - cutoff + 0.1
-            if wait_time > 0:
-                time.sleep(wait_time)
-            # Re-prune after waiting
-            now = time.time()
-            cutoff = now - 60.0
-            limiter['timestamps'] = [t for t in limiter['timestamps'] if t > cutoff]
-        limiter['timestamps'].append(time.time())
+    limiter = get_rate_limiter('salesql')
+    limiter.wait_if_needed()
 
 def enrich_with_salesql(linkedin_url: str, api_key: str, personal_only: bool = True, tracker: 'UsageTracker' = None) -> dict:
     """Enrich a single profile with SalesQL to get email.
@@ -2334,9 +2349,16 @@ def extract_urls(uploaded_file) -> list[str]:
 
 
 def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) -> list[dict]:
-    """Enrich a batch of URLs via Crust Data API."""
+    """Enrich a batch of URLs via Crust Data API.
+
+    Uses circuit breaker pattern to prevent cascade failures and retry logic
+    with exponential backoff for transient errors (rate limits, timeouts).
+    """
     batch_str = ','.join(urls)
     start_time = time.time()
+
+    # Get circuit breaker for Crustdata service (shared across all calls)
+    crustdata_circuit = get_service_circuit('Crustdata', failure_threshold=3, timeout=120.0)
 
     # Build mapping from username to original URL for matching results back
     def extract_username(url):
@@ -2411,16 +2433,36 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
         'failed_samples': failed_extracts[:3] if failed_extracts else []
     }
 
+    # Check circuit breaker before making request
     try:
-        response = requests.get(
-            'https://api.crustdata.com/screener/person/enrich',
-            params={'linkedin_profile_url': batch_str},
-            headers={'Authorization': f'Token {api_key}'},
-            timeout=120
-        )
-        elapsed_ms = int((time.time() - start_time) * 1000)
+        if not crustdata_circuit.allow_request():
+            status = crustdata_circuit.get_status()
+            retry_after = status.get('time_until_retry', 60)
+            error_msg = f"Crustdata service temporarily unavailable (circuit open). Retry in {retry_after:.0f}s"
+            if tracker:
+                tracker.log_crustdata(profiles_enriched=0, status='error', error_message=error_msg, response_time_ms=0)
+            return [{'error': error_msg, 'linkedin_url': u, 'circuit_open': True} for u in urls]
+    except Exception:
+        pass  # Circuit breaker check failed, proceed anyway
 
-        if response.status_code == 200:
+    # Retry logic with exponential backoff for transient errors
+    max_retries = 3
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(
+                'https://api.crustdata.com/screener/person/enrich',
+                params={'linkedin_profile_url': batch_str},
+                headers={'Authorization': f'Token {api_key}'},
+                timeout=120
+            )
+            elapsed_ms = int((time.time() - start_time) * 1000)
+
+            if response.status_code == 200:
+                # Record success with circuit breaker
+                crustdata_circuit.record_success()
+
             data = response.json()
             result = data if isinstance(data, list) else [data]
 

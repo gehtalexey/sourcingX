@@ -729,6 +729,86 @@ def _global_rate_limit_wait():
             limiter['timestamps'] = [t for t in limiter['timestamps'] if t > cutoff]
         limiter['timestamps'].append(time.time())
 
+# =============================================================================
+# ASYNC PYTHON PATTERNS - Semaphore-based Rate Limiting & Context Managers  
+# =============================================================================
+
+@st.cache_resource
+def _get_openai_semaphore():
+    return threading.Semaphore(20)
+
+class OpenAISemaphoreContext:
+    def __init__(self, timeout=60.0):
+        self._semaphore = _get_openai_semaphore()
+        self._timeout = timeout
+        self._acquired = False
+
+    def __enter__(self):
+        start = time.time()
+        while True:
+            self._acquired = self._semaphore.acquire(blocking=False)
+            if self._acquired:
+                return self
+            if self._timeout and (time.time() - start) >= self._timeout:
+                raise TimeoutError('Semaphore timeout')
+            time.sleep(0.1)
+
+    def __exit__(self, *args):
+        if self._acquired:
+            self._semaphore.release()
+        return False
+
+class APIRequestContext:
+    def __init__(self, timeout=30.0, operation='API', max_retries=3):
+        self.timeout = timeout
+        self.operation = operation
+        self.max_retries = max_retries
+        self._start_time = None
+        self._attempt = 0
+
+    def __enter__(self):
+        self._start_time = time.time()
+        return self
+
+    def __exit__(self, exc_type, *args):
+        elapsed = time.time() - self._start_time if self._start_time else 0
+        if exc_type:
+            print(f'[{self.operation}] Failed after {elapsed:.2f}s')
+        return False
+
+    def should_retry(self, exc):
+        self._attempt += 1
+        if self._attempt >= self.max_retries:
+            return False
+        return 'timeout' in str(exc).lower() or 'connection' in str(exc).lower()
+
+    def get_retry_delay(self):
+        return min(2 ** self._attempt, 10)
+
+class ManagedThreadPoolExecutor:
+    _active = {}
+    _lock = threading.Lock()
+
+    def __init__(self, max_workers=10, name='default'):
+        self.max_workers = max_workers
+        self.name = name
+        self._executor = None
+
+    def __enter__(self):
+        self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
+        with ManagedThreadPoolExecutor._lock:
+            ManagedThreadPoolExecutor._active[id(self)] = self.name
+        return self._executor
+
+    def __exit__(self, exc_type, *args):
+        if self._executor:
+            self._executor.shutdown(wait=exc_type is None, cancel_futures=exc_type is not None)
+        with ManagedThreadPoolExecutor._lock:
+            ManagedThreadPoolExecutor._active.pop(id(self), None)
+        return False
+
+
+
 def enrich_with_salesql(linkedin_url: str, api_key: str, personal_only: bool = True, tracker: 'UsageTracker' = None) -> dict:
     """Enrich a single profile with SalesQL to get email.
 
@@ -3976,12 +4056,13 @@ Respond with ONLY valid JSON in this exact format:
         if 'Assessment Rules' not in prompt_to_use:
             prompt_to_use += _assessment_rules
 
-        # Retry with exponential backoff on rate limit (429) errors
+        # Use semaphore for rate limiting
         response = None
         last_err = None
-        for _attempt in range(4):  # 1 initial + 3 retries
-            try:
-                response = client.chat.completions.create(
+        with OpenAISemaphoreContext(timeout=120.0):
+            for _attempt in range(4):
+                try:
+                    response = client.chat.completions.create(
                     model=ai_model,
                     messages=[
                         {"role": "system", "content": prompt_to_use},
@@ -4214,7 +4295,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
 
         return result
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ManagedThreadPoolExecutor(max_workers=max_workers, name="screening") as executor:
         # Submit all tasks
         future_to_index = {
             executor.submit(screen_single, profile, i): i

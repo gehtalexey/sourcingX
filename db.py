@@ -10,11 +10,12 @@ import json
 import re
 import requests
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Dict, Any, Tuple, TypeVar
 from pathlib import Path
 import pandas as pd
 
 from normalizers import normalize_linkedin_url
+from api_helpers import PaginatedResponse, APIErrorResponse, ErrorCode
 
 # Refresh threshold for re-enriching stale profiles
 ENRICHMENT_REFRESH_MONTHS = 3
@@ -157,6 +158,106 @@ class SupabaseClient:
         total = content_range.split('/')[-1]
         return int(total) if total != '*' else 0
 
+    def select_paginated(
+        self,
+        table: str,
+        columns: str = '*',
+        filters: dict = None,
+        page: int = 1,
+        page_size: int = 20,
+        order_by: str = None
+    ) -> PaginatedResponse:
+        """
+        Select rows with pagination support, returning a PaginatedResponse.
+
+        Args:
+            table: Table name
+            columns: Columns to select (default '*')
+            filters: Filter conditions
+            page: Page number (1-indexed)
+            page_size: Number of items per page (max 1000)
+            order_by: Column to order by (e.g., 'created_at.desc')
+
+        Returns:
+            PaginatedResponse with items and pagination metadata
+
+        Usage:
+            response = client.select_paginated('profiles', page=2, page_size=50)
+            for profile in response.items:
+                process(profile)
+            if response.pagination.has_next:
+                next_page = client.select_paginated('profiles', page=3, page_size=50)
+        """
+        # Validate page_size
+        page_size = min(max(1, page_size), 1000)
+        page = max(1, page)
+
+        # Calculate offset
+        offset = (page - 1) * page_size
+
+        # Build params
+        params = {'select': columns, 'limit': page_size, 'offset': offset}
+        if filters:
+            for key, value in filters.items():
+                params[key] = value
+        if order_by:
+            params['order'] = order_by
+
+        # Get total count
+        total = self.count(table, filters)
+
+        # Get items for this page
+        items = self._request('GET', table, params=params)
+        if not isinstance(items, list):
+            items = [items] if items else []
+
+        return PaginatedResponse.create(
+            items=items,
+            total=total,
+            page=page,
+            page_size=page_size
+        )
+
+    def select_with_error(
+        self,
+        table: str,
+        columns: str = '*',
+        filters: dict = None,
+        limit: int = 1000
+    ) -> Tuple[Optional[list], Optional[APIErrorResponse]]:
+        """
+        Select rows with consistent error handling.
+
+        Returns:
+            Tuple of (results, error) where error is None on success.
+
+        Usage:
+            results, error = client.select_with_error('profiles', filters={'status': 'eq.active'})
+            if error:
+                log_error(error.to_dict())
+                return {'error': error.message}
+            return {'profiles': results}
+        """
+        try:
+            results = self.select(table, columns, filters, limit)
+            return results, None
+        except requests.HTTPError as e:
+            response = getattr(e, 'response', None)
+            if response is not None:
+                error = APIErrorResponse.from_http_error(response, 'supabase')
+            else:
+                error = APIErrorResponse(
+                    error_code=ErrorCode.DATABASE_ERROR.value,
+                    message=f"[supabase] {str(e)}"
+                )
+            return None, error
+        except Exception as e:
+            error = APIErrorResponse(
+                error_code=ErrorCode.DATABASE_ERROR.value,
+                message=f"[supabase] {str(e)}"
+            )
+            return None, error
+
 
 def get_supabase_client() -> Optional[SupabaseClient]:
     """Get Supabase client from config.json, Streamlit secrets, or environment."""
@@ -291,25 +392,118 @@ def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_r
     return result[0] if result else None
 
 
-def save_enriched_profiles_batch(client: SupabaseClient, profiles: list[tuple[str, dict]]) -> dict:
-    """Save multiple enriched profiles in a batch.
+def save_enriched_profiles_batch(client: SupabaseClient, profiles: list[tuple[str, dict]], batch_size: int = 50) -> dict:
+    """Save multiple enriched profiles in a batch using bulk upsert.
+
+    Performance: Uses upsert_batch for N profiles in a single DB call instead of
+    N individual calls. This is significantly faster for large batches.
 
     Args:
         client: SupabaseClient instance
         profiles: List of (linkedin_url, crustdata_response) tuples
+        batch_size: Number of profiles per batch (default 50, balances memory vs speed)
 
     Returns:
         Stats dict with 'saved' and 'errors' counts
     """
     stats = {'saved': 0, 'errors': 0}
 
+    if not profiles:
+        return stats
+
+    # Prepare all rows for batch insert
+    rows = []
     for linkedin_url, crustdata_response in profiles:
         try:
-            save_enriched_profile(client, linkedin_url, crustdata_response)
-            stats['saved'] += 1
+            linkedin_url = normalize_linkedin_url(linkedin_url)
+            if not linkedin_url:
+                stats['errors'] += 1
+                continue
+
+            cd = crustdata_response or {}
+
+            # Extract name for indexed column
+            name = cd.get('name') or ''
+            if not name:
+                first_name = cd.get('first_name') or ''
+                last_name = cd.get('last_name') or ''
+                name = f"{first_name} {last_name}".strip()
+
+            # Extract location
+            location = cd.get('location') or ''
+
+            # Extract only title/company for indexed filtering
+            current_title = None
+            current_company = None
+
+            current_employers = cd.get('current_employers') or []
+            if current_employers and isinstance(current_employers, list):
+                emp = current_employers[0] if current_employers else {}
+                if isinstance(emp, dict):
+                    current_title = emp.get('employee_title') or emp.get('title')
+                    current_company = emp.get('employer_name') or emp.get('company_name')
+
+            # Fallback: extract from headline
+            if not current_title or not current_company:
+                headline = cd.get('headline', '')
+                if headline and ' at ' in headline:
+                    parts = headline.split(' at ', 1)
+                    if not current_title:
+                        current_title = parts[0].strip()
+                    if not current_company and len(parts) > 1:
+                        current_company = parts[1].split('/')[0].strip()
+
+            # Pre-flattened arrays from Crustdata
+            all_employers = cd.get('all_employers') or []
+            all_titles = cd.get('all_titles') or []
+            all_schools = cd.get('all_schools') or []
+            skills = cd.get('skills') or []
+
+            # Ensure they're lists of strings
+            all_employers = [str(x) for x in all_employers if x] if isinstance(all_employers, list) else []
+            all_titles = [str(x) for x in all_titles if x] if isinstance(all_titles, list) else []
+            all_schools = [str(x) for x in all_schools if x] if isinstance(all_schools, list) else []
+            skills = [str(x) for x in skills if x] if isinstance(skills, list) else []
+
+            data = {
+                'linkedin_url': linkedin_url,
+                'raw_data': crustdata_response,
+                'name': name if name else None,
+                'location': location if location else None,
+                'current_title': current_title,
+                'current_company': current_company,
+                'all_employers': all_employers if all_employers else None,
+                'all_titles': all_titles if all_titles else None,
+                'all_schools': all_schools if all_schools else None,
+                'skills': skills if skills else None,
+                'status': 'enriched',
+                'enriched_at': datetime.utcnow().isoformat(),
+            }
+
+            # Remove None values for cleaner JSON
+            data = {k: v for k, v in data.items() if v is not None}
+            rows.append(data)
+
         except Exception as e:
-            print(f"[DB] Error saving {linkedin_url}: {e}")
+            print(f"[DB] Error preparing {linkedin_url}: {e}")
             stats['errors'] += 1
+
+    # Batch upsert in chunks to avoid memory issues with very large batches
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        try:
+            client.upsert_batch('profiles', batch, on_conflict='linkedin_url')
+            stats['saved'] += len(batch)
+        except Exception as e:
+            print(f"[DB] Batch upsert failed for {len(batch)} profiles: {e}")
+            # Fall back to individual inserts for this batch
+            for row in batch:
+                try:
+                    client.upsert('profiles', row, on_conflict='linkedin_url')
+                    stats['saved'] += 1
+                except Exception as e2:
+                    print(f"[DB] Individual save failed: {e2}")
+                    stats['errors'] += 1
 
     return stats
 

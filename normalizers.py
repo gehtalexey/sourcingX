@@ -14,6 +14,7 @@ import json
 import math
 from typing import Optional, Any
 from datetime import datetime
+from functools import lru_cache
 
 # ============================================================================
 # FIELD MAPPING DOCUMENTATION
@@ -167,26 +168,13 @@ def get_first_valid(data: dict, field_names: list) -> Any:
 # URL NORMALIZATION
 # ============================================================================
 
-def normalize_linkedin_url(url: str) -> Optional[str]:
+@lru_cache(maxsize=4096)
+def _normalize_linkedin_url_cached(url: str) -> Optional[str]:
+    """Internal cached implementation of URL normalization.
+
+    Caches up to 4096 URLs to avoid redundant normalization during batch operations.
+    This is called frequently during profile matching and deduplication.
     """
-    Normalize LinkedIn URL to canonical format for consistent matching.
-
-    Transformations:
-    - Add https:// if missing
-    - Remove query parameters
-    - Remove trailing slashes
-    - Convert to lowercase
-    - Validate it's a regular profile URL (not Sales Navigator, company, etc.)
-
-    Returns None if URL is invalid.
-    """
-    if is_nan_or_none(url):
-        return None
-
-    url = str(url).strip()
-    if not url:
-        return None
-
     # Add protocol if missing
     if url.startswith('www.'):
         url = 'https://' + url
@@ -219,6 +207,31 @@ def normalize_linkedin_url(url: str) -> Optional[str]:
         return None
 
     return url
+
+
+def normalize_linkedin_url(url: str) -> Optional[str]:
+    """
+    Normalize LinkedIn URL to canonical format for consistent matching.
+
+    Transformations:
+    - Add https:// if missing
+    - Remove query parameters
+    - Remove trailing slashes
+    - Convert to lowercase
+    - Validate it's a regular profile URL (not Sales Navigator, company, etc.)
+
+    Returns None if URL is invalid.
+
+    Performance: Uses lru_cache internally for repeated calls with the same URL.
+    """
+    if is_nan_or_none(url):
+        return None
+
+    url = str(url).strip()
+    if not url:
+        return None
+
+    return _normalize_linkedin_url_cached(url)
 
 
 def extract_linkedin_url(data: dict, field_map: dict = None) -> Optional[str]:
@@ -510,17 +523,37 @@ def normalize_crustdata_profile(raw: dict, original_url: str = None) -> Optional
 # BATCH NORMALIZATION
 # ============================================================================
 
+def _normalize_phantombuster_generator(profiles):
+    """Generator that yields normalized PhantomBuster profiles.
+
+    Memory-efficient: processes profiles one at a time instead of building full list.
+    """
+    for raw in profiles:
+        profile = normalize_phantombuster_profile(raw)
+        if profile:
+            yield profile
+
+
 def normalize_phantombuster_batch(profiles: list[dict]) -> list[dict]:
     """
     Normalize a batch of PhantomBuster profiles.
     Returns list of valid normalized profiles (skips invalid ones).
+
+    Performance: Uses generator internally for memory efficiency during iteration.
     """
-    normalized = []
-    for raw in profiles:
-        profile = normalize_phantombuster_profile(raw)
+    return list(_normalize_phantombuster_generator(profiles))
+
+
+def _normalize_crustdata_generator(profiles, original_urls=None):
+    """Generator that yields normalized Crustdata profiles.
+
+    Memory-efficient: processes profiles one at a time instead of building full list.
+    """
+    for i, raw in enumerate(profiles):
+        original_url = original_urls[i] if original_urls and i < len(original_urls) else None
+        profile = normalize_crustdata_profile(raw, original_url)
         if profile:
-            normalized.append(profile)
-    return normalized
+            yield profile
 
 
 def normalize_crustdata_batch(profiles: list[dict], original_urls: list[str] = None) -> list[dict]:
@@ -531,14 +564,10 @@ def normalize_crustdata_batch(profiles: list[dict], original_urls: list[str] = N
     Args:
         profiles: List of Crustdata API responses
         original_urls: Optional list of original URLs (same order as profiles)
+
+    Performance: Uses generator internally for memory efficiency during iteration.
     """
-    normalized = []
-    for i, raw in enumerate(profiles):
-        original_url = original_urls[i] if original_urls and i < len(original_urls) else None
-        profile = normalize_crustdata_profile(raw, original_url)
-        if profile:
-            normalized.append(profile)
-    return normalized
+    return list(_normalize_crustdata_generator(profiles, original_urls))
 
 
 # ============================================================================

@@ -87,6 +87,31 @@ try:
 except ImportError:
     HAS_AUTHENTICATOR = False
 
+# Security module - input validation, rate limiting, config security
+try:
+    from security import (
+        validate_linkedin_url as security_validate_linkedin_url,
+        validate_google_sheets_url,
+        validate_text_input,
+        validate_job_description,
+        validate_search_query,
+        sanitize_filename,
+        validate_config_security,
+        check_gitignore_security,
+        run_security_check,
+        get_rate_limiters,
+        ValidationError,
+        mask_secret,
+    )
+    HAS_SECURITY = True
+    # Run startup security check (non-blocking, just logs warnings)
+    _security_result = run_security_check(verbose=False)
+    if not _security_result['overall_secure']:
+        print("[Security] WARNING: Security issues detected. Run run_security_check(verbose=True) for details.")
+except ImportError:
+    HAS_SECURITY = False
+    print("[Security] Security module not available - running without enhanced security")
+
 
 def _start_keep_alive():
     """Ping the app's own URL every 10 minutes to prevent Streamlit Cloud from sleeping."""
@@ -268,6 +293,15 @@ def load_config():
                 config['salesql_api_key'] = st.secrets['salesql_api_key']
     except Exception:
         pass
+
+    # Validate config security if security module is available
+    if HAS_SECURITY:
+        validation = validate_config_security(config)
+        if not validation['valid']:
+            for issue in validation['issues']:
+                print(f"[Security] Config issue: {issue}")
+        for warning in validation.get('warnings', []):
+            print(f"[Security] Config warning: {warning}")
 
     return config
 
@@ -664,6 +698,19 @@ def get_usage_tracker():
     if client:
         return UsageTracker(client)
     return None
+
+
+@st.cache_data(ttl=120, max_entries=3, show_spinner="Loading profiles...")
+def _get_cached_all_profiles(_db_client_id: str, limit: int = 500) -> list:
+    """Cached wrapper for get_all_profiles to reduce database queries.
+
+    Cached for 2 minutes to balance freshness with performance.
+    The _db_client_id is used as a cache key differentiator (underscore prefix makes it unhashable-safe).
+    """
+    db_client = _get_db_client()
+    if not db_client:
+        return []
+    return get_all_profiles(db_client, limit=limit)
 
 
 # ===== SalesQL Email Enrichment =====
@@ -2248,8 +2295,12 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 
+@st.cache_data(ttl=600, max_entries=10, show_spinner="Loading sheet...")
 def load_sheet_as_df(sheet_url: str, worksheet_name: str = None) -> pd.DataFrame:
-    """Load a Google Sheet as a pandas DataFrame."""
+    """Load a Google Sheet as a pandas DataFrame.
+
+    Cached for 10 minutes to reduce Google Sheets API calls during filtering.
+    """
     client = get_gspread_client()
     if not client:
         return None
@@ -2334,9 +2385,16 @@ def extract_urls(uploaded_file) -> list[str]:
 
 
 def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) -> list[dict]:
-    """Enrich a batch of URLs via Crust Data API."""
+    """Enrich a batch of URLs via Crust Data API.
+
+    Uses circuit breaker pattern to prevent cascade failures when the API is down,
+    and retry logic with exponential backoff for transient errors (429, 5xx).
+    """
     batch_str = ','.join(urls)
     start_time = time.time()
+
+    # Get circuit breaker for Crustdata service (shared across all calls)
+    crustdata_circuit = get_service_circuit('Crustdata', failure_threshold=3, timeout=120.0)
 
     # Build mapping from username to original URL for matching results back
     def extract_username(url):
@@ -7085,6 +7143,16 @@ with tab_screening:
                         if st.session_state.get('_screening_active'):
                             _screening_session_end()
                             st.session_state['_screening_active'] = False
+
+                        # MEMORY CLEANUP: Clear heavy intermediate state on cancellation
+                        # Same cleanup as completion to prevent memory bloat
+                        if 'screening_batch_state' in st.session_state:
+                            del st.session_state['screening_batch_state']
+                        if 'enriched_profiles_raw' in st.session_state:
+                            del st.session_state['enriched_profiles_raw']
+                        import gc
+                        gc.collect()
+
                         save_session_state()  # Save partial results for restore
                         st.warning(f"Screening cancelled! {len(partial_results)} profiles were completed and saved.")
                         st.rerun()
@@ -7297,10 +7365,16 @@ with tab_screening:
                         # Clear original_results_df backup to save memory
                         if 'original_results_df' in st.session_state:
                             del st.session_state['original_results_df']
+                        # Clear enriched_profiles_raw cache (stores full profile dicts for raw_data lookup)
+                        if 'enriched_profiles_raw' in st.session_state:
+                            del st.session_state['enriched_profiles_raw']
                         # Clear debug data
                         for _debug_key in ['_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols']:
                             if _debug_key in st.session_state:
                                 del st.session_state[_debug_key]
+                        # Force garbage collection after cleanup
+                        import gc
+                        gc.collect()
 
                         st.success(f"✅ Screening complete! {len(all_results)} profiles screened fresh")
                         send_notification("Screening Complete", f"Screened {len(all_results)} profiles")
@@ -7735,7 +7809,8 @@ with tab_database:
                 st.markdown("#### Browse Profiles")
 
                 # Fetch all profiles once
-                all_profiles = get_all_profiles(db_client, limit=500)  # Reduced for memory
+                # Fetch all profiles once (cached for 2 min to reduce DB queries during filter interactions)
+                all_profiles = _get_cached_all_profiles("default", limit=500)
 
                 if all_profiles:
                     df = profiles_to_dataframe(all_profiles)

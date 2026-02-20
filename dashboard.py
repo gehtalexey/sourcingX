@@ -72,6 +72,26 @@ try:
 except ImportError:
     HAS_USAGE_TRACKER = False
 
+# Error handling patterns (custom exceptions, retry decorator, circuit breaker)
+try:
+    from error_handling import (
+        ApplicationError,
+        ExternalServiceError,
+        RateLimitError,
+        QuotaExceededError,
+        AuthenticationError,
+        ServiceUnavailableError,
+        CircuitOpenError,
+        retry_with_backoff,
+        CircuitBreaker,
+        CircuitBreakerConfig,
+        get_service_circuit,
+        classify_http_error,
+    )
+    HAS_ERROR_HANDLING = True
+except ImportError:
+    HAS_ERROR_HANDLING = False
+
 # Plotly for charts
 try:
     import plotly.express as px
@@ -2411,106 +2431,179 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
         'failed_samples': failed_extracts[:3] if failed_extracts else []
     }
 
-    try:
-        response = requests.get(
-            'https://api.crustdata.com/screener/person/enrich',
-            params={'linkedin_profile_url': batch_str},
-            headers={'Authorization': f'Token {api_key}'},
-            timeout=120
-        )
-        elapsed_ms = int((time.time() - start_time) * 1000)
+    # Get circuit breaker for Crustdata API (prevents cascade failures)
+    crustdata_circuit = None
+    if HAS_ERROR_HANDLING:
+        crustdata_circuit = get_service_circuit('Crustdata', failure_threshold=3, timeout=120.0)
 
-        if response.status_code == 200:
-            data = response.json()
-            result = data if isinstance(data, list) else [data]
+        # Check circuit breaker before making request
+        if not crustdata_circuit.allow_request():
+            status = crustdata_circuit.get_status()
+            retry_after = status.get('time_until_retry', 60)
+            error_msg = f"Crustdata service temporarily unavailable (circuit open). Retry in {retry_after:.0f}s"
+            if tracker:
+                tracker.log_crustdata(profiles_enriched=0, status='error', error_message=error_msg, response_time_ms=0)
+            return [{'error': error_msg, 'linkedin_url': u, 'circuit_open': True} for u in urls]
 
-            # Inject original_url into each result by matching username
-            # Use linkedin_flagship_url (canonical) for matching, not linkedin_url (encoded)
-            unmatched = []
-            for item in result:
-                if isinstance(item, dict) and 'error' not in item:
-                    result_url = item.get('linkedin_flagship_url') or item.get('linkedin_url', '')
-                    result_username = extract_username(result_url)
-                    matched = False
-                    if result_username:
-                        # Try exact match first
-                        if result_username in original_url_map:
-                            item['_original_url'] = original_url_map[result_username]
-                            matched = True
-                        else:
-                            # Try base username (without suffix) - handles input URLs with ID suffixes
-                            base = get_base_username(result_username)
-                            if base in original_url_map:
-                                item['_original_url'] = original_url_map[base]
+    # Retry logic with exponential backoff for transient errors
+    max_retries = 3
+    last_error = None
+
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(
+                'https://api.crustdata.com/screener/person/enrich',
+                params={'linkedin_profile_url': batch_str},
+                headers={'Authorization': f'Token {api_key}'},
+                timeout=120
+            )
+            elapsed_ms = int((time.time() - start_time) * 1000)
+
+            if response.status_code == 200:
+                data = response.json()
+                result = data if isinstance(data, list) else [data]
+
+                # Record success with circuit breaker
+                if crustdata_circuit:
+                    crustdata_circuit.record_success()
+
+                # Inject original_url into each result by matching username
+                # Use linkedin_flagship_url (canonical) for matching, not linkedin_url (encoded)
+                unmatched = []
+                for item in result:
+                    if isinstance(item, dict) and 'error' not in item:
+                        result_url = item.get('linkedin_flagship_url') or item.get('linkedin_url', '')
+                        result_username = extract_username(result_url)
+                        matched = False
+                        if result_username:
+                            # Try exact match first
+                            if result_username in original_url_map:
+                                item['_original_url'] = original_url_map[result_username]
                                 matched = True
                             else:
-                                # Try hyphen-free matching (handles o-neill vs oneill)
-                                normalized = get_normalized_name(result_username)
-                                if normalized and normalized in normalized_url_map:
-                                    item['_original_url'] = normalized_url_map[normalized]
+                                # Try base username (without suffix) - handles input URLs with ID suffixes
+                                base = get_base_username(result_username)
+                                if base in original_url_map:
+                                    item['_original_url'] = original_url_map[base]
                                     matched = True
                                 else:
-                                    # Also try matching result username against base versions in the map
-                                    for map_key, map_url in original_url_map.items():
-                                        if get_base_username(map_key) == result_username:
-                                            item['_original_url'] = map_url
-                                            matched = True
-                                            break
+                                    # Try hyphen-free matching (handles o-neill vs oneill)
+                                    normalized = get_normalized_name(result_username)
+                                    if normalized and normalized in normalized_url_map:
+                                        item['_original_url'] = normalized_url_map[normalized]
+                                        matched = True
+                                    else:
+                                        # Also try matching result username against base versions in the map
+                                        for map_key, map_url in original_url_map.items():
+                                            if get_base_username(map_key) == result_username:
+                                                item['_original_url'] = map_url
+                                                matched = True
+                                                break
 
-                    if not matched:
-                        unmatched.append(result_username or 'NO_USERNAME')
+                        if not matched:
+                            unmatched.append(result_username or 'NO_USERNAME')
 
-            # Debug: show matching stats
-            matched_count = sum(1 for item in result if isinstance(item, dict) and item.get('_original_url'))
+                # Debug: show matching stats
+                matched_count = sum(1 for item in result if isinstance(item, dict) and item.get('_original_url'))
 
-            # Store matching debug in session state
-            match_debug = {
-                'results': len(result),
-                'matched': matched_count,
-                'unmatched_count': len(unmatched),
-                'unmatched_samples': unmatched[:5],
-                'map_keys_sample': list(original_url_map.keys())[:10],
-                'result_samples': []
-            }
-            for i, item in enumerate(result[:5]):
-                if isinstance(item, dict):
-                    match_debug['result_samples'].append({
-                        'flagship': (item.get('linkedin_flagship_url') or 'N/A')[:50],
-                        'matched': '_original_url' in item,
-                        'original_url': (item.get('_original_url') or 'N/A')[:50] if item.get('_original_url') else None
-                    })
-            st.session_state['_enrich_match_debug'] = match_debug
+                # Store matching debug in session state
+                match_debug = {
+                    'results': len(result),
+                    'matched': matched_count,
+                    'unmatched_count': len(unmatched),
+                    'unmatched_samples': unmatched[:5],
+                    'map_keys_sample': list(original_url_map.keys())[:10],
+                    'result_samples': []
+                }
+                for i, item in enumerate(result[:5]):
+                    if isinstance(item, dict):
+                        match_debug['result_samples'].append({
+                            'flagship': (item.get('linkedin_flagship_url') or 'N/A')[:50],
+                            'matched': '_original_url' in item,
+                            'original_url': (item.get('_original_url') or 'N/A')[:50] if item.get('_original_url') else None
+                        })
+                st.session_state['_enrich_match_debug'] = match_debug
 
-            # Log successful usage
-            if tracker:
-                tracker.log_crustdata(
-                    profiles_enriched=len(urls),
-                    status='success',
-                    response_time_ms=elapsed_ms
-                )
+                # Log successful usage
+                if tracker:
+                    tracker.log_crustdata(
+                        profiles_enriched=len(urls),
+                        status='success',
+                        response_time_ms=elapsed_ms
+                    )
 
-            return result
-        else:
-            # Log error
-            if tracker:
-                tracker.log_crustdata(
-                    profiles_enriched=0,
-                    status='error',
-                    error_message=f'API error {response.status_code}: {response.text[:200]}',
-                    response_time_ms=elapsed_ms
-                )
-            return [{'error': response.text, 'linkedin_url': u} for u in urls]
+                return result
 
-    except Exception as e:
-        elapsed_ms = int((time.time() - start_time) * 1000)
-        if tracker:
-            tracker.log_crustdata(
-                profiles_enriched=0,
-                status='error',
-                error_message=str(e)[:200],
-                response_time_ms=elapsed_ms
-            )
-        return [{'error': str(e), 'linkedin_url': u} for u in urls]
+            else:
+                # Classify the error using custom exception hierarchy
+                if HAS_ERROR_HANDLING:
+                    error = classify_http_error(response.status_code, 'Crustdata', response.text[:200])
+
+                    # Retry on rate limits (429) and server errors (5xx)
+                    if error.recoverable and attempt < max_retries - 1:
+                        retry_delay = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                        if hasattr(error, 'retry_after') and error.retry_after:
+                            retry_delay = max(retry_delay, error.retry_after)
+                        print(f"[Crustdata] {error.code} - retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        continue
+
+                    # Non-recoverable error or max retries reached - record failure
+                    if crustdata_circuit:
+                        crustdata_circuit.record_failure(error)
+
+                    if tracker:
+                        tracker.log_crustdata(
+                            profiles_enriched=0,
+                            status='error',
+                            error_message=f'{error.code}: {error.message[:200]}',
+                            response_time_ms=elapsed_ms
+                        )
+                    return [{'error': str(error), 'error_code': error.code, 'linkedin_url': u} for u in urls]
+                else:
+                    # Fallback without error_handling module
+                    if tracker:
+                        tracker.log_crustdata(
+                            profiles_enriched=0,
+                            status='error',
+                            error_message=f'API error {response.status_code}: {response.text[:200]}',
+                            response_time_ms=elapsed_ms
+                        )
+                    return [{'error': response.text, 'linkedin_url': u} for u in urls]
+
+        except requests.exceptions.Timeout:
+            last_error = 'Request timed out'
+            if attempt < max_retries - 1:
+                retry_delay = 2 ** attempt
+                print(f"[Crustdata] Timeout - retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(retry_delay)
+                continue
+
+        except requests.exceptions.ConnectionError:
+            last_error = 'Connection failed'
+            if attempt < max_retries - 1:
+                retry_delay = 2 ** attempt
+                print(f"[Crustdata] Connection error - retrying in {retry_delay}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(retry_delay)
+                continue
+
+        except Exception as e:
+            last_error = str(e)[:200]
+            break  # Don't retry on unknown errors
+
+    # All retries exhausted - record failure with circuit breaker
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    if crustdata_circuit:
+        crustdata_circuit.record_failure(Exception(last_error))
+
+    if tracker:
+        tracker.log_crustdata(
+            profiles_enriched=0,
+            status='error',
+            error_message=last_error if last_error else 'Unknown error',
+            response_time_ms=elapsed_ms
+        )
+    return [{'error': last_error if last_error else 'Unknown error', 'linkedin_url': u} for u in urls]
 
 
 def normalize_crustdata_profile(record: dict) -> dict:

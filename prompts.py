@@ -1127,7 +1127,7 @@ MOBILE_ISRAEL = {
         'mobile', 'ios', 'android', 'swift', 'kotlin', 'react native',
         'flutter', 'mobile developer', 'mobile engineer', 'israel', 'tel aviv',
     ],
-    'prompt': f"""You are an expert technical recruiter for top Israeli startups. You screen mobile engineers (iOS, Android, cross-platform).
+    'prompt': f"""You screen mobile engineers (iOS, Android, cross-platform) for Israeli startups.
 
 ## Stability Check (CRITICAL - do FIRST)
 Before scoring, check past_employers array:

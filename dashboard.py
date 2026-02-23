@@ -56,10 +56,12 @@ try:
         get_usage_by_date, get_enriched_urls, get_recently_enriched_urls,
         get_setting, save_setting,
         get_search_history, save_search_history_entry, delete_search_history_entry,
-        get_screening_prompts, get_screening_prompt_by_role, get_default_screening_prompt,
-        save_screening_prompt, delete_screening_prompt, match_prompt_by_keywords,
         ENRICHMENT_REFRESH_MONTHS,
     )
+    import prompts
+    import importlib
+    importlib.reload(prompts)  # Force fresh load to avoid stale cache
+    from prompts import DEFAULT_PROMPTS
     from pb_dedup import filter_results_against_database, update_phantombuster_with_skip_list, get_skip_list_from_database
     HAS_DATABASE = True
 except ImportError:
@@ -2988,1022 +2990,134 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
     return df, stats, filtered_out
 
 
-from prompts import DEFAULT_PROMPTS, DEFAULT_SCREENING_PROMPT
+# =============================================================================
+# AI SCREENING (Simple Custom GPT Style)
+# =============================================================================
 
 
-def _score_keywords(keywords: list, text_lower: str) -> float:
-    """Score keyword matches using word-boundary matching.
+SCREENING_PROMPT = """You are a senior technical recruiter screening candidates for tech companies.
 
-    Multi-word keywords (phrases) get 2 points each since they're more specific.
-    Longer phrases (3+ words) get 4 points — they're highly specific role matches.
-    Single-word keywords get 1 point and use word-boundary regex to avoid
-    false substring matches (e.g. 'go' matching inside 'going').
-    Leadership keywords get bonus points to prioritize lead roles over IC roles.
-    """
-    # Leadership keywords get extra weight (3 points for phrases, 2 for single words)
-    leadership_keywords = ['team lead', 'team leader', 'tech lead', 'tech leader',
-                          'engineering lead', 'technical lead', 'lead engineer',
-                          'engineering manager', 'manager', 'director', 'vp', 'head of']
+Today's date: {today}
 
-    score = 0
-    for kw in keywords:
-        kw_lower = kw.lower()
-        is_leadership = any(lk in kw_lower for lk in leadership_keywords) or kw_lower in leadership_keywords
-        word_count = len(kw_lower.split())
+## How to Screen:
+1. Read the Job Description carefully - identify must-have requirements and rejection criteria
+2. Read the candidate's profile JSON - check their experience, skills, and work history
+3. Score 1-10 based on how well they match the JD requirements
 
-        if ' ' in kw_lower:
-            # Multi-word phrase: substring match is fine
-            if kw_lower in text_lower:
-                if is_leadership:
-                    score += 3
-                elif word_count >= 3:
-                    # Long phrases like "full-stack software engineer" are very specific
-                    score += 4
-                else:
-                    score += 2
-        else:
-            # Single word: use word boundary to avoid false matches
-            if re.search(r'\b' + re.escape(kw_lower) + r'\b', text_lower):
-                score += 2 if is_leadership else 1
-    return score
+## Scoring Guide:
+- 9-10: Exceeds all must-have requirements, top candidate
+- 7-8: Meets all must-have requirements
+- 5-6: Close but missing 1 requirement, worth reviewing
+- 3-4: Missing multiple requirements, poor fit
+- 1-2: Matches rejection criteria (overqualified, consulting company, etc.)
+
+## Key Rules:
+- Nice-to-Have = bonus only, NOT a penalty if missing
+- Israeli military service (IDF, 8200, Mamram) is mandatory in Israel and a POSITIVE signal
+- Calculate experience from employment dates in the JSON
+- Check the "skills" array for technical skills
+- Read "employer_linkedin_description" to understand what each company does
+
+Return ONLY valid JSON in this format:
+{json_format}"""
 
 
-def get_screening_prompt_for_role(role_type: str = None, job_description: str = None) -> tuple:
-    """Get screening prompt, either by role or auto-detected from JD.
-
-    Returns: (prompt_text, role_type, role_name)
-    """
-    db_client = _get_db_client() if HAS_DATABASE else None
-
-    # If role specified, get that prompt
-    if role_type and role_type != 'auto':
-        if db_client:
-            prompt_data = get_screening_prompt_by_role(db_client, role_type)
-            if prompt_data:
-                return prompt_data['prompt_text'], role_type, prompt_data.get('name', role_type.title())
-        # Fall back to defaults
-        if role_type in DEFAULT_PROMPTS:
-            return DEFAULT_PROMPTS[role_type]['prompt'], role_type, DEFAULT_PROMPTS[role_type]['name']
-
-    # Auto-detect from job description
-    # Always use DEFAULT_PROMPTS keywords for detection (code keywords are kept up to date)
-    # Then check if DB has a customized prompt TEXT for the detected role
-    if job_description:
-        jd_lower = job_description.lower()
-        best_match = None
-        best_score = 0
-        for role_key, role_data in DEFAULT_PROMPTS.items():
-            if role_key == 'general':
-                continue
-            score = _score_keywords(role_data['keywords'], jd_lower)
-            if score > best_score:
-                best_score = score
-                best_match = role_key
-        if best_score >= 2 and best_match:
-            # Check if DB has a customized prompt for this role (user may have edited it)
-            if db_client:
-                db_prompt = get_screening_prompt_by_role(db_client, best_match)
-                if db_prompt:
-                    return db_prompt['prompt_text'], best_match, db_prompt.get('name', DEFAULT_PROMPTS[best_match]['name'])
-            return DEFAULT_PROMPTS[best_match]['prompt'], best_match, DEFAULT_PROMPTS[best_match]['name']
-
-    # Fall back to general/default
-    if db_client:
-        default_prompt = get_default_screening_prompt(db_client)
-        if default_prompt:
-            return default_prompt['prompt_text'], default_prompt['role_type'], default_prompt.get('name', 'Default')
-
-    return DEFAULT_SCREENING_PROMPT, 'general', 'General'
-
-
-def get_screening_prompt() -> str:
-    """Legacy function for backwards compatibility."""
-    prompt, _, _ = get_screening_prompt_for_role()
-    return prompt
-
-
-def screen_profile(profile: dict, job_description: str, client: OpenAI, tracker: 'UsageTracker' = None, mode: str = "detailed", system_prompt: str = None, ai_model: str = "gpt-4o-mini") -> dict:
+def screen_profile(profile: dict, job_description: str, client: OpenAI,
+                   tracker: 'UsageTracker' = None, mode: str = "detailed",
+                   ai_model: str = "gpt-4o-mini", role_prompt: str = None) -> dict:
     """Screen a profile against a job description using OpenAI.
 
+    Simple Custom GPT style approach - no complex pre-processing, just send JD + raw JSON to AI.
+
     Args:
-        mode: "quick" for cheaper/faster (score + fit + summary) or "detailed" for full analysis
-        system_prompt: Custom system prompt (if None, uses default)
+        profile: Profile dict (must have raw_crustdata or raw_data for best results)
+        job_description: The job requirements to screen against
+        client: OpenAI client instance
+        tracker: Optional usage tracker
+        mode: "quick" for cheaper/faster or "detailed" for full analysis
         ai_model: OpenAI model to use (default: gpt-4o-mini)
+        role_prompt: Optional role-specific system prompt (like Custom GPT instructions)
     """
-    # Validate profile has minimum useful data before calling OpenAI
-    # Guard against pandas NaN values (float NaN is truthy, breaks string checks)
-    def _safe_str(val):
-        if val is None:
-            return ''
-        if isinstance(val, float):
-            import math
-            return '' if math.isnan(val) else str(val)
-        return str(val) if val else ''
-
-    name = _safe_str(profile.get('name')) or f"{_safe_str(profile.get('first_name'))} {_safe_str(profile.get('last_name'))}".strip()
-    title = _safe_str(profile.get('current_title')) or _safe_str(profile.get('headline'))
-    company = _safe_str(profile.get('current_company'))
-    linkedin_url = _safe_str(profile.get('linkedin_url'))
-    has_useful_data = bool((name or title or company or linkedin_url) and (title or company or profile.get('skills') or profile.get('past_positions') or profile.get('summary')))
-
-    if not has_useful_data:
-        return {
-            "score": 0,
-            "fit": "Skipped",
-            "summary": "Insufficient profile data - skipped to save API credits",
-            "strengths": [],
-            "concerns": []
-        }
-
     start_time = time.time()
 
-    # Try to get raw Crustdata data for richer extraction
-    raw = profile.get('raw_crustdata') or profile.get('raw_data') or {}
+    # Get raw data
+    raw = profile.get('raw_crustdata') or profile.get('raw_data') or profile
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            raw = {}
+            raw = profile
 
-    # Check if Crustdata returned meaningful work history data
-    has_work_history = bool(
-        (raw.get('past_employers') and len(raw.get('past_employers', [])) > 0) or
-        (raw.get('current_employers') and len(raw.get('current_employers', [])) > 0)
-    )
-    has_career_data = bool(
-        raw.get('all_employers') or raw.get('all_titles') or has_work_history
-    )
+    # Validate we have something to screen
+    name = raw.get('name') or profile.get('name') or 'Unknown'
+    if not raw.get('current_employers') and not raw.get('past_employers') and not raw.get('skills'):
+        # Try to construct minimal profile from flat fields
+        if profile.get('current_title') or profile.get('current_company'):
+            raw = {
+                'name': name,
+                'current_title': profile.get('current_title'),
+                'current_company': profile.get('current_company'),
+                'skills': profile.get('skills', []),
+                'linkedin_url': profile.get('linkedin_url')
+            }
+        else:
+            return {
+                "score": 0,
+                "fit": "Skipped",
+                "summary": "Insufficient profile data",
+                "strengths": [],
+                "concerns": []
+            }
 
-    # If raw data is missing or has no career info, skip screening
-    if not raw or not has_career_data:
-        return {
-            "score": 0,
-            "fit": "Missing Data",
-            "summary": "Crustdata did not return work history - re-enrich this profile before screening",
-            "strengths": [],
-            "concerns": ["No work history from Crustdata - cannot evaluate experience or leadership"],
-            "missing_data": True
-        }
-
-    # Build past positions - the main source of candidate information
-    past_positions_str = ''
-    if raw and raw.get('past_employers'):
-        past_positions_str = format_past_positions(raw.get('past_employers', []))
-    elif raw and raw.get('current_employers'):
-        # Include current position from raw data too
-        past_positions_str = format_past_positions(raw.get('current_employers', []))
-    if not past_positions_str:
-        # Fall back to flat field (may be pre-formatted string or JSON)
-        pp = profile.get('past_positions', '')
-        if isinstance(pp, list):
-            past_positions_str = format_past_positions(pp)
-        elif pp:
-            past_positions_str = str(pp)
-
-    # Include current employer from raw if available (separate from past)
-    current_positions_str = ''
-    if raw and raw.get('current_employers'):
-        current_positions_str = format_past_positions(raw.get('current_employers', []))
-
-    # Build education - use structured education_background if available
-    education_str = ''
-    if raw and raw.get('education_background'):
-        education_str = format_education(raw.get('education_background', []))
-    if not education_str:
-        edu = profile.get('education') or profile.get('all_schools', '')
-        if isinstance(edu, list):
-            education_str = ', '.join(str(s) for s in edu if s)
-        elif edu:
-            education_str = str(edu)
-
-    # Build all employers list for career trajectory
-    all_employers_str = ''
-    if raw and raw.get('all_employers'):
-        employers = raw.get('all_employers', [])
-        all_employers_str = ', '.join(str(e) for e in employers if e)
-    elif profile.get('all_employers'):
-        ae = profile.get('all_employers')
-        all_employers_str = ', '.join(ae) if isinstance(ae, list) else str(ae)
-
-    # Build all titles for career trajectory
-    all_titles_str = ''
-    if raw and raw.get('all_titles'):
-        titles = raw.get('all_titles', [])
-        all_titles_str = ', '.join(str(t) for t in titles if t)
-    elif profile.get('all_titles'):
-        at = profile.get('all_titles')
-        all_titles_str = ', '.join(at) if isinstance(at, list) else str(at)
-
-    # Safe string helper (no truncation for past_positions)
-    def safe_str(value, max_len=500):
-        if value is None:
-            return 'N/A'
-        if isinstance(value, (list, dict)):
-            value = json.dumps(value, ensure_ascii=False)
-        return str(value)[:max_len] if value else 'N/A'
-
-    # Extract full work history with dates from raw_crustdata
-    # Get full raw Crustdata JSON for comprehensive screening
-    raw_crustdata = profile.get('raw_crustdata') or profile.get('raw_data') or {}
-    if isinstance(raw_crustdata, str):
-        try:
-            raw_crustdata = json.loads(raw_crustdata)
-        except (json.JSONDecodeError, TypeError):
-            raw_crustdata = {}
-
-    # Clean up raw data - remove unnecessary fields to reduce tokens
-    def clean_raw_data(raw):
-        if not raw or not isinstance(raw, dict):
-            return {}
-        # Fields to exclude (large/unnecessary for screening)
-        # Note: employer_linkedin_description is INCLUDED (helps evaluate company context)
-        exclude_fields = [
-            'employer_logo_url', 'profile_picture_url', 'profile_pic_url',
-            'employer_company_website_domain', 'domains',
-            'employer_company_id', 'employee_position_id', 'employer_linkedin_id',
-            'profile_picture_permalink', 'background_picture_permalink',
-            'linkedin_profile_url', 'linkedin_flagship_url', 'linkedin_sales_navigator_url',
-        ]
-        cleaned = {}
-        for key, value in raw.items():
-            if key in exclude_fields:
-                continue
-            # Clean nested employer lists
-            if key in ['current_employers', 'past_employers'] and isinstance(value, list):
-                cleaned_list = []
-                for emp in value:
-                    if isinstance(emp, dict):
-                        cleaned_emp = {k: v for k, v in emp.items() if k not in exclude_fields}
-                        cleaned_list.append(cleaned_emp)
-                cleaned[key] = cleaned_list
-            else:
-                cleaned[key] = value
-        return cleaned
-
-    cleaned_raw = clean_raw_data(raw_crustdata)
-
-    # Format as JSON string (limit size to avoid huge prompts)
-    raw_json_str = json.dumps(cleaned_raw, indent=2, ensure_ascii=False, default=str)
-    if len(raw_json_str) > 8000:  # Truncate if too large
-        raw_json_str = raw_json_str[:8000] + "\n... (truncated)"
-
-    # Check for missing work history
-    has_work_history = bool(
-        (raw_crustdata.get('past_employers') and len(raw_crustdata.get('past_employers', [])) > 0) or
-        (raw_crustdata.get('current_employers') and len(raw_crustdata.get('current_employers', [])) > 0)
-    )
-    work_history_warning = ""
-    if not has_work_history:
-        work_history_warning = "\n⚠️ WARNING: Work history (past_employers/current_employers) is MISSING. Score as Partial Fit (5-6) unless rejection criteria apply."
-
-    # PRE-EXTRACT current employer to prevent AI confusion
-    current_employer_summary = ""
-    current_employers = raw_crustdata.get('current_employers', [])
-    if current_employers:
-        ce = current_employers[0]
-        ce_title = ce.get('employee_title', 'Unknown')
-        ce_company = ce.get('employer_name', 'Unknown')
-        ce_start = ce.get('start_date', '')
-        # Calculate months from start to Feb 2026
-        ce_months = 0
-        if ce_start:
-            try:
-                from datetime import datetime
-                start_dt = datetime.fromisoformat(ce_start.replace('+00:00', '').replace('Z', ''))
-                ce_months = (2026 - start_dt.year) * 12 + (2 - start_dt.month)
-            except:
-                pass
-        current_employer_summary = f"""
-⚡ CURRENT EMPLOYER (pre-extracted from current_employers[]) ⚡
-Title: {ce_title}
-Company: {ce_company}
-Started: {ce_start[:10] if ce_start else 'Unknown'}
-Duration: {ce_months} months ({ce_months/12:.1f} years)
-"""
-
-    # Pre-calculate LEAD experience
-    lead_keywords = ['lead', 'leader', 'manager', 'head', 'director', 'tl']
-    lead_roles = []
-    total_lead_months = 0
-
-    # Current employer lead check
-    for ce in current_employers:
-        title = (ce.get('employee_title') or '').lower()
-        if any(kw in title for kw in lead_keywords):
-            start = ce.get('start_date', '')
-            months = 0
-            if start:
-                try:
-                    from datetime import datetime
-                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
-                    months = (2026 - start_dt.year) * 12 + (2 - start_dt.month)
-                except:
-                    pass
-            lead_roles.append(f"CURRENT: {ce.get('employee_title')} @ {ce.get('employer_name')}: {months} months")
-            total_lead_months += months
-
-    # Past employer lead check
-    for pe in raw_crustdata.get('past_employers', []):
-        title = (pe.get('employee_title') or '').lower()
-        if any(kw in title for kw in lead_keywords):
-            start = pe.get('start_date', '')
-            end = pe.get('end_date', '')
-            months = 0
-            if start and end:
-                try:
-                    from datetime import datetime
-                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
-                    end_dt = datetime.fromisoformat(end.replace('+00:00', '').replace('Z', ''))
-                    months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
-                except:
-                    pass
-            company = pe.get('employer_name', '')
-            # Mark consulting companies
-            consulting = any(c in company.lower() for c in ['tikal', 'matrix', 'ness', 'sela', 'malam'])
-            suffix = " ⚠️CONSULTING" if consulting else ""
-            lead_roles.append(f"PAST: {pe.get('employee_title')} @ {company}: {months} months{suffix}")
-            if not consulting:
-                total_lead_months += months
-
-    lead_summary = ""
-    if lead_roles:
-        lead_summary = f"""
-📊 PRE-CALCULATED LEAD/MANAGEMENT EXPERIENCE:
-{chr(10).join(lead_roles)}
-TOTAL (excluding consulting): {total_lead_months} months ({total_lead_months/12:.1f} years)
-
-💡 Compare against job requirements. Verify against raw JSON if needed.
-"""
-    else:
-        lead_summary = """
-📊 LEAD/MANAGEMENT EXPERIENCE: No lead/manager roles detected.
-💡 Check raw JSON - candidate may have leadership with non-standard titles.
-"""
-
-    # Pre-calculate FULLSTACK experience (for "X years fullstack" requirements)
-    fullstack_title_keywords = ['full stack', 'fullstack', 'full-stack']
-    likely_fullstack_keywords = ['software engineer', 'developer', 'web developer', 'software developer', 'application developer']
-    # Detect both-sides skills from Crustdata skills list
-    all_skills = raw_crustdata.get('skills') or []
-    skills_lower_str = ' '.join(s.lower() for s in all_skills) if all_skills else ''
-    fe_signals = ['react', 'vue', 'angular', 'frontend', 'front-end', 'next.js', 'css', 'html', 'javascript', 'typescript']
-    be_signals = ['node', 'python', 'go', 'golang', 'java', 'ruby', 'django', 'flask', 'express', 'fastapi', 'spring', 'sql', 'mongodb', 'postgresql', 'microservices', 'rest api', 'graphql']
-    has_fe_skills = any(s in skills_lower_str for s in fe_signals)
-    has_be_skills = any(s in skills_lower_str for s in be_signals)
-    has_both_sides = has_fe_skills and has_be_skills
-
-    fullstack_roles = []
-    total_fullstack_months = 0
-
-    # Current employer fullstack check
-    for ce in current_employers:
-        title = (ce.get('employee_title') or '').lower()
-        is_explicit_fs = any(kw in title for kw in fullstack_title_keywords)
-        is_likely_fs = any(kw in title for kw in likely_fullstack_keywords) and has_both_sides
-        if is_explicit_fs or is_likely_fs:
-            start = ce.get('start_date', '')
-            months = 0
-            if start:
-                try:
-                    from datetime import datetime
-                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
-                    months = (2026 - start_dt.year) * 12 + (2 - start_dt.month)
-                except:
-                    pass
-            reason = "explicit fullstack title" if is_explicit_fs else "engineering title + FE&BE skills"
-            fullstack_roles.append(f"CURRENT: {ce.get('employee_title')} @ {ce.get('employer_name')}: {months} months ({reason})")
-            total_fullstack_months += months
-
-    # Past employer fullstack check
-    for pe in raw_crustdata.get('past_employers', []):
-        title = (pe.get('employee_title') or '').lower()
-        is_explicit_fs = any(kw in title for kw in fullstack_title_keywords)
-        is_likely_fs = any(kw in title for kw in likely_fullstack_keywords) and has_both_sides
-        if is_explicit_fs or is_likely_fs:
-            start = pe.get('start_date', '')
-            end = pe.get('end_date', '')
-            months = 0
-            if start and end:
-                try:
-                    from datetime import datetime
-                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
-                    end_dt = datetime.fromisoformat(end.replace('+00:00', '').replace('Z', ''))
-                    months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
-                except:
-                    pass
-            company = pe.get('employer_name', '')
-            consulting = any(c in company.lower() for c in ['tikal', 'matrix', 'ness', 'sela', 'malam'])
-            suffix = " ⚠️CONSULTING" if consulting else ""
-            reason = "explicit fullstack title" if is_explicit_fs else "engineering title + FE&BE skills"
-            fullstack_roles.append(f"PAST: {pe.get('employee_title')} @ {company}: {months} months ({reason}){suffix}")
-            if not consulting:
-                total_fullstack_months += months
-
-    fullstack_summary = ""
-    if fullstack_roles:
-        fe_found = [s for s in fe_signals if s in skills_lower_str]
-        be_found = [s for s in be_signals if s in skills_lower_str]
-        fullstack_summary = f"""
-📊 PRE-CALCULATED FULLSTACK EXPERIENCE:
-{chr(10).join(fullstack_roles)}
-TOTAL (excluding consulting): {total_fullstack_months} months ({total_fullstack_months/12:.1f} years)
-Skills: Frontend=[{', '.join(fe_found[:5])}] Backend=[{', '.join(be_found[:5])}]
-💡 "Software Engineer"/"Developer" with BOTH FE & BE skills = fullstack. Title doesn't need to say "Full Stack".
-"""
-    elif has_both_sides:
-        fe_found = [s for s in fe_signals if s in skills_lower_str]
-        be_found = [s for s in be_signals if s in skills_lower_str]
-        fullstack_summary = f"""
-📊 FULLSTACK EXPERIENCE: No explicit fullstack/engineer titles matched, but candidate has BOTH sides:
-   Frontend skills: {', '.join(fe_found[:5])}
-   Backend skills: {', '.join(be_found[:5])}
-💡 Their engineering roles are likely fullstack even without the title. Check raw JSON for role details.
-"""
-    else:
-        fullstack_summary = """
-📊 FULLSTACK EXPERIENCE: No fullstack titles detected AND no clear both-sides skills from LinkedIn.
-💡 LinkedIn skills are often incomplete. Check raw JSON employer descriptions and role context.
-"""
-
-    # Pre-calculate DEVOPS/PLATFORM experience (for "X years DevOps" requirements)
-    devops_title_keywords = ['devops', 'sre', 'site reliability', 'platform engineer', 'infrastructure engineer', 'cloud engineer', 'cloud architect', 'release engineer', 'build engineer']
-    not_devops_keywords = ['sysadmin', 'system admin', 'helpdesk', 'help desk', 'desktop support', 'it support', 'storage admin', 'dba', 'database admin']
-    devops_skill_signals = ['kubernetes', 'k8s', 'terraform', 'ansible', 'docker', 'aws', 'gcp', 'azure', 'ci/cd', 'jenkins', 'argocd', 'helm', 'prometheus', 'grafana', 'linux', 'cloudformation', 'pulumi']
-    has_devops_skills = sum(1 for s in devops_skill_signals if s in skills_lower_str) >= 3
-
-    devops_roles = []
-    total_devops_months = 0
-
-    # Current employer devops check
-    for ce in current_employers:
-        title = (ce.get('employee_title') or '').lower()
-        is_explicit_devops = any(kw in title for kw in devops_title_keywords)
-        is_excluded = any(kw in title for kw in not_devops_keywords)
-        if is_explicit_devops and not is_excluded:
-            start = ce.get('start_date', '')
-            months = 0
-            if start:
-                try:
-                    from datetime import datetime
-                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
-                    months = (2026 - start_dt.year) * 12 + (2 - start_dt.month)
-                except:
-                    pass
-            devops_roles.append(f"CURRENT: {ce.get('employee_title')} @ {ce.get('employer_name')}: {months} months")
-            total_devops_months += months
-
-    # Past employer devops check
-    for pe in raw_crustdata.get('past_employers', []):
-        title = (pe.get('employee_title') or '').lower()
-        is_explicit_devops = any(kw in title for kw in devops_title_keywords)
-        is_excluded = any(kw in title for kw in not_devops_keywords)
-        if is_explicit_devops and not is_excluded:
-            start = pe.get('start_date', '')
-            end = pe.get('end_date', '')
-            months = 0
-            if start and end:
-                try:
-                    from datetime import datetime
-                    start_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
-                    end_dt = datetime.fromisoformat(end.replace('+00:00', '').replace('Z', ''))
-                    months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
-                except:
-                    pass
-            company = pe.get('employer_name', '')
-            consulting = any(c in company.lower() for c in ['tikal', 'matrix', 'ness', 'sela', 'malam', 'bynet', 'sqlink'])
-            # Cloud-focused consulting is OK for DevOps
-            cloud_consulting = any(c in company.lower() for c in ['allcloud', 'doit', 'cloudride', 'opsfleet', 'terasky'])
-            suffix = " ⚠️CONSULTING" if consulting and not cloud_consulting else ""
-            devops_roles.append(f"PAST: {pe.get('employee_title')} @ {company}: {months} months{suffix}")
-            if not consulting or cloud_consulting:
-                total_devops_months += months
-
-    devops_summary = ""
-    if devops_roles:
-        devops_skills_found = [s for s in devops_skill_signals if s in skills_lower_str]
-        devops_summary = f"""
-📊 PRE-CALCULATED DEVOPS/PLATFORM EXPERIENCE:
-{chr(10).join(devops_roles)}
-TOTAL (excluding body-shop consulting): {total_devops_months} months ({total_devops_months/12:.1f} years)
-DevOps Skills: [{', '.join(devops_skills_found[:8])}]
-💡 SRE, Platform Engineer, Cloud Engineer, Infrastructure Engineer = DevOps experience.
-"""
-    elif has_devops_skills:
-        devops_skills_found = [s for s in devops_skill_signals if s in skills_lower_str]
-        devops_summary = f"""
-📊 DEVOPS EXPERIENCE: No explicit DevOps/SRE/Platform titles, but candidate has strong DevOps skills:
-   Skills: {', '.join(devops_skills_found[:8])}
-💡 Engineer with strong infra/cloud skills may have DevOps experience under a generic title. Check raw JSON.
-"""
-    else:
-        devops_summary = """
-📊 DEVOPS EXPERIENCE: No DevOps/SRE/Platform titles or skills detected from LinkedIn.
-"""
-
-    # Pre-calculate TOTAL CAREER EXPERIENCE (for "reject >X years" rules)
-    # Also detect military/army service and show INDUSTRY experience separately
-    military_keywords = ['idf', 'israel defense', 'israeli defense', 'israeli air force',
-                         'air force', ' iaf', '- iaf', 'navy', 'army', 'military',
-                         'intelligence corps', 'combat', 'c4i', 'cyber security directorate',
-                         'mamram', 'unit 8200', 'talpiot', 'israeli navy', 'ground forces',
-                         'home front command', 'paratroopers', 'golani', 'givati',
-                         'infantry', 'brigade', 'ofek']
-    all_positions_info = []  # (start_date, end_date_or_now, is_military, employer_name)
-    for ce in current_employers:
-        start = ce.get('start_date', '')
-        emp_name = (ce.get('employer_name') or '').lower()
-        is_mil = any(kw in emp_name for kw in military_keywords)
-        if start:
-            all_positions_info.append((start, None, is_mil, ce.get('employer_name', '')))
-    for pe in raw_crustdata.get('past_employers', []):
-        start = pe.get('start_date', '')
-        end = pe.get('end_date', '')
-        emp_name = (pe.get('employer_name') or '').lower()
-        is_mil = any(kw in emp_name for kw in military_keywords)
-        if start:
-            all_positions_info.append((start, end, is_mil, pe.get('employer_name', '')))
-
-    total_experience_summary = ""
-    experience_years_for_rejection = None  # Will be set to the number AI should use for "reject >X years"
-    if all_positions_info:
-        try:
-            from datetime import datetime
-            # Calculate total career span
-            all_starts = [p[0] for p in all_positions_info]
-            earliest = min(all_starts)
-            earliest_dt = datetime.fromisoformat(earliest.replace('+00:00', '').replace('Z', ''))
-            total_months = (2026 - earliest_dt.year) * 12 + (2 - earliest_dt.month)
-            total_years = total_months / 12
-
-            # Calculate military months
-            military_months = 0
-            military_details = []
-            for start, end, is_mil, emp_name in all_positions_info:
-                if is_mil:
-                    try:
-                        s_dt = datetime.fromisoformat(start.replace('+00:00', '').replace('Z', ''))
-                        if end:
-                            e_dt = datetime.fromisoformat(end.replace('+00:00', '').replace('Z', ''))
-                        else:
-                            e_dt = datetime(2026, 2, 1)
-                        months = (e_dt.year - s_dt.year) * 12 + (e_dt.month - s_dt.month)
-                        military_months += months
-                        military_details.append(f"🎖️ {emp_name}: {months} months ({months/12:.1f} years)")
-                    except:
-                        pass
-
-            industry_months = max(0, total_months - military_months)
-            industry_years = industry_months / 12
-
-            # The number to use for "reject >X years" rules
-            experience_years_for_rejection = industry_years if military_months > 0 else total_years
-
-            # Extract max-years threshold from JD (e.g., "reject >15 years", "more than 15 years")
-            import re
-            max_years_match = re.search(
-                r'(?:reject|exclude|no|max(?:imum)?|more\s+than|over|exceed)[^.]*?(\d{1,2})\s*(?:total\s+)?years?\s*(?:of\s+)?(?:total\s+)?(?:experience|exp)?',
-                job_description.lower()
-            )
-            jd_max_years = int(max_years_match.group(1)) if max_years_match else None
-
-            # Build experience threshold verdict (pre-computed in Python, not by AI)
-            threshold_verdict = ""
-            if jd_max_years:
-                if experience_years_for_rejection > jd_max_years:
-                    threshold_verdict = f"""
-🚫🚫🚫 EXPERIENCE LIMIT CHECK: {experience_years_for_rejection:.1f} years > {jd_max_years} years → ❌ EXCEEDS LIMIT — HARD REJECT (score 1-2) 🚫🚫🚫"""
-                else:
-                    threshold_verdict = f"""
-✅✅✅ EXPERIENCE LIMIT CHECK: {experience_years_for_rejection:.1f} years ≤ {jd_max_years} years → ✅ PASSES — DO NOT REJECT FOR EXPERIENCE ✅✅✅"""
-
-            if military_months > 0:
-                mil_detail_str = chr(10).join(f"   {d}" for d in military_details)
-                total_experience_summary = f"""
-📅 TOTAL CAREER SPAN: {total_months} months ({total_years:.1f} years) — includes military
-{mil_detail_str}
-   💼 INDUSTRY EXPERIENCE (excluding military): {industry_months} months ({industry_years:.1f} years)
-   ⚠️ For "reject >X years" rules → use INDUSTRY EXPERIENCE ({industry_years:.1f} years), NOT total with military!
-   ⚠️ Israeli military is mandatory service (age 18-21), NOT professional experience.
-{threshold_verdict}
-"""
-            else:
-                total_experience_summary = f"""
-📅 TOTAL CAREER EXPERIENCE: {total_months} months ({total_years:.1f} years)
-   (Career started: {earliest[:10]})
-{threshold_verdict}
-"""
-        except:
-            total_experience_summary = "\n📅 TOTAL CAREER EXPERIENCE: Could not calculate\n"
-
-    current_employer_summary += lead_summary + fullstack_summary + devops_summary + total_experience_summary
-
-    # Profile summary with pre-calculated hints + raw JSON fallback
-    profile_summary = f"""{work_history_warning}
-{current_employer_summary}
-## Raw JSON (use to verify pre-calculated values if needed):
-```json
-{raw_json_str}
-```"""
-
-    # Different prompts based on mode
+    # JSON format based on mode
     if mode == "quick":
-        json_schema = '{"score": <1-10>, "fit": "<Strong Fit|Good Fit|Partial Fit|Not a Fit>", "summary": "<one sentence>"}'
-        max_tokens = 100
+        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit", "summary": "one sentence"}'
+        max_tokens = 150
     else:
-        json_schema = '{"score": <1-10>, "fit": "<Strong Fit|Good Fit|Partial Fit|Not a Fit>", "summary": "<2-3 sentences about the candidate>", "why": "<2-3 sentences explaining the score>", "strengths": ["<strength1>", "<strength2>"], "concerns": ["<concern1>", "<concern2>"]}'
+        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit", "summary": "2-3 sentences about the candidate", "why": "2-3 sentences explaining the score with specific evidence", "strengths": ["strength1", "strength2"], "concerns": ["only if fails explicit JD requirement, otherwise empty array"]}'
         max_tokens = 500
 
-    # Detect rejection keywords in screening requirements
-    rejection_keywords = ['reject', 'exclude', 'don\'t want', 'do not want', 'must not', 'should not',
-                          'not looking for', 'no candidates from', 'not interested in', 'disqualify', 'overqualified']
-    must_have_keywords = ['must have', 'is a must', 'required', 'mandatory', 'must be mentioned', 'must include']
-    combined_text = job_description.lower()
-    has_rejection_criteria = any(kw in combined_text for kw in rejection_keywords)
-    has_must_have_criteria = any(kw in combined_text for kw in must_have_keywords)
+    # Build prompts
+    today = datetime.now().strftime("%Y-%m-%d")
 
-    # Add rejection enforcement if ANY rejection keywords found
-    rejection_warning = ""
-    if has_rejection_criteria or has_must_have_criteria:
-        rejection_warning = """
-## HARD RULES - Rejection & Must-Have Criteria:
-The requirements contain HARD RULES. These are NOT preferences - they are disqualifiers.
+    # Use role-specific prompt if provided, otherwise use default
+    if role_prompt:
+        # Role prompt is the system prompt (like Custom GPT instructions)
+        # Append JSON format requirement
+        system_prompt = f"""{role_prompt}
 
-### REJECTION RULES (Score 1-2 if matched):
-1. "Reject overqualified" → ONLY reject titles the JD EXPLICITLY lists as overqualified:
-   - If JD says "reject VP, CTO, director, head of, group manager" → ONLY reject those EXACT levels
-   - Team Lead / Tech Lead / Staff Engineer → NOT overqualified unless JD EXPLICITLY says to reject them
-   - Senior Engineer → NEVER overqualified for an engineer role
-   - ⚡ If the JD mentions "tech lead" or "team lead" as the TARGET role → Team Lead IS what they want. DO NOT reject.
-   - ⚡ Read the JD's overqualified list LITERALLY. Do NOT expand it beyond what's written.
-2. "Reject junior/students/freelancers" → If current role is Junior, Intern, Student, or Freelance → Score 1-2
-3. "Reject project companies" → If current company is consulting/outsourcing (Matrix, Tikal, Ness, Sela, Malam Team, Bynet, SQLink, etc.) → Score 1-2
-   IMPORTANT: Cloud-focused companies like AllCloud, DoiT, Cloudride are LEGITIMATE DevOps/Cloud employers, NOT consulting firms. Do NOT reject them.
-4. "Reject [specific type]" → Apply literally to CURRENT position
-5. "Reject profiles with more than X years experience" or "max X years" → THE SYSTEM HAS ALREADY CHECKED THIS FOR YOU:
-   - Look for the "✅✅✅ EXPERIENCE LIMIT CHECK" or "🚫🚫🚫 EXPERIENCE LIMIT CHECK" verdict in the pre-calculated section above
-   - If it says ✅ PASSES → DO NOT reject for experience. The candidate is WITHIN the limit. Period.
-   - If it says 🚫 EXCEEDS → HARD REJECT (score 1-2). The candidate exceeds the limit.
-   - DO NOT recalculate experience yourself. DO NOT override the pre-calculated verdict. The numbers are computed by code and are CORRECT.
-   - If no verdict is shown, check the "📅 TOTAL CAREER EXPERIENCE" number and compare DIRECTLY against the JD's limit.
-6. "Reject job hoppers" → Check for pattern of short tenures:
-   - Multiple positions with <1 year tenure = job hopper pattern
-   - 3+ jobs in 3 years without promotions = job hopper
-   - Exclude: internships, military service, acquisitions/mergers
+Today's date: {today}
 
-### MUST-HAVE RULES — TIERED SCORING:
-A must-have requirement ("must have X", "X is a must") is critical but does NOT automatically mean score ≤3.
-Apply this tiered logic based on HOW CLOSE the candidate is to meeting the requirement:
+Return ONLY valid JSON in this format:
+{json_format}"""
+    else:
+        system_prompt = SCREENING_PROMPT.format(today=today, json_format=json_format)
 
-**Score 7-10 (Good/Strong Fit)**: Candidate CLEARLY meets ALL must-have requirements with VERIFIED DURATIONS. No ambiguity.
-  - For "X years fullstack": Count ALL engineering roles where candidate did both FE+BE work (see FULLSTACK rules below). Title does NOT need to say "Full Stack".
-
-**Score 5-6 (Partial Fit — worth review)**: Candidate is CLOSE to meeting must-have (≥75% of required) AND has strong signals:
-  - Example: Requirement is "2 years lead" and candidate has 18+ months → CLOSE, eligible for 5-6 with signal
-  - Example: Requirement is "4 years fullstack" and candidate has 3+ years as "Software Engineer" at startups with React + Node skills → CLOSE, eligible for 5-6
-  - Strong signals: Top company (Wiz, Monday, Rapyd, Fireblocks, PayPal, Google, JFrog, Microsoft, Palo Alto, etc.), Elite army (8200, Mamram), Top university
-
-**Score 4-5 (Weak Fit)**: Candidate is HALFWAY to meeting must-have (50-75% of required) with strong signals:
-  - Example: Requirement is "2 years lead" and candidate has 12-18 months → 4-5 max even with PayPal background
-
-**Score 3-4 (Not a Fit)**: Candidate is FAR from meeting must-have (<50% of required) OR has no strong signals:
-  - Example: Requirement is "2 years lead" and candidate has only 8 months (33%) → Score 3-4, even with good company
-  - Signals cannot compensate for being FAR from the requirement
-
-**Score 1-2 (Not a Fit — hard reject)**: Candidate matches a REJECTION criterion (overqualified, junior, consulting company, etc.)
-
-### TOTAL EXPERIENCE — USE PRE-CALCULATED VALUES ONLY:
-⚠️⚠️⚠️ TOTAL CAREER EXPERIENCE has been pre-calculated by code above (📅 section).
-DO NOT recalculate total years yourself. The pre-calculated number is CORRECT.
-If an EXPERIENCE LIMIT CHECK verdict (✅ or 🚫) is shown above, FOLLOW IT — do not override.
-
-### ROLE-SPECIFIC EXPERIENCE CALCULATION:
-For role-specific requirements (lead, fullstack, devops, etc.), use the pre-calculated sections above.
-If you need to verify, you may check the raw JSON positions, but for TOTAL EXPERIENCE always trust the pre-calculated value.
-
-**For "X years LEAD/TEAM LEAD experience" requirements:**
-- USE the pre-calculated LEAD/MANAGEMENT EXPERIENCE section above
-- If verifying: Find roles where `employee_title` contains Lead, Leader, Manager, Head, Director, TL
-- EXCLUDE: Consulting firms (Tikal, Matrix, Ness), non-tech lead roles, IC roles
-
-**For "X years [ROLE TYPE] experience" (DevOps, Backend, Frontend, Fullstack, QA, etc.):**
-- USE the pre-calculated DEVOPS/FULLSTACK EXPERIENCE sections above
-- Cloud-focused consulting (AllCloud, DoiT, Cloudride, Opsfleet) = legitimate DevOps employers, NOT consulting
-
-**FULLSTACK roles — CRITICAL (most engineers don't have "Full Stack" in title):**
-- DEFINITELY fullstack: titles containing "Full Stack", "Fullstack", "Full-Stack"
-- VERY LIKELY fullstack: "Software Engineer" / "Developer" at startup/product company IF candidate has BOTH frontend skills (React, Vue, Angular) AND backend skills (Node.js, Python, Go, Java, SQL)
-- At Israeli startups, "Software Engineer" = fullstack by default
-- USE the pre-calculated FULLSTACK EXPERIENCE section — it already analyzed titles + skills
-
-**Apply percentage-based scoring:**
-- 100%+ of requirement → Score 7-10 (meets requirement)
-- 75-99% of requirement → Score 5-6 (close, with signal)
-- 50-74% of requirement → Score 4-5 (halfway)
-- <50% of requirement → Score 3-4 (far, signals cannot compensate)
-
-**ALWAYS SHOW YOUR MATH in reasoning:**
-"LEAD: [Company1: Xm] + [Company2: Ym] = Zm total (Z/24 = X%)"
-
-### MISSING DATA HANDLING:
-- If work history (past_employers) is EMPTY but CURRENT TITLE shows "Team Lead" or "Tech Lead" → Give benefit of doubt for leadership
-- If work history is MISSING, you CANNOT definitively say candidate lacks experience - mark as "Partial Fit" (5-6), not "Not a Fit"
-- Only score 1-2 if there's POSITIVE EVIDENCE of rejection criteria (e.g., title says "Junior", company is consulting firm)
-
-### INDUSTRY EXPERIENCE ANALYSIS:
-When the job description mentions ANY industry requirement (fintech, healthcare, cybersecurity, automotive, gaming, retail, logistics, insurance, media, telecom, energy, manufacturing, defense, or ANY other industry):
-
-**ALWAYS read `employer_linkedin_description` for EACH company (current AND past):**
-- Each employer object contains `employer_linkedin_description` with detailed info about what the company does
-- This field describes the company's products, services, customers, and market
-
-**FULL SEMANTIC ANALYSIS - NOT JUST KEYWORD MATCHING:**
-1. READ and UNDERSTAND what each company actually does from the description
-2. ANALYZE if the company operates in, serves, or is related to the required industry
-3. Use your knowledge to make smart connections:
-   - Company builds payment systems → Fintech (even if "fintech" not mentioned)
-   - Company sells to hospitals → Healthcare industry experience
-   - Company makes security software → Cybersecurity
-   - Company in food delivery → Restaurant/Logistics industry
-4. Consider the FULL business context, not just exact keyword matches
-
-**Credit ANY relevant experience:**
-- Current OR past employer in the industry = HAS industry experience
-- Even 1 year counts as industry exposure
-- B2B companies serving the industry = indirect but valid experience
-
-**In your reasoning, state:**
-"INDUSTRY: [Company] does [what they actually do] → [RELEVANT/NOT RELEVANT] to [required industry]"
-
-**Scoring for industry requirements:**
-- Has industry experience (direct or B2B) → Meets requirement
-- Related but not exact industry → Partial credit, mention in summary
-- No industry connection found → Note as gap, apply must-have scoring rules
-
-### CRITICAL:
-- A candidate missing a MUST-HAVE can NEVER be "Strong Fit" or "Good Fit" (max 6)
-- A candidate matching a REJECTION criterion is ALWAYS "Not a Fit" (Score 1-2)
-- The difference between 5-6 and 3-4 for candidates missing must-haves is COMPANY STRENGTH and SIGNALS
-
-ISRAELI MILITARY SERVICE:
-Past IDF/army service is MANDATORY in Israel and is a POSITIVE indicator.
-Do NOT mention it as a concern - it's a strength. Only reject if CURRENTLY serving.
-"""
-
-    user_prompt = f"""Evaluate this candidate against the screening requirements below.
-
-## ⛔ CRITICAL: CURRENT vs PAST EMPLOYERS - READ CAREFULLY ⛔
-
-The JSON has TWO SEPARATE arrays - you MUST distinguish them:
-
-1. **`current_employers[]`** = WHERE THEY WORK NOW (end_date is null)
-   - This is their CURRENT job
-   - Use this for "reject overqualified" checks
-   - Use this for CURRENT company evaluation
-
-2. **`past_employers[]`** = WHERE THEY WORKED BEFORE (end_date has a value)
-   - These are PREVIOUS jobs, NOT current
-   - Do NOT say "currently works at X" if X is in past_employers
-   - Past consulting experience does NOT disqualify if current job is different
-
-**COMMON MISTAKES TO AVOID:**
-- ❌ "Candidate currently works at Tikal" when Tikal is in past_employers
-- ❌ "Overqualified because they are VP at X" when VP role is in past_employers
-- ❌ Confusing current_employers with past_employers
-
-**BEFORE SCORING, STATE:** "Current employer: [name from current_employers[0]]"
-
-## Screening Requirements:
+    user_prompt = f"""## Job Description:
 {job_description}
-{rejection_warning}
-IMPORTANT RULES:
-- "Must have" requirements are critical filters. Use TIERED scoring with SIGNAL CHECK:
-  * Meets all must-haves WITH VERIFIED DURATIONS → eligible for 7-10
-  * Fails a must-have BUT has a NAMED strong signal (top company like Wiz/Rapyd/Fireblocks/PayPal, elite army 8200/Mamram, top university Technion/TAU) → 5-6. You MUST name the signal.
-  * Fails a must-have AND has NO named strong signal → 3-4. The job title alone is NOT a signal.
-  * Matches a rejection criterion → 1-2
-
-⚠️ CRITICAL - VERIFY ROLE-SPECIFIC EXPERIENCE (SHOW YOUR MATH):
-⚠️ TOTAL CAREER EXPERIENCE is pre-calculated above (📅 section). DO NOT recalculate it. Trust the pre-calculated number.
-⚠️ If an EXPERIENCE LIMIT CHECK (✅/🚫) verdict is shown, FOLLOW IT without override.
-Below is how to verify LEAD and role-specific experience only:
-
-**STEP 1: List each LEAD role with exact dates and duration:**
-- Find roles where employee_title contains: Lead, Leader, Manager, Head, Director, TL
-- For EACH lead role, calculate: (end_year - start_year) × 12 + (end_month - start_month)
-- Example: "DevOps Team Lead @ AT&T: 2011-03 to 2012-11 = 20 months"
-- Example: "DevOps Team Lead @ Intel: 2012-11 to 2015-01 = 26 months"
-
-**STEP 2: EXCLUDE these from lead calculation:**
-- Consulting companies (Tikal, Matrix, Ness, outsourcing firms)
-- Non-tech lead roles (Branch Manager, Project Manager at non-tech company, Sales Manager)
-- Roles where "Lead" is not about managing people (Lead Developer = IC, not manager)
-
-**STEP 3: SUM only qualifying lead roles:**
-- Add up months from Step 1, excluding Step 2
-- Example: "AT&T (20m) + Intel (26m) = 46 months total lead"
-
-**STEP 4: Add CURRENT role if it's a lead (MOST IMPORTANT!):**
-- Look in `current_employers[]` array ONLY (NOT past_employers!)
-- Current roles have `end_date: null` meaning STILL EMPLOYED
-- Calculate duration: from start_date to TODAY (February 2026)
-- Formula: (2026 - start_year) × 12 + (2 - start_month)
-
-**EXAMPLE CALCULATION FOR CURRENT ROLE:**
-```
-current_employers[0]: "DevOps Tech Lead @ H2O.ai, start_date: 2022-07-01"
-Duration = (2026-2022) × 12 + (2-7) = 48 - 5 = 43 months
-```
-This candidate has 43 MONTHS (3.6 years) of lead experience from current role ALONE!
-
-⚠️ DO NOT say "lacks 2 years lead" if current_employers shows a lead role starting before 2024-02!
-
-**STEP 5: Apply percentage scoring:**
-- Total months ÷ required months = percentage
-- 100%+ → 7-10 (meets requirement)
-- 75-99% → 5-6 (close, needs signal)
-- 50-74% → 4-5 (halfway)
-- <50% → 3-4 (far, signals cannot compensate)
-
-**IN YOUR REASONING, YOU MUST:**
-1. First state: "CURRENT EMPLOYER: [company from current_employers[0]]"
-2. Then show the math:
-"LEAD CALCULATION: [CURRENT: Role @ Company: Xm (start_date to Feb 2026)] + [Past: Role @ Company: Ym] = TOTAL Zm months (Z÷24 = X%)"
-
-Example:
-"CURRENT EMPLOYER: H2O.ai
-LEAD: [CURRENT: DevOps Tech Lead @ H2O.ai: 43m (2022-07 to 2026-02)] + [Past: none] = 43m total (43÷24 = 179%) ✓ MEETS 2yr requirement"
-
-⚠️ FULLSTACK EXPERIENCE CALCULATION (when JD requires "X years fullstack"):
-
-**CRITICAL: Most fullstack engineers do NOT have "Full Stack" in their title!**
-Count these roles as fullstack experience:
-1. Any title with "Full Stack" / "Fullstack" / "Full-Stack" → definitely counts
-2. "Software Engineer" / "Senior Software Engineer" / "Developer" / "Senior Developer" at a startup/product company → counts IF candidate has BOTH frontend skills (React, Vue, Angular, TypeScript) AND backend skills (Node.js, Python, Go, Java, SQL, APIs)
-3. At Israeli startups, "Software Engineer" = fullstack by default (startups don't split FE/BE)
-
-**USE the pre-calculated FULLSTACK EXPERIENCE section above** — it already analyzed all roles.
-If pre-calculated total meets the requirement → candidate meets the fullstack must-have.
-If pre-calculated total is close (≥75%) and candidate has strong signals → score 5-6.
-
-**SHOW YOUR MATH:**
-"FULLSTACK: [CURRENT: Software Engineer @ Monday.com: 36m] + [PAST: Developer @ Startup: 24m] = 60m total (60÷48 = 125%) ✓ MEETS 4yr requirement"
-
-⚠️ DEVOPS/PLATFORM EXPERIENCE CALCULATION (when JD requires "X years DevOps/SRE/Platform"):
-
-**Titles that COUNT as DevOps experience:**
-1. DevOps Engineer, Senior DevOps Engineer — obviously counts
-2. SRE / Site Reliability Engineer — this IS DevOps experience
-3. Platform Engineer, Infrastructure Engineer — this IS DevOps experience
-4. Cloud Engineer, Cloud Architect — this IS DevOps experience
-5. Release Engineer, Build Engineer (if CI/CD focused)
-
-**Titles that DO NOT count:**
-- SysAdmin, System Administrator (unless modernized with cloud/K8s)
-- IT Support, Helpdesk, Desktop Support — NEVER DevOps
-- DBA, Storage Admin, Network Admin — different specialization
-- QA, Software Engineer — unless doing infra work
-
-**Cloud-focused consulting companies (AllCloud, DoiT, Cloudride, Opsfleet, Terasky) are LEGITIMATE DevOps employers — do NOT exclude them as consulting.**
-
-**USE the pre-calculated DEVOPS EXPERIENCE section above** — it already analyzed all roles.
-
-**SHOW YOUR MATH:**
-"DEVOPS: [CURRENT: SRE @ Wiz: 30m] + [PAST: DevOps Engineer @ Startup: 24m] = 54m total (54÷36 = 150%) ✓ MEETS 3yr requirement"
 
 ## Candidate Profile:
-{profile_summary}
+```json
+{json.dumps(raw, indent=2, default=str)}
+```
 
-Respond with ONLY valid JSON in this exact format:
-{json_schema}"""
+Evaluate this candidate against the job requirements and return JSON."""
 
     try:
-        # Use provided prompt or fall back to default
-        prompt_to_use = system_prompt if system_prompt else get_screening_prompt()
+        response = client.chat.completions.create(
+            model=ai_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.3,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"}
+        )
 
-        # Always append company description analysis and enforcement rules
-        _company_desc_reminder = (
-            "\n\n## Company Description & Industry Analysis (CRITICAL)\n"
-            "The profile JSON includes `employer_linkedin_description` for EACH employer (current AND past). "
-            "You MUST read and analyze these descriptions thoroughly.\n\n"
-            "**WHEN THE JOB MENTIONS ANY INDUSTRY REQUIREMENT:**\n"
-            "Whether it's fintech, healthcare, cybersecurity, automotive, gaming, retail, logistics, "
-            "real estate, insurance, media, telecom, energy, manufacturing, or ANY other industry:\n\n"
-            "**FULL ANALYSIS REQUIRED:**\n"
-            "1. READ the complete `employer_linkedin_description` for EVERY employer (current + past)\n"
-            "2. UNDERSTAND what each company actually does - their products, services, market, customers\n"
-            "3. DETERMINE if the company operates in or serves the required industry\n"
-            "4. Consider INDIRECT matches: a DevOps engineer at a payments company HAS fintech experience\n"
-            "5. Consider B2B relationships: company selling to healthcare = healthcare industry experience\n\n"
-            "**SMART ANALYSIS - NOT JUST KEYWORDS:**\n"
-            "- 'Yum! Brands' description mentions KFC, Pizza Hut → Food/Restaurant industry\n"
-            "- 'H2O.ai' description mentions ML platform → AI/ML industry\n"
-            "- A company processing credit card payments → Fintech even if word 'fintech' not used\n"
-            "- A company making hospital software → Healthcare even without word 'healthcare'\n\n"
-            "**CREDIT ANY RELEVANT EXPERIENCE:**\n"
-            "Industry experience from ANY employer counts (current OR past). "
-            "Even 1 year at a relevant company = has industry experience.\n\n"
-            "**IN YOUR REASONING:**\n"
-            "'INDUSTRY: [Company] does [what they do] → [RELEVANT/NOT RELEVANT] to [required industry]'\n\n"
-            "Do NOT rely on company names — a company called 'TechCorp' could be in ANY industry. "
-            "READ and UNDERSTAND the descriptions."
-        )
-        _rejection_enforcement = (
-            "\n\n## Rejection Criteria\n"
-            "If the job requirements specify rejection criteria (reject, exclude, no, must not), "
-            "check if THIS SPECIFIC candidate matches. Only reject if they actually match. "
-            "Candidates who don't match rejection criteria should be evaluated normally."
-        )
-        _no_hallucination = (
-            "\n\n## CRITICAL: Use ONLY data provided - NO HALLUCINATION\n"
-            "STRICT RULES:\n"
-            "1. ONLY mention companies that EXPLICITLY appear in current_employers or past_employers\n"
-            "2. ONLY mention job titles that EXPLICITLY appear in employee_title fields\n"
-            "3. Use the pre-calculated 📅 TOTAL CAREER EXPERIENCE value - do NOT calculate your own total years. If ✅/🚫 EXPERIENCE LIMIT CHECK is shown, FOLLOW that verdict.\n"
-            "4. If a role (like 'Team Leader') is NOT listed, do NOT claim they have it\n"
-            "5. Company descriptions/about text do NOT indicate employment - only current_employers and past_employers lists count\n"
-            "6. Do NOT confuse company descriptions (e.g., 'Unity acquired ironSource') with the candidate's work history\n"
-            "7. If data is missing, infer from available signals (title, companies, skills) - do NOT refuse to assess\n"
-            "VIOLATION = WRONG ASSESSMENT. Triple-check your claims against the actual JSON data."
-        )
-        if 'Company Description Analysis' not in prompt_to_use:
-            prompt_to_use += _company_desc_reminder
-        if 'Rejection Criteria' not in prompt_to_use:
-            prompt_to_use += _rejection_enforcement
-        # Always add anti-hallucination warning
-        prompt_to_use += _no_hallucination
-
-        # Always append assessment rules
-        _assessment_rules = (
-            "\n\n## Assessment Rules (MANDATORY)\n"
-            "1. NEVER say 'work history not specified', 'duration unclear', or 'insufficient data'. "
-            "The profile includes a pre-calculated work history with dates and durations. USE IT.\n"
-            "2. When dates are truly missing, infer experience from: number of positions, title progression, "
-            "company types, and skill depth. State your inference, don't punt.\n"
-            "3. TIERED must-have scoring:\n"
-            "   - Meets all must-haves → 7-10\n"
-            "   - Fails a must-have BUT passes SIGNAL CHECK (see below) → 5-6 (manual review)\n"
-            "   - Fails a must-have AND fails SIGNAL CHECK → 3-4 (no exceptions)\n"
-            "   - Matches rejection criterion → 1-2\n"
-            "\n"
-            "4. SIGNAL CHECK — to score 5-6 when failing a must-have, candidate MUST have AT LEAST ONE of:\n"
-            "   a) Worked at a RECOGNIZED top company: Wiz, Monday, Snyk, Wix, AppsFlyer, Fiverr, CyberArk, SentinelOne,\n"
-            "      Check Point, Palo Alto, Armis, Rapyd, Fireblocks, BigID, Cyera, Google, Meta, Amazon, Microsoft,\n"
-            "      PayPal, Cloudflare, Datadog, or similar well-known tech companies\n"
-            "   b) Elite military unit: 8200, Mamram, Talpiot\n"
-            "   c) Top university: Technion, Tel Aviv University, Hebrew University, Ben-Gurion, Weizmann,\n"
-            "      MIT, Stanford, CMU, Berkeley\n"
-            "   d) Clear rapid career progression (e.g. Junior → Senior → Lead in under 5 years)\n"
-            "   If NONE of the above → score MUST be 3-4 when failing a must-have. The job title alone\n"
-            "   (e.g. 'DevOps Tech Lead') is NOT a strong signal — that is what was searched for.\n"
-            "   You MUST name the specific signal in your 'why' field to justify a 5-6 score.\n"
-            "5. DIFFERENTIATE scores. Two candidates should NOT get the same score unless they are truly equivalent. "
-            "Company reputation, title seniority, tenure, and skill depth should all create score differences.\n"
-            "6. Be SPECIFIC in summary/why — mention actual company names, years, titles. "
-            "Generic statements like 'strong background' without evidence are not acceptable.\n"
-            "7. LinkedIn profiles are NOT CVs. Sparse profiles from strong companies are still strong candidates. "
-            "Score based on available signals, not profile completeness.\n"
-            "\n## Title Level Understanding (ALWAYS APPLY)\n"
-            "These titles are the SAME seniority level — treat them equivalently:\n"
-            "- Team Lead, Tech Lead, Team Leader, Team Manager, TL, Engineering Lead\n"
-            "These are NOT overqualified — they are hands-on leadership roles.\n"
-            "OVERQUALIFIED means: VP, Director, CTO, Chief, Head of, Senior Manager, Group Manager, C-level.\n"
-            "\n## Company Classifications (ALWAYS APPLY)\n"
-            "LEGITIMATE tech employers (do NOT penalize as consulting):\n"
-            "- Cloud/DevOps companies: AllCloud, DoiT, Cloudride, Opsfleet, develeap (for DevOps roles only if in a client-facing TL role)\n"
-            "- These companies employ DevOps engineers in real production environments.\n"
-            "CONSULTING/OUTSOURCING (penalize): Tikal, Matrix, Ness, Sela, Malam Team, Bynet, SQLink, Accenture, Infosys, Wipro, TCS.\n"
-        )
-        if 'Assessment Rules' not in prompt_to_use:
-            prompt_to_use += _assessment_rules
-
-        # Retry with exponential backoff on rate limit (429) errors
-        response = None
-        last_err = None
-        for _attempt in range(4):  # 1 initial + 3 retries
-            try:
-                response = client.chat.completions.create(
-                    model=ai_model,
-                    messages=[
-                        {"role": "system", "content": prompt_to_use},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=0.3,
-                    max_tokens=max_tokens,
-                    response_format={"type": "json_object"}
-                )
-                break  # Success
-            except Exception as api_err:
-                err_str = str(api_err).lower()
-                if '429' in err_str or 'rate' in err_str:
-                    last_err = api_err
-                    time.sleep(2 ** _attempt)  # 1s, 2s, 4s
-                    continue
-                raise  # Non-rate-limit error, don't retry
-        if response is None:
-            raise last_err or Exception("OpenAI rate limit exceeded after retries")
         elapsed_ms = int((time.time() - start_time) * 1000)
 
-        # Log usage with token counts
+        # Log usage
         if tracker and hasattr(response, 'usage') and response.usage:
             tracker.log_openai(
                 tokens_input=response.usage.prompt_tokens,
@@ -4016,12 +3130,12 @@ Respond with ONLY valid JSON in this exact format:
 
         result = json.loads(response.choices[0].message.content)
         return result
+
     except json.JSONDecodeError as e:
         return {
             "score": 0,
             "fit": "Error",
             "summary": f"JSON parse error: {str(e)[:80]}",
-            "why": str(e)[:100],
             "strengths": [],
             "concerns": []
         }
@@ -4029,13 +3143,9 @@ Respond with ONLY valid JSON in this exact format:
         elapsed_ms = int((time.time() - start_time) * 1000)
         if tracker:
             tracker.log_openai(
-                tokens_input=0,
-                tokens_output=0,
-                model=ai_model,
-                profiles_screened=0,
-                status='error',
-                error_message=str(e)[:200],
-                response_time_ms=elapsed_ms
+                tokens_input=0, tokens_output=0, model=ai_model,
+                profiles_screened=0, status='error',
+                error_message=str(e)[:200], response_time_ms=elapsed_ms
             )
         return {
             "score": 0,
@@ -4044,7 +3154,6 @@ Respond with ONLY valid JSON in this exact format:
             "strengths": [],
             "concerns": []
         }
-
 
 def _ensure_raw_dict(raw):
     """Parse raw_data if it's a JSON string, return dict or empty dict."""
@@ -4153,7 +3262,7 @@ def fetch_raw_data_for_batch(profiles: list, raw_index: dict = None, db_client =
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
                           max_workers: int = 15,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
-                          system_prompt: str = None, ai_model: str = "gpt-4o-mini") -> list:
+                          ai_model: str = "gpt-4o-mini", role_prompt: str = None) -> list:
     """Screen multiple profiles in parallel using ThreadPoolExecutor.
 
     Args:
@@ -4163,7 +3272,9 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         max_workers: Number of concurrent threads (default 15, scales with concurrent users)
         progress_callback: Function(completed, total, result) called after each profile
         cancel_flag: Dict with 'cancelled' key to check for cancellation
-        system_prompt: Custom system prompt for screening
+        mode: "quick" for cheaper/faster or "detailed" for full analysis
+        ai_model: OpenAI model to use
+        role_prompt: Optional role-specific system prompt (like Custom GPT instructions)
 
     Returns:
         List of screening results with profile info included
@@ -4184,7 +3295,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         # Create client per thread to avoid thread-safety issues
         client = OpenAI(api_key=openai_api_key)
         try:
-            result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, system_prompt=system_prompt, ai_model=ai_model)
+            result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, role_prompt=role_prompt)
             # Add profile info to result
             name = profile.get('name', '') or f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
             if not name:
@@ -6752,215 +5863,38 @@ with tab_screening:
             placeholder="Paste the job description, must-haves, and any specific criteria for AI screening..."
         )
 
-        # Role Detection and Prompt Selection
-        st.markdown("### Screening Prompt")
+        # Role-specific prompt selection (like having different Custom GPTs)
+        st.markdown("### Role Prompt")
 
-        # Auto-detect role from JD
-        detected_prompt, detected_role, detected_name = get_screening_prompt_for_role(job_description=job_description)
-
-        # Build role options
-        role_options = ['Auto-detect']
-        role_options.extend([f"{v['name']}" for k, v in DEFAULT_PROMPTS.items()])
-
-        # Load custom prompts from DB
-        db_prompts = []
-        if HAS_DATABASE:
-            db_client = _get_db_client()
-            if db_client:
-                db_prompts = get_screening_prompts(db_client)
-                for p in db_prompts:
-                    name = p.get('name', p['role_type'].title())
-                    if name not in role_options:
-                        role_options.append(name)
-
-        col_role, col_detected = st.columns([2, 3])
-        with col_role:
-            selected_role = st.selectbox(
-                "Prompt type",
-                options=role_options,
-                index=0,
-                key="screening_role_select",
-                help="Auto-detect picks the best prompt based on screening requirements keywords"
-            )
-
-        with col_detected:
-            if selected_role == 'Auto-detect':
-                if job_description:
-                    st.success(f"Detected: **{detected_name}**")
-                else:
-                    st.info("Paste screening requirements to auto-detect role")
-
-        # Get the actual prompt to use
-        if selected_role == 'Auto-detect':
-            active_prompt = detected_prompt
-            active_role = detected_role
-            active_name = detected_name
-        else:
-            # Find the selected prompt
-            active_prompt = None
-            active_role = None
-            active_name = selected_role
-
-            # Check defaults first
+        # Build role options from prompts.py
+        role_options = ['General (auto)']
+        role_map = {'General (auto)': None}  # Maps display name to prompt
+        try:
             for role_key, role_data in DEFAULT_PROMPTS.items():
-                if role_data['name'] == selected_role:
-                    active_prompt = role_data['prompt']
-                    active_role = role_key
-                    break
+                name = role_data.get('name', role_key.title())
+                role_options.append(name)
+                role_map[name] = role_data.get('prompt')
+        except:
+            pass  # If prompts not available, just use General
 
-            # Check DB prompts
-            if not active_prompt:
-                for p in db_prompts:
-                    if p.get('name', p['role_type'].title()) == selected_role:
-                        active_prompt = p['prompt_text']
-                        active_role = p['role_type']
-                        break
-
-            if not active_prompt:
-                active_prompt = DEFAULT_SCREENING_PROMPT
-                active_role = 'general'
-
-        # Store active prompt in session state for screening
-        st.session_state['active_screening_prompt'] = active_prompt
-        st.session_state['active_screening_role'] = active_role
-
-        # Admin section for managing prompts
-        ADMIN_NAMES = {'alexey', 'dana', 'admin'}
-        current_user = st.session_state.get('username', '').lower()
-        is_admin = (
-            not authenticator  # no auth = local dev, always show
-            or current_user in ADMIN_NAMES
-            or any(name in current_user for name in ADMIN_NAMES)
+        selected_role = st.selectbox(
+            "Select role type",
+            options=role_options,
+            index=0,
+            key="screening_role_select",
+            help="Like having different Custom GPTs for each role. Saves time - no need to paste full instructions in JD."
         )
 
-        if is_admin:
-            with st.expander("Manage Prompts (admin)"):
-                prompt_tabs = st.tabs(["View/Edit Current", "Add New", "Manage All"])
+        # Get the role prompt
+        role_prompt = role_map.get(selected_role)
+        st.session_state['active_role_prompt'] = role_prompt
+        st.session_state['active_role_name'] = selected_role
 
-                with prompt_tabs[0]:
-                    st.markdown(f"**Currently selected:** {active_name}")
-                    edited_prompt = st.text_area(
-                        "Edit prompt",
-                        value=active_prompt,
-                        height=250,
-                        key=f"edit_current_prompt_{active_role}"
-                    )
-                    if st.button("Save Changes", key="save_current_prompt"):
-                        if HAS_DATABASE and active_role:
-                            db_client = _get_db_client()
-                            # Get keywords for this role
-                            keywords = DEFAULT_PROMPTS.get(active_role, {}).get('keywords', [])
-                            if save_screening_prompt(db_client, active_role, edited_prompt, keywords):
-                                st.success(f"Saved prompt for {active_name}")
-                                st.rerun()
-                            else:
-                                st.error("Failed to save")
-                        else:
-                            st.error("Database not connected")
-
-                with prompt_tabs[1]:
-                    st.markdown("**Create new prompt:**")
-                    new_role_type = st.text_input("Role type (e.g., 'devops', 'qa')", key="new_role_type")
-                    new_role_name = st.text_input("Display name (e.g., 'DevOps Engineer')", key="new_role_name")
-                    new_keywords = st.text_input("Keywords (comma-separated)", key="new_keywords",
-                                                 placeholder="e.g., devops, kubernetes, ci/cd, docker")
-                    new_prompt = st.text_area("Prompt text", height=200, key="new_prompt_text",
-                                              placeholder="Paste or write your screening prompt here...")
-                    new_is_default = st.checkbox("Set as default prompt", key="new_is_default")
-
-                    if st.button("Add Prompt", key="add_new_prompt"):
-                        if new_role_type and new_prompt:
-                            if HAS_DATABASE:
-                                db_client = _get_db_client()
-                                keywords_list = [k.strip().lower() for k in new_keywords.split(',') if k.strip()]
-                                # Save with name in prompt_text metadata (we'll store name separately)
-                                data = {
-                                    'role_type': new_role_type.lower().strip(),
-                                    'prompt_text': new_prompt,
-                                    'keywords': keywords_list,
-                                    'is_default': new_is_default,
-                                    'name': new_role_name or new_role_type.title(),
-                                    'updated_at': datetime.utcnow().isoformat(),
-                                }
-                                try:
-                                    db_client.upsert('screening_prompts', data, on_conflict='role_type')
-                                    st.success(f"Added prompt: {new_role_name or new_role_type}")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"Failed to add: {e}")
-                            else:
-                                st.error("Database not connected")
-                        else:
-                            st.warning("Role type and prompt text are required")
-
-                with prompt_tabs[2]:
-                    st.markdown("**All prompts:**")
-
-                    # Build merged list: DB overrides take priority, then built-in defaults
-                    db_by_role = {p['role_type']: p for p in db_prompts}
-                    all_prompts = []
-                    for role_key, role_data in DEFAULT_PROMPTS.items():
-                        if role_key in db_by_role:
-                            db_p = db_by_role[role_key]
-                            all_prompts.append({
-                                'role_type': role_key,
-                                'name': db_p.get('name', role_data['name']),
-                                'keywords': db_p.get('keywords', role_data['keywords']),
-                                'prompt_text': db_p.get('prompt_text', ''),
-                                'is_default': db_p.get('is_default', False),
-                                'source': 'db',
-                            })
-                        else:
-                            all_prompts.append({
-                                'role_type': role_key,
-                                'name': role_data['name'],
-                                'keywords': role_data['keywords'],
-                                'prompt_text': role_data['prompt'],
-                                'is_default': False,
-                                'source': 'built-in',
-                            })
-                    # Add any DB-only prompts (custom roles not in DEFAULT_PROMPTS)
-                    for role_key, db_p in db_by_role.items():
-                        if role_key not in DEFAULT_PROMPTS:
-                            all_prompts.append({
-                                'role_type': role_key,
-                                'name': db_p.get('name', role_key.title()),
-                                'keywords': db_p.get('keywords', []),
-                                'prompt_text': db_p.get('prompt_text', ''),
-                                'is_default': db_p.get('is_default', False),
-                                'source': 'db',
-                            })
-
-                    for p in all_prompts:
-                        col1, col2, col3 = st.columns([3, 1, 1])
-                        with col1:
-                            source_badge = " *(customized)*" if p['source'] == 'db' else ""
-                            default_badge = " (default)" if p.get('is_default') else ""
-                            st.write(f"**{p['name']}**{default_badge}{source_badge}")
-                            st.caption(f"Keywords: {', '.join(p.get('keywords', []))}")
-                            first_line = (p.get('prompt_text') or '').strip().split('\n')[0][:80]
-                            st.caption(f"Prompt: {first_line}...")
-                        with col2:
-                            if p['source'] == 'db':
-                                if st.button("Set Default", key=f"default_{p['role_type']}"):
-                                    if HAS_DATABASE:
-                                        db_client = _get_db_client()
-                                        for other in db_prompts:
-                                            if other.get('is_default'):
-                                                save_screening_prompt(db_client, other['role_type'],
-                                                                     other['prompt_text'], other.get('keywords', []), False)
-                                        save_screening_prompt(db_client, p['role_type'],
-                                                             p['prompt_text'], p.get('keywords', []), True)
-                                        st.rerun()
-                        with col3:
-                            if p['source'] == 'db':
-                                if st.button("Delete", key=f"del_{p['role_type']}"):
-                                    if HAS_DATABASE:
-                                        db_client = _get_db_client()
-                                        if delete_screening_prompt(db_client, p['role_type']):
-                                            st.rerun()
-                    st.divider()
-                    st.caption(f"{len(all_prompts)} prompts total ({len(db_by_role)} customized in DB, {len(all_prompts) - len(db_by_role)} built-in)")
+        if role_prompt:
+            with st.expander(f"View {selected_role} prompt ({len(role_prompt)} chars)"):
+                st.code(role_prompt, language=None)
+        else:
+            st.caption("General mode: AI uses your JD as the full instructions")
 
         # Screening Configuration
         st.markdown("### Screening Configuration")
@@ -6977,19 +5911,19 @@ with tab_screening:
             )
         with col_mode:
             screening_mode = st.radio(
-                "Screening mode",
+                "Output detail",
                 options=["Quick (cheaper)", "Detailed"],
-                index=0,
+                index=1,  # Default to Detailed
                 key="screening_mode",
                 help="Quick: score + fit + short summary | Detailed: adds reasoning, strengths, concerns"
             )
         with col_model:
             ai_model_choice = st.radio(
                 "AI Model",
-                options=["gpt-4o-mini (fast & cheap)", "gpt-4o (smart & precise)"],
+                options=["gpt-4o-mini (fast)", "gpt-4o (accurate)"],
                 index=0,
                 key="ai_model_choice",
-                help="gpt-4o-mini: $0.15/$0.60 per 1M tokens | gpt-4o: $2.50/$10.00 per 1M tokens"
+                help="gpt-4o-mini: ~$0.001/profile | gpt-4o: ~$0.02/profile"
             )
         ai_model = "gpt-4o-mini" if "mini" in ai_model_choice else "gpt-4o"
 
@@ -7008,8 +5942,8 @@ with tab_screening:
             st.caption("Detailed mode: Returns full analysis with reasoning, strengths, and concerns")
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
-        est_time = (screen_count / 10) * 2  # ~2 seconds per batch of 10
-        st.info(f"Model: **{ai_model}** | Estimated cost: **${est_cost:.3f}** | Time: ~{est_time:.0f}s")
+        role_display = selected_role if selected_role != 'General (auto)' else 'General'
+        st.info(f"Role: **{role_display}** | Model: **{ai_model}** | Est. cost: **${est_cost:.3f}**")
 
         # Debug: Show available fields and test single profile
         with st.expander("Debug: Profile Fields & Test"):
@@ -7021,9 +5955,9 @@ with tab_screening:
                     try:
                         client = OpenAI(api_key=openai_key)
                         test_mode = 'quick' if screening_mode == "Quick (cheaper)" else 'detailed'
-                        test_prompt = st.session_state.get('active_screening_prompt', active_prompt)
-                        st.write(f"Testing with first profile ({test_mode} mode, model: {ai_model}, prompt: {active_name})...")
-                        result = screen_profile(profiles[0], job_description, client, mode=test_mode, system_prompt=test_prompt, ai_model=ai_model)
+                        role_name = st.session_state.get('active_role_name', 'General')
+                        st.write(f"Testing with first profile ({test_mode} mode, role: {role_name}, model: {ai_model})...")
+                        result = screen_profile(profiles[0], job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt)
                         st.write("Result:", result)
                     except Exception as e:
                         import traceback
@@ -7097,18 +6031,26 @@ with tab_screening:
 
             if existing_results and not screening_in_progress:
                 # Find profiles not yet screened
-                # Always screen fresh for each JD — no skipping "already screened"
-                st.info(f"📊 **{len(existing_results)}** profiles screened in current session | **{len(profiles)}** total profiles loaded")
+                screened_urls = {r.get('linkedin_url') for r in existing_results if r.get('linkedin_url')}
+                unscreened_profiles = [p for p in profiles if p.get('linkedin_url') not in screened_urls]
+
+                st.info(f"📊 **{len(existing_results)}** screened | **{len(unscreened_profiles)}** remaining | **{len(profiles)}** total")
 
                 col1, col2, col3 = st.columns([2, 2, 1])
                 with col1:
-                    start_button = st.button("🔄 Screen All Fresh", type="primary", key="start_screening")
+                    start_button = st.button("🔄 Screen All Fresh", type="secondary", key="start_screening")
                 with col2:
-                    pass  # Reserved for future use
+                    if unscreened_profiles:
+                        continue_count = min(len(unscreened_profiles), screen_count)
+                        continue_button = st.button(f"▶️ Continue ({continue_count} of {len(unscreened_profiles)} left)", type="primary", key="continue_screening")
+                    else:
+                        st.success("✅ All profiles screened!")
                 with col3:
                     if st.button("🗑️ Clear", key="clear_screening_results"):
                         st.session_state['screening_results'] = []
                         st.session_state['screening_batch_state'] = {}
+                        st.session_state['screening_batch_progress'] = {}
+                        save_session_state()  # Persist cleared state to file
                         st.success("Results cleared!")
                         st.rerun()
 
@@ -7175,7 +6117,7 @@ with tab_screening:
                 job_desc = batch_state.get('job_description', '')
                 screen_mode = batch_state.get('mode', 'detailed')
                 batch_ai_model = batch_state.get('ai_model', 'gpt-4o-mini')
-                system_prompt = batch_state.get('system_prompt')
+                batch_role_prompt = batch_state.get('role_prompt')
                 batch_size = 50  # Tier 3: 50 parallel requests, 50 × 15KB = ~750KB memory
                 current_batch = batch_state.get('current_batch', 0)
                 all_results = batch_state.get('results', [])
@@ -7223,8 +6165,8 @@ with tab_screening:
                             openai_key,
                             max_workers=min(max_workers, len(batch_profiles)),
                             mode=screen_mode,
-                            system_prompt=system_prompt,
                             ai_model=batch_ai_model,
+                            role_prompt=batch_role_prompt,
                             progress_callback=_on_profile_screened
                         )
                         all_results.extend(batch_results)
@@ -7307,7 +6249,7 @@ with tab_screening:
                         save_session_state()  # Save for restore
                         st.rerun()
 
-            if start_button or rescreen_selected_button:
+            if start_button or rescreen_selected_button or continue_button:
                 # Validate OpenAI API key before starting (uses free models.list endpoint)
                 try:
                     test_client = OpenAI(api_key=openai_key)
@@ -7344,6 +6286,13 @@ with tab_screening:
                                                 p['raw_crustdata'] = db_profile['raw_data']
                                         except:
                                             pass
+                elif continue_button:
+                    # Continue screening: keep existing results, screen only unscreened profiles (up to screen_count)
+                    existing_results = st.session_state.get('screening_results', [])
+                    screened_urls = {r.get('linkedin_url') for r in existing_results if r.get('linkedin_url')}
+                    initial_results = existing_results  # Keep all existing results
+                    unscreened = [p for p in profiles if p.get('linkedin_url') not in screened_urls]
+                    profiles_to_screen = unscreened[:screen_count]  # Respect the screen_count limit
                 else:
                     # Always screen fresh — each JD gets a fresh evaluation
                     profiles_to_screen = profiles[:screen_count]
@@ -7363,7 +6312,7 @@ with tab_screening:
                     'job_description': job_description,
                     'mode': 'quick' if screening_mode == "Quick (cheaper)" else 'detailed',
                     'ai_model': ai_model,
-                    'system_prompt': st.session_state.get('active_screening_prompt', active_prompt),
+                    'role_prompt': role_prompt,  # Role-specific system prompt (like Custom GPT)
                     'current_batch': 0,
                     'results': initial_results,  # Start with existing results if re-screening selected
                     'is_continue': False  # Always fresh screening
@@ -7373,7 +6322,7 @@ with tab_screening:
                     'total': len(initial_results) + len(profiles_to_screen)
                 }
 
-                action = "Re-screening selected" if rescreen_selected_button else "Starting fresh screening"
+                action = "Re-screening selected" if rescreen_selected_button else ("Continuing screening" if continue_button else "Starting fresh screening")
                 st.info(f"{action}: {len(profiles_to_screen)} profiles in batches...")
                 st.rerun()
         else:
@@ -7434,9 +6383,21 @@ with tab_screening:
                 df_display = pd.DataFrame(sorted_results)
 
                 # Merge with enriched profile data if available
+                # EXCLUDE old screening columns from merge to avoid confusion with fresh screening
                 enriched_df_merge = st.session_state.get('enriched_df')
                 if enriched_df_merge is not None and not enriched_df_merge.empty and 'linkedin_url' in df_display.columns:
-                    merge_cols = [c for c in enriched_df_merge.columns if c not in df_display.columns]
+                    # Columns that should NOT be merged from old data (screening is always fresh per JD)
+                    exclude_from_merge = {
+                        # Session screening columns
+                        'score', 'fit', 'summary', 'why', 'strengths', 'concerns',
+                        # Database screening columns
+                        'screening_score', 'screening_fit_level', 'screening_summary',
+                        'screening_reasoning', 'screened_at', 'status',
+                        # Any other screening-related
+                        'screening_fit', 'screening_status', 'fit_level'
+                    }
+                    merge_cols = [c for c in enriched_df_merge.columns
+                                  if c not in df_display.columns and c not in exclude_from_merge]
                     if merge_cols and 'linkedin_url' in enriched_df_merge.columns:
                         df_display = df_display.merge(
                             enriched_df_merge[['linkedin_url'] + merge_cols],

@@ -528,7 +528,8 @@ def search_profiles_filtered(client: SupabaseClient, filters: dict, limit: int =
         client: SupabaseClient instance
         filters: Dict with optional keys:
             - name: Search in name field
-            - title: Search in current_title
+            - current_title: Search in current_title only
+            - past_titles: Search in all_titles array
             - current_company: Search in current_company only
             - past_companies: Search in all_employers
             - location: Search in location
@@ -557,8 +558,17 @@ def search_profiles_filtered(client: SupabaseClient, filters: dict, limit: int =
     if filters.get('name'):
         and_clauses.append(make_or_clause('name', filters['name']))
 
-    if filters.get('title'):
-        and_clauses.append(make_or_clause('current_title', filters['title']))
+    if filters.get('current_title'):
+        and_clauses.append(make_or_clause('current_title', filters['current_title']))
+
+    if filters.get('past_titles'):
+        # all_titles is an array, cast to text for ilike
+        terms = [t.strip() for t in filters['past_titles'].split(',') if t.strip()]
+        if len(terms) == 1:
+            and_clauses.append(f"all_titles::text.ilike.*{terms[0]}*")
+        else:
+            conditions = ','.join([f"all_titles::text.ilike.*{t}*" for t in terms])
+            and_clauses.append(f"or({conditions})")
 
     if filters.get('current_company'):
         and_clauses.append(make_or_clause('current_company', filters['current_company']))

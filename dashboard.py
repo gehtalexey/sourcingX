@@ -6709,50 +6709,55 @@ with tab_database:
                     placeholder="e.g., node.js kubernetes 8200 (searches ALL fields)"
                 )
 
-                # Row 1: Name, Title, Location
-                fcol1, fcol2, fcol3 = st.columns(3)
+                # Row 1: Name, Location
+                fcol1, fcol2 = st.columns(2)
                 with fcol1:
                     f_name = st.text_input("Name", key="db_f_name", placeholder="john doe")
                 with fcol2:
-                    f_title = st.text_input("Title", key="db_f_title", placeholder="backend, devops")
-                with fcol3:
                     f_location = st.text_input("Location", key="db_f_location", placeholder="israel, nyc")
 
-                # Row 2: Current Company, Past Companies
-                fcol4, fcol5 = st.columns(2)
+                # Row 2: Current Title, Past Titles
+                fcol3, fcol4 = st.columns(2)
+                with fcol3:
+                    f_current_title = st.text_input("Current Title", key="db_f_current_title", placeholder="backend, devops")
                 with fcol4:
-                    f_current_company = st.text_input("Current Company", key="db_f_current_company", placeholder="wiz, monday")
+                    f_past_titles = st.text_input("Past Titles", key="db_f_past_titles", placeholder="engineer, developer")
+
+                # Row 3: Current Company, Past Companies
+                fcol5, fcol6 = st.columns(2)
                 with fcol5:
+                    f_current_company = st.text_input("Current Company", key="db_f_current_company", placeholder="wiz, monday")
+                with fcol6:
                     f_past_companies = st.text_input("Past Companies", key="db_f_past_companies", placeholder="google, meta")
 
-                # Row 3: Skills & Schools
-                fcol6, fcol7 = st.columns(2)
-                with fcol6:
-                    f_skills = st.text_input("Skills (any of)", key="db_f_skills", placeholder="python, kubernetes, react")
+                # Row 4: Skills & Schools
+                fcol7, fcol8 = st.columns(2)
                 with fcol7:
+                    f_skills = st.text_input("Skills (any of)", key="db_f_skills", placeholder="python, kubernetes, react")
+                with fcol8:
                     f_schools = st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
 
-                # Row 4: Date range & Email & Search button
-                fcol8, fcol9, fcol10, fcol11 = st.columns([1, 1, 1, 1])
-                with fcol8:
-                    f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
+                # Row 5: Date range & Email & Search button
+                fcol9, fcol10, fcol11, fcol12 = st.columns([1, 1, 1, 1])
                 with fcol9:
-                    f_date_before = st.date_input("Enriched Before", value=None, key="db_f_date_before")
+                    f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
                 with fcol10:
-                    f_has_email = st.checkbox("Has Email", key="db_f_has_email")
+                    f_date_before = st.date_input("Enriched Before", value=None, key="db_f_date_before")
                 with fcol11:
+                    f_has_email = st.checkbox("Has Email", key="db_f_has_email")
+                with fcol12:
                     search_clicked = st.button("🔍 Search", key="db_search_btn", type="primary", use_container_width=True)
 
                 # Build filters dict
                 current_filters = {
-                    'name': f_name, 'title': f_title, 'current_company': f_current_company,
-                    'past_companies': f_past_companies, 'location': f_location,
-                    'skills': f_skills, 'schools': f_schools,
+                    'name': f_name, 'current_title': f_current_title, 'past_titles': f_past_titles,
+                    'current_company': f_current_company, 'past_companies': f_past_companies,
+                    'location': f_location, 'skills': f_skills, 'schools': f_schools,
                     'date_after': str(f_date_after) if f_date_after else None,
                     'date_before': str(f_date_before) if f_date_before else None,
                     'has_email': f_has_email
                 }
-                has_column_filters = any([f_name, f_title, f_current_company, f_past_companies,
+                has_column_filters = any([f_name, f_current_title, f_past_titles, f_current_company, f_past_companies,
                                           f_location, f_skills, f_schools, f_date_after, f_date_before, f_has_email])
 
                 # Store search state
@@ -6774,7 +6779,7 @@ with tab_database:
                         from db import search_profiles_fulltext
                         all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=5000)
                         st.caption(f"Full-text search: **{ft}**")
-                    elif any(af.get(k) for k in ['name', 'title', 'current_company', 'past_companies',
+                    elif any(af.get(k) for k in ['name', 'current_title', 'past_titles', 'current_company', 'past_companies',
                                                    'location', 'skills', 'schools', 'date_after', 'date_before', 'has_email']):
                         # Column filters (server-side)
                         from db import search_profiles_filtered

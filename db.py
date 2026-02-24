@@ -428,6 +428,47 @@ def get_all_profiles(client: SupabaseClient, limit: int = 10000, include_raw_dat
         return client.select('profiles', columns, limit=limit)
 
 
+def get_profiles_by_urls(client: SupabaseClient, urls: list, include_raw_data: bool = True) -> list:
+    """Fetch profiles by LinkedIn URLs.
+
+    Args:
+        client: SupabaseClient instance
+        urls: List of LinkedIn URLs to fetch
+        include_raw_data: If True, includes raw_data JSONB (needed for screening)
+
+    Returns:
+        List of profile dicts
+    """
+    if not urls:
+        return []
+
+    # Normalize URLs
+    normalized = [normalize_linkedin_url(u) for u in urls if u]
+    normalized = [u for u in normalized if u]
+
+    if not normalized:
+        return []
+
+    results = []
+    batch_size = 50  # Supabase URL length limits
+
+    for i in range(0, len(normalized), batch_size):
+        batch = normalized[i:i+batch_size]
+        # Use 'in' filter for multiple URLs
+        url_list = ','.join(batch)
+        filters = {'linkedin_url': f'in.({url_list})'}
+
+        if include_raw_data:
+            columns = '*'
+        else:
+            columns = 'linkedin_url,name,location,current_title,current_company,all_employers,all_titles,all_schools,skills,email,enriched_at'
+
+        batch_results = client.select('profiles', columns, filters, limit=len(batch))
+        results.extend(batch_results)
+
+    return results
+
+
 def get_pipeline_stats(client: SupabaseClient) -> dict:
     """Get pipeline funnel statistics."""
     try:
@@ -440,12 +481,41 @@ def get_pipeline_stats(client: SupabaseClient) -> dict:
 
 
 def search_profiles(client: SupabaseClient, query: str, limit: int = 100) -> list:
-    """Search profiles by name, company, or title."""
+    """Search profiles by name, company, or title (legacy - use search_profiles_fulltext for better results)."""
     results = client.select('profiles', '*', {'current_company': f'ilike.%{query}%'}, limit=limit)
     if len(results) < limit:
-        more = client.select('profiles', '*', {'first_name': f'ilike.%{query}%'}, limit=limit - len(results))
+        more = client.select('profiles', '*', {'name': f'ilike.%{query}%'}, limit=limit - len(results))
         results.extend(more)
     return results
+
+
+def search_profiles_fulltext(client: SupabaseClient, query: str, limit: int = 500) -> list:
+    """Full-text search across all profile data.
+
+    Searches: name, title, company, location, skills, all employers, all titles, all schools.
+    Requires the search_profiles_text RPC function (see migrations/009_add_fulltext_search.sql).
+
+    Args:
+        client: SupabaseClient instance
+        query: Search query (e.g., "node.js kubernetes 8200")
+        limit: Maximum results to return
+
+    Returns:
+        List of matching profile dicts, ranked by relevance
+    """
+    try:
+        response = requests.post(
+            f"{client.url}/rest/v1/rpc/search_profiles_text",
+            headers=client.headers,
+            json={"query": query, "p_limit": limit},
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"[DB] Full-text search error: {e}")
+        # Fallback to basic search
+        return search_profiles(client, query, limit)
 
 
 # ============================================================================

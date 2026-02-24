@@ -6701,52 +6701,65 @@ with tab_database:
                 if all_profiles:
                     df = profiles_to_dataframe(all_profiles)
 
-                    # Create combined name column
+                    # Create combined name column only if name is empty
+                    if 'name' not in df.columns:
+                        df['name'] = ''
                     if 'first_name' in df.columns and 'last_name' in df.columns:
-                        df['name'] = (df['first_name'].fillna('') + ' ' + df['last_name'].fillna('')).str.strip()
+                        # Only fill in name from first_name/last_name where name is empty
+                        combined = (df['first_name'].fillna('') + ' ' + df['last_name'].fillna('')).str.strip()
+                        df['name'] = df['name'].fillna('').replace('', pd.NA).fillna(combined)
 
                     # Fill NaN for filtering
-                    filter_cols = ['current_title', 'current_company', 'all_employers', 'location', 'skills', 'screening_fit_level', 'status']
+                    filter_cols = ['current_title', 'current_company', 'all_employers', 'location', 'skills']
                     for col in filter_cols:
                         if col in df.columns:
                             df[col] = df[col].fillna('')
 
-                    # --- Filters ---
-                    fcol1, fcol2, fcol3 = st.columns(3)
-                    with fcol1:
-                        f_title = st.text_input("Title", key="db_f_title", placeholder="e.g. devops, backend, product manager")
-                    with fcol2:
-                        f_company = st.text_input("Company", key="db_f_company", placeholder="e.g. Wiz, Monday, Check Point")
-                    with fcol3:
-                        f_location = st.text_input("Location", key="db_f_location", placeholder="e.g. israel, new york, london")
+                    # --- Search Filters ---
+                    st.markdown("##### Search")
 
-                    fcol4, fcol5, fcol6 = st.columns(3)
+                    # Row 1: Text filters
+                    fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+                    with fcol1:
+                        f_name = st.text_input("Name", key="db_f_name", placeholder="john doe")
+                    with fcol2:
+                        f_title = st.text_input("Title", key="db_f_title", placeholder="backend, devops")
+                    with fcol3:
+                        f_company = st.text_input("Company", key="db_f_company", placeholder="wiz, monday")
                     with fcol4:
-                        f_skills = st.text_input("Skills", key="db_f_skills", placeholder="e.g. python, kubernetes, react")
+                        f_location = st.text_input("Location", key="db_f_location", placeholder="israel, nyc")
+
+                    # Row 2: Skills & Schools
+                    fcol5, fcol6 = st.columns(2)
                     with fcol5:
-                        f_fit = st.multiselect(
-                            "Fit Level",
-                            options=["Strong Fit", "Good Fit", "Partial Fit", "Not a Fit", "Not Screened"],
-                            key="db_f_fit"
-                        )
+                        f_skills = st.text_input("Skills (any of)", key="db_f_skills", placeholder="python, kubernetes, react")
                     with fcol6:
-                        f_status = st.multiselect(
-                            "Status",
-                            options=["enriched", "screened", "contacted", "archived"],
-                            key="db_f_status"
-                        )
+                        f_schools = st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
+
+                    # Row 3: Date range & Email
+                    fcol7, fcol8, fcol9 = st.columns(3)
+                    with fcol7:
+                        f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
+                    with fcol8:
+                        f_date_before = st.date_input("Enriched Before", value=None, key="db_f_date_before")
+                    with fcol9:
+                        f_has_email = st.checkbox("Has Email", key="db_f_has_email")
 
                     # Apply filters
                     filtered_df = df.copy()
+
+                    if f_name:
+                        filtered_df = filtered_df[filtered_df['name'].str.contains(f_name, case=False, na=False)]
 
                     if f_title:
                         filtered_df = filtered_df[filtered_df['current_title'].str.contains(f_title, case=False, na=False)]
 
                     if f_company:
+                        # Search both current and all past employers
                         if 'all_employers' in filtered_df.columns:
                             company_mask = (
                                 filtered_df['current_company'].str.contains(f_company, case=False, na=False) |
-                                filtered_df['all_employers'].str.contains(f_company, case=False, na=False)
+                                filtered_df['all_employers'].astype(str).str.contains(f_company, case=False, na=False)
                             )
                         else:
                             company_mask = filtered_df['current_company'].str.contains(f_company, case=False, na=False)
@@ -6756,22 +6769,36 @@ with tab_database:
                         filtered_df = filtered_df[filtered_df['location'].str.contains(f_location, case=False, na=False)]
 
                     if f_skills and 'skills' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['skills'].str.contains(f_skills, case=False, na=False)]
+                        # OR logic: match any of the skills
+                        skills_list = [s.strip().lower() for s in f_skills.split(',') if s.strip()]
+                        if skills_list:
+                            def has_any_skill(skills_str):
+                                if pd.isna(skills_str) or not skills_str:
+                                    return False
+                                profile_skills = str(skills_str).lower()
+                                return any(skill in profile_skills for skill in skills_list)
+                            filtered_df = filtered_df[filtered_df['skills'].apply(has_any_skill)]
 
-                    if f_fit:
-                        fit_mask = pd.Series(False, index=filtered_df.index)
-                        named_fits = [f for f in f_fit if f != "Not Screened"]
-                        if named_fits and 'screening_fit_level' in filtered_df.columns:
-                            fit_mask = fit_mask | filtered_df['screening_fit_level'].isin(named_fits)
-                        if "Not Screened" in f_fit and 'screening_fit_level' in filtered_df.columns:
-                            fit_mask = fit_mask | (filtered_df['screening_fit_level'] == '')
-                        filtered_df = filtered_df[fit_mask]
+                    if f_schools and 'all_schools' in filtered_df.columns:
+                        filtered_df = filtered_df[
+                            filtered_df['all_schools'].astype(str).str.contains(f_schools, case=False, na=False)
+                        ]
 
-                    if f_status and 'status' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['status'].isin(f_status)]
+                    if f_date_after and 'enriched_at' in filtered_df.columns:
+                        filtered_df = filtered_df[
+                            pd.to_datetime(filtered_df['enriched_at'], errors='coerce') >= pd.Timestamp(f_date_after)
+                        ]
+
+                    if f_date_before and 'enriched_at' in filtered_df.columns:
+                        filtered_df = filtered_df[
+                            pd.to_datetime(filtered_df['enriched_at'], errors='coerce') <= pd.Timestamp(f_date_before)
+                        ]
+
+                    if f_has_email and 'email' in filtered_df.columns:
+                        filtered_df = filtered_df[filtered_df['email'].notna() & (filtered_df['email'] != '')]
 
                     # Results
-                    has_filters = any([f_title, f_company, f_location, f_skills, f_fit, f_status])
+                    has_filters = any([f_name, f_title, f_company, f_location, f_skills, f_schools, f_date_after, f_date_before, f_has_email])
                     filter_label = f" (filtered from {len(df)})" if has_filters else ""
                     st.info(f"Showing **{len(filtered_df)}** profiles{filter_label}")
 
@@ -6779,7 +6806,7 @@ with tab_database:
                     show_all_db_cols = st.checkbox("Show all columns", value=False, key="db_show_all_cols")
 
                     if show_all_db_cols:
-                        all_cols = ['name', 'current_title', 'current_company', 'all_employers', 'all_titles', 'all_schools', 'skills', 'past_positions', 'headline', 'location', 'summary', 'connections_count', 'screening_score', 'screening_fit_level', 'email', 'status', 'enriched_at', 'linkedin_url']
+                        all_cols = ['name', 'current_title', 'current_company', 'all_employers', 'all_titles', 'all_schools', 'skills', 'past_positions', 'headline', 'location', 'summary', 'connections_count', 'email', 'enriched_at', 'linkedin_url']
                         available_cols = [c for c in all_cols if c in filtered_df.columns]
                         st.dataframe(
                             filtered_df[available_cols] if available_cols else filtered_df,
@@ -6787,13 +6814,12 @@ with tab_database:
                             hide_index=True,
                             column_config={
                                 "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
-                                "screening_score": st.column_config.NumberColumn("Score", format="%d"),
                                 "enriched_at": st.column_config.DatetimeColumn("Enriched", format="YYYY-MM-DD"),
                             }
                         )
                         st.caption(f"{len(available_cols)} columns")
                     else:
-                        preview_cols = ['name', 'current_title', 'current_company', 'screening_fit_level', 'screening_score', 'location', 'linkedin_url']
+                        preview_cols = ['name', 'current_title', 'current_company', 'location', 'linkedin_url']
                         available_cols = [c for c in preview_cols if c in filtered_df.columns]
 
                         st.dataframe(
@@ -6805,48 +6831,49 @@ with tab_database:
                                 "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                                 "current_company": st.column_config.TextColumn("Company"),
                                 "current_title": st.column_config.TextColumn("Title"),
-                                "screening_fit_level": st.column_config.TextColumn("Fit"),
-                                "screening_score": st.column_config.NumberColumn("Score", format="%d"),
                                 "location": st.column_config.TextColumn("Location"),
                             }
                         )
 
-                    # Export button
-                    st.download_button(
-                        f"Download Results ({len(filtered_df)} profiles)",
-                        filtered_df.to_csv(index=False),
-                        "database_filtered.csv",
-                        "text/csv"
-                    )
+                    # Action buttons
+                    btn_col1, btn_col2 = st.columns(2)
+                    with btn_col1:
+                        st.download_button(
+                            f"Download CSV ({len(filtered_df)})",
+                            filtered_df.to_csv(index=False),
+                            "database_filtered.csv",
+                            "text/csv",
+                            key="db_download_btn"
+                        )
+                    with btn_col2:
+                        if len(filtered_df) > 0:
+                            if st.button(f"Send {len(filtered_df)} to Filter+", key="db_to_filter_btn", type="primary"):
+                                # Get URLs from filtered results
+                                urls = filtered_df['linkedin_url'].tolist()
+
+                                # Fetch profiles WITH raw_data (needed for screening)
+                                from db import get_profiles_by_urls
+                                profiles_with_raw = get_profiles_by_urls(db_client, urls, include_raw_data=True)
+
+                                if profiles_with_raw:
+                                    # Convert to DataFrame for Filter+ tab
+                                    result_df = profiles_to_dataframe(profiles_with_raw)
+                                    st.session_state['enriched_df'] = result_df
+
+                                    # Cache raw_data for screening
+                                    st.session_state['enriched_profiles_raw'] = {
+                                        p.get('linkedin_url', ''): p for p in profiles_with_raw if p.get('raw_data')
+                                    }
+
+                                    # Clear previous results
+                                    st.session_state.pop('passed_candidates_df', None)
+                                    st.session_state.pop('screening_results', None)
+
+                                    st.success(f"Loaded {len(result_df)} profiles. Go to **Filter+** tab to continue.")
+                                else:
+                                    st.warning("Could not load profiles with raw data")
                 else:
                     st.info("No profiles in database yet")
-
-                # Load from database to session
-                st.divider()
-                st.markdown("#### Load from Database")
-                st.caption("Load profiles from database into the current session for processing")
-
-                load_options = ["All Enriched"]
-                load_selection = st.selectbox("Load profiles", load_options, key="db_load_select")
-
-                if st.button("Load to Session", key="db_load_btn"):
-                    load_profiles = []
-                    if load_selection == "All Enriched":
-                        from db import get_profiles_by_status
-                        load_profiles = get_profiles_by_status(db_client, "enriched", limit=500)  # Reduced for memory
-
-                    if load_profiles:
-                        load_df = profiles_to_dataframe(load_profiles)
-                        st.session_state['results_df'] = load_df
-                        # Cache raw profile dicts so screening doesn't re-fetch from DB
-                        if len(load_profiles) <= 500:
-                            st.session_state['enriched_profiles_raw'] = {
-                                p.get('linkedin_url', ''): p for p in load_profiles if p.get('raw_data')
-                            }
-                        st.success(f"Loaded **{len(load_profiles)}** profiles from database!")
-                        st.rerun()
-                    else:
-                        st.warning("No profiles found to load")
 
                 # Re-enrich profile section
                 st.divider()

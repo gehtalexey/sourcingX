@@ -6780,16 +6780,16 @@ with tab_database:
                     if ft and ft.strip():
                         # Full-text search first
                         from db import search_profiles_fulltext
-                        all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=5000)
+                        all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=50000)
                         st.caption(f"Full-text search: **{ft}**")
                     elif has_column_filters:
                         # Column filters only (server-side)
                         from db import search_profiles_filtered
-                        all_profiles = search_profiles_filtered(db_client, af, limit=5000)
+                        all_profiles = search_profiles_filtered(db_client, af, limit=50000)
                         st.caption("Server-side filtered search")
                     else:
                         # No filters - load all
-                        all_profiles = get_all_profiles(db_client, limit=5000)
+                        all_profiles = get_all_profiles(db_client, limit=50000)
                 else:
                     st.info("Enter filters and click **Search** to find profiles")
 

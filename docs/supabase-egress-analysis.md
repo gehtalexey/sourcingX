@@ -1,16 +1,16 @@
 # Supabase Egress Analysis
 
 **Date:** 2026-02-24
-**Status:** Analyzed - Decided to upgrade to Pro plan
+**Status:** Upgraded to Pro plan
 
-## Current Usage (Free Plan)
+## Usage at Time of Upgrade (was Free Plan)
 
-| Resource | Used | Limit | % Used |
-|----------|------|-------|--------|
-| Egress | 10.87 GB | 5 GB | 217% |
-| Database Size | 127 MB | 500 MB | 25% |
+| Resource | Used | Free Limit | Pro Limit |
+|----------|------|------------|-----------|
+| Egress | 10.87 GB | 5 GB | 250 GB |
+| Database Size | 127 MB | 500 MB | 8 GB |
 
-Grace period until: March 23, 2026
+Upgraded on: 2026-02-24
 
 ## High-Egress Patterns Identified
 
@@ -53,13 +53,13 @@ These are safe but only save ~30-40% egress:
 
 ## Decision
 
-**Upgrade to Supabase Pro ($25/mo)** rather than risk breaking working features.
+**Upgraded to Supabase Pro ($25/mo)** rather than risk breaking working features.
 
 Pro plan provides:
 - 250 GB egress (vs 5 GB free)
 - 8 GB database (vs 500 MB free)
 
-Database will hit free limit at ~10,000-15,000 profiles (at 20-50KB raw_data per profile).
+With Pro limits, can store ~100,000+ profiles before hitting database limit.
 
 ## Future Considerations
 

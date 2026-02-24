@@ -6774,14 +6774,16 @@ with tab_database:
                     af = st.session_state.get('db_applied_filters', {})
                     ft = st.session_state.get('db_fulltext', '')
 
+                    has_column_filters = any(af.get(k) for k in ['name', 'current_title', 'past_titles', 'current_company', 'past_companies',
+                                                   'location', 'skills', 'schools', 'date_after', 'date_before', 'has_email'])
+
                     if ft and ft.strip():
-                        # Full-text search
+                        # Full-text search first
                         from db import search_profiles_fulltext
                         all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=5000)
                         st.caption(f"Full-text search: **{ft}**")
-                    elif any(af.get(k) for k in ['name', 'current_title', 'past_titles', 'current_company', 'past_companies',
-                                                   'location', 'skills', 'schools', 'date_after', 'date_before', 'has_email']):
-                        # Column filters (server-side)
+                    elif has_column_filters:
+                        # Column filters only (server-side)
                         from db import search_profiles_filtered
                         all_profiles = search_profiles_filtered(db_client, af, limit=5000)
                         st.caption("Server-side filtered search")
@@ -6793,17 +6795,58 @@ with tab_database:
 
                 if all_profiles:
                     df = profiles_to_dataframe(all_profiles)
-                    filtered_df = df  # Already filtered server-side
 
                     # Create combined name column only if name is empty
-                    if 'name' not in filtered_df.columns:
-                        filtered_df['name'] = ''
-                    if 'first_name' in filtered_df.columns and 'last_name' in filtered_df.columns:
-                        combined = (filtered_df['first_name'].fillna('') + ' ' + filtered_df['last_name'].fillna('')).str.strip()
-                        filtered_df['name'] = filtered_df['name'].fillna('').replace('', pd.NA).fillna(combined)
+                    if 'name' not in df.columns:
+                        df['name'] = ''
+                    if 'first_name' in df.columns and 'last_name' in df.columns:
+                        combined = (df['first_name'].fillna('') + ' ' + df['last_name'].fillna('')).str.strip()
+                        df['name'] = df['name'].fillna('').replace('', pd.NA).fillna(combined)
+
+                    # Apply column filters CLIENT-SIDE (after full-text search)
+                    filtered_df = df.copy()
+                    af = st.session_state.get('db_applied_filters', {})
+
+                    # Helper for OR matching
+                    def matches_any(text, terms_str):
+                        if pd.isna(text) or not text or not terms_str:
+                            return False
+                        text_lower = str(text).lower()
+                        terms = [t.strip().lower() for t in terms_str.split(',') if t.strip()]
+                        return any(term in text_lower for term in terms)
+
+                    if af.get('name'):
+                        filtered_df = filtered_df[filtered_df['name'].apply(lambda x: matches_any(x, af['name']))]
+
+                    if af.get('current_title') and 'current_title' in filtered_df.columns:
+                        filtered_df = filtered_df[filtered_df['current_title'].apply(lambda x: matches_any(x, af['current_title']))]
+
+                    if af.get('past_titles') and 'all_titles' in filtered_df.columns:
+                        filtered_df = filtered_df[filtered_df['all_titles'].astype(str).apply(lambda x: matches_any(x, af['past_titles']))]
+
+                    if af.get('current_company') and 'current_company' in filtered_df.columns:
+                        filtered_df = filtered_df[filtered_df['current_company'].apply(lambda x: matches_any(x, af['current_company']))]
+
+                    if af.get('past_companies') and 'all_employers' in filtered_df.columns:
+                        filtered_df = filtered_df[filtered_df['all_employers'].astype(str).apply(lambda x: matches_any(x, af['past_companies']))]
+
+                    if af.get('location') and 'location' in filtered_df.columns:
+                        filtered_df = filtered_df[filtered_df['location'].apply(lambda x: matches_any(x, af['location']))]
+
+                    if af.get('skills') and 'skills' in filtered_df.columns:
+                        filtered_df = filtered_df[filtered_df['skills'].astype(str).apply(lambda x: matches_any(x, af['skills']))]
+
+                    if af.get('schools') and 'all_schools' in filtered_df.columns:
+                        filtered_df = filtered_df[filtered_df['all_schools'].astype(str).apply(lambda x: matches_any(x, af['schools']))]
+
+                    if af.get('has_email') and 'email' in filtered_df.columns:
+                        filtered_df = filtered_df[filtered_df['email'].notna() & (filtered_df['email'] != '')]
 
                     # Results
-                    st.info(f"Found **{len(filtered_df)}** profiles")
+                    if len(filtered_df) < len(df):
+                        st.info(f"Found **{len(filtered_df)}** profiles (filtered from {len(df)} full-text matches)")
+                    else:
+                        st.info(f"Found **{len(filtered_df)}** profiles")
 
                     # Toggle to show all columns
                     show_all_db_cols = st.checkbox("Show all columns", value=False, key="db_show_all_cols")

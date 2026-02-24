@@ -6730,33 +6730,38 @@ with tab_database:
                     # --- Search Filters ---
                     st.markdown("##### Search")
 
-                    # Row 1: Text filters
-                    fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+                    # Row 1: Name, Title, Location
+                    fcol1, fcol2, fcol3 = st.columns(3)
                     with fcol1:
                         f_name = st.text_input("Name", key="db_f_name", placeholder="john doe")
                     with fcol2:
                         f_title = st.text_input("Title", key="db_f_title", placeholder="backend, devops")
                     with fcol3:
-                        f_company = st.text_input("Company", key="db_f_company", placeholder="wiz, monday")
-                    with fcol4:
                         f_location = st.text_input("Location", key="db_f_location", placeholder="israel, nyc")
 
-                    # Row 2: Skills & Schools
-                    fcol5, fcol6 = st.columns(2)
+                    # Row 2: Current Company, Past Companies
+                    fcol4, fcol5 = st.columns(2)
+                    with fcol4:
+                        f_current_company = st.text_input("Current Company", key="db_f_current_company", placeholder="wiz, monday")
                     with fcol5:
-                        f_skills = st.text_input("Skills (any of)", key="db_f_skills", placeholder="python, kubernetes, react")
+                        f_past_companies = st.text_input("Past Companies", key="db_f_past_companies", placeholder="google, meta")
+
+                    # Row 3: Skills & Schools
+                    fcol6, fcol7 = st.columns(2)
                     with fcol6:
+                        f_skills = st.text_input("Skills (any of)", key="db_f_skills", placeholder="python, kubernetes, react")
+                    with fcol7:
                         f_schools = st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
 
-                    # Row 3: Date range & Email & Search button
-                    fcol7, fcol8, fcol9, fcol10 = st.columns([1, 1, 1, 1])
-                    with fcol7:
-                        f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
+                    # Row 4: Date range & Email & Search button
+                    fcol8, fcol9, fcol10, fcol11 = st.columns([1, 1, 1, 1])
                     with fcol8:
-                        f_date_before = st.date_input("Enriched Before", value=None, key="db_f_date_before")
+                        f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
                     with fcol9:
-                        f_has_email = st.checkbox("Has Email", key="db_f_has_email")
+                        f_date_before = st.date_input("Enriched Before", value=None, key="db_f_date_before")
                     with fcol10:
+                        f_has_email = st.checkbox("Has Email", key="db_f_has_email")
+                    with fcol11:
                         search_clicked = st.button("🔍 Search", key="db_search_btn", type="primary", use_container_width=True)
 
                     # Helper: check if any term matches (OR logic for comma-separated)
@@ -6776,8 +6781,9 @@ with tab_database:
                         st.session_state['db_filters_applied'] = True
                         # Store current filter values
                         st.session_state['db_applied_filters'] = {
-                            'name': f_name, 'title': f_title, 'company': f_company,
-                            'location': f_location, 'skills': f_skills, 'schools': f_schools,
+                            'name': f_name, 'title': f_title, 'current_company': f_current_company,
+                            'past_companies': f_past_companies, 'location': f_location,
+                            'skills': f_skills, 'schools': f_schools,
                             'date_after': f_date_after, 'date_before': f_date_before, 'has_email': f_has_email
                         }
 
@@ -6796,12 +6802,14 @@ with tab_database:
                             filtered_df = filtered_df[filtered_df['current_title'].apply(lambda x: matches_any_term(x, af['title']))]
                             has_filters = True
 
-                        if af.get('company'):
-                            # Search both current and all past employers (OR logic)
-                            def company_matches(row):
-                                return (matches_any_term(row.get('current_company', ''), af['company']) or
-                                        matches_any_term(str(row.get('all_employers', '')), af['company']))
-                            filtered_df = filtered_df[filtered_df.apply(company_matches, axis=1)]
+                        if af.get('current_company'):
+                            # Search only current company
+                            filtered_df = filtered_df[filtered_df['current_company'].apply(lambda x: matches_any_term(x, af['current_company']))]
+                            has_filters = True
+
+                        if af.get('past_companies') and 'all_employers' in filtered_df.columns:
+                            # Search past employers (all_employers includes all companies)
+                            filtered_df = filtered_df[filtered_df['all_employers'].astype(str).apply(lambda x: matches_any_term(x, af['past_companies']))]
                             has_filters = True
 
                         if af.get('location') and 'location' in filtered_df.columns:

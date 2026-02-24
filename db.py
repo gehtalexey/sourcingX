@@ -518,6 +518,99 @@ def search_profiles_fulltext(client: SupabaseClient, query: str, limit: int = 50
         return search_profiles(client, query, limit)
 
 
+def search_profiles_filtered(client: SupabaseClient, filters: dict, limit: int = 5000) -> list:
+    """Server-side filtered search for profiles.
+
+    Within each filter: OR logic (e.g., "wiz, monday" matches wiz OR monday)
+    Between filters: AND logic (e.g., company AND location must both match)
+
+    Args:
+        client: SupabaseClient instance
+        filters: Dict with optional keys:
+            - name: Search in name field
+            - title: Search in current_title
+            - current_company: Search in current_company only
+            - past_companies: Search in all_employers
+            - location: Search in location
+            - skills: Search in skills array
+            - schools: Search in all_schools
+            - has_email: Boolean, filter for profiles with email
+            - date_after: ISO date string, enriched_at >= date
+            - date_before: ISO date string, enriched_at <= date
+        limit: Maximum results
+
+    Returns:
+        List of profile dicts
+    """
+    # Build AND conditions - each filter is an AND clause
+    and_clauses = []
+
+    def make_or_clause(column: str, terms_str: str) -> str:
+        """Build OR clause for a single filter field."""
+        terms = [t.strip() for t in terms_str.split(',') if t.strip()]
+        if len(terms) == 1:
+            return f"{column}.ilike.*{terms[0]}*"
+        # Multiple terms: wrap in or()
+        conditions = ','.join([f"{column}.ilike.*{t}*" for t in terms])
+        return f"or({conditions})"
+
+    if filters.get('name'):
+        and_clauses.append(make_or_clause('name', filters['name']))
+
+    if filters.get('title'):
+        and_clauses.append(make_or_clause('current_title', filters['title']))
+
+    if filters.get('current_company'):
+        and_clauses.append(make_or_clause('current_company', filters['current_company']))
+
+    if filters.get('past_companies'):
+        # all_employers is an array, cast to text for ilike
+        terms = [t.strip() for t in filters['past_companies'].split(',') if t.strip()]
+        if len(terms) == 1:
+            and_clauses.append(f"all_employers::text.ilike.*{terms[0]}*")
+        else:
+            conditions = ','.join([f"all_employers::text.ilike.*{t}*" for t in terms])
+            and_clauses.append(f"or({conditions})")
+
+    if filters.get('location'):
+        and_clauses.append(make_or_clause('location', filters['location']))
+
+    if filters.get('skills'):
+        terms = [t.strip() for t in filters['skills'].split(',') if t.strip()]
+        if len(terms) == 1:
+            and_clauses.append(f"skills::text.ilike.*{terms[0]}*")
+        else:
+            conditions = ','.join([f"skills::text.ilike.*{t}*" for t in terms])
+            and_clauses.append(f"or({conditions})")
+
+    if filters.get('schools'):
+        terms = [t.strip() for t in filters['schools'].split(',') if t.strip()]
+        if len(terms) == 1:
+            and_clauses.append(f"all_schools::text.ilike.*{terms[0]}*")
+        else:
+            conditions = ','.join([f"all_schools::text.ilike.*{t}*" for t in terms])
+            and_clauses.append(f"or({conditions})")
+
+    if filters.get('has_email'):
+        and_clauses.append('email.not.is.null')
+
+    if filters.get('date_after'):
+        and_clauses.append(f"enriched_at.gte.{filters['date_after']}")
+
+    if filters.get('date_before'):
+        and_clauses.append(f"enriched_at.lte.{filters['date_before']}")
+
+    # Build params
+    params = {}
+    if and_clauses:
+        params['and'] = f"({','.join(and_clauses)})"
+
+    # Select without raw_data for performance (large field)
+    columns = 'linkedin_url,name,current_title,current_company,all_employers,all_titles,all_schools,skills,location,email,enriched_at'
+
+    return client.select('profiles', columns, params, limit=limit)
+
+
 # ============================================================================
 # DEDUPLICATION (for skipping already-enriched URLs)
 # ============================================================================

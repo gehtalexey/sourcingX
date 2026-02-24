@@ -6695,158 +6695,110 @@ with tab_database:
                 # Browse & filter profiles
                 st.markdown("#### Browse Profiles")
 
-                # Full-text search (uses PostgreSQL full-text search for 100k+ profiles)
+                # Show total profiles in DB
+                total_in_db = db_client.count('profiles')
+                st.caption(f"Total profiles in database: **{total_in_db:,}**")
+
+                # --- Search Filters (server-side) ---
+                st.markdown("##### Search Filters")
+
+                # Full-text search
                 fulltext_query = st.text_input(
                     "Full-text search",
                     key="db_fulltext_search",
                     placeholder="e.g., node.js kubernetes 8200 (searches ALL fields)"
                 )
 
-                # Show total profiles in DB
-                total_in_db = db_client.count('profiles')
-                st.caption(f"Total profiles in database: **{total_in_db:,}**")
+                # Row 1: Name, Title, Location
+                fcol1, fcol2, fcol3 = st.columns(3)
+                with fcol1:
+                    f_name = st.text_input("Name", key="db_f_name", placeholder="john doe")
+                with fcol2:
+                    f_title = st.text_input("Title", key="db_f_title", placeholder="backend, devops")
+                with fcol3:
+                    f_location = st.text_input("Location", key="db_f_location", placeholder="israel, nyc")
 
-                # Fetch profiles based on search (no limit - load all)
-                if fulltext_query and fulltext_query.strip():
-                    from db import search_profiles_fulltext
-                    all_profiles = search_profiles_fulltext(db_client, fulltext_query.strip(), limit=5000)
-                    st.caption(f"Searching for: **{fulltext_query}**")
+                # Row 2: Current Company, Past Companies
+                fcol4, fcol5 = st.columns(2)
+                with fcol4:
+                    f_current_company = st.text_input("Current Company", key="db_f_current_company", placeholder="wiz, monday")
+                with fcol5:
+                    f_past_companies = st.text_input("Past Companies", key="db_f_past_companies", placeholder="google, meta")
+
+                # Row 3: Skills & Schools
+                fcol6, fcol7 = st.columns(2)
+                with fcol6:
+                    f_skills = st.text_input("Skills (any of)", key="db_f_skills", placeholder="python, kubernetes, react")
+                with fcol7:
+                    f_schools = st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
+
+                # Row 4: Date range & Email & Search button
+                fcol8, fcol9, fcol10, fcol11 = st.columns([1, 1, 1, 1])
+                with fcol8:
+                    f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
+                with fcol9:
+                    f_date_before = st.date_input("Enriched Before", value=None, key="db_f_date_before")
+                with fcol10:
+                    f_has_email = st.checkbox("Has Email", key="db_f_has_email")
+                with fcol11:
+                    search_clicked = st.button("🔍 Search", key="db_search_btn", type="primary", use_container_width=True)
+
+                # Build filters dict
+                current_filters = {
+                    'name': f_name, 'title': f_title, 'current_company': f_current_company,
+                    'past_companies': f_past_companies, 'location': f_location,
+                    'skills': f_skills, 'schools': f_schools,
+                    'date_after': str(f_date_after) if f_date_after else None,
+                    'date_before': str(f_date_before) if f_date_before else None,
+                    'has_email': f_has_email
+                }
+                has_column_filters = any([f_name, f_title, f_current_company, f_past_companies,
+                                          f_location, f_skills, f_schools, f_date_after, f_date_before, f_has_email])
+
+                # Store search state
+                if search_clicked:
+                    st.session_state['db_search_executed'] = True
+                    st.session_state['db_applied_filters'] = current_filters
+                    st.session_state['db_fulltext'] = fulltext_query
+
+                # Fetch profiles based on search (SERVER-SIDE filtering)
+                all_profiles = []
+                search_executed = st.session_state.get('db_search_executed', False)
+
+                if search_executed:
+                    af = st.session_state.get('db_applied_filters', {})
+                    ft = st.session_state.get('db_fulltext', '')
+
+                    if ft and ft.strip():
+                        # Full-text search
+                        from db import search_profiles_fulltext
+                        all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=5000)
+                        st.caption(f"Full-text search: **{ft}**")
+                    elif any(af.get(k) for k in ['name', 'title', 'current_company', 'past_companies',
+                                                   'location', 'skills', 'schools', 'date_after', 'date_before', 'has_email']):
+                        # Column filters (server-side)
+                        from db import search_profiles_filtered
+                        all_profiles = search_profiles_filtered(db_client, af, limit=5000)
+                        st.caption("Server-side filtered search")
+                    else:
+                        # No filters - load all
+                        all_profiles = get_all_profiles(db_client, limit=5000)
                 else:
-                    all_profiles = get_all_profiles(db_client, limit=5000)
+                    st.info("Enter filters and click **Search** to find profiles")
 
                 if all_profiles:
                     df = profiles_to_dataframe(all_profiles)
+                    filtered_df = df  # Already filtered server-side
 
                     # Create combined name column only if name is empty
-                    if 'name' not in df.columns:
-                        df['name'] = ''
-                    if 'first_name' in df.columns and 'last_name' in df.columns:
-                        # Only fill in name from first_name/last_name where name is empty
-                        combined = (df['first_name'].fillna('') + ' ' + df['last_name'].fillna('')).str.strip()
-                        df['name'] = df['name'].fillna('').replace('', pd.NA).fillna(combined)
-
-                    # Fill NaN for filtering
-                    filter_cols = ['current_title', 'current_company', 'all_employers', 'location', 'skills']
-                    for col in filter_cols:
-                        if col in df.columns:
-                            df[col] = df[col].fillna('')
-
-                    # --- Search Filters ---
-                    st.markdown("##### Search")
-
-                    # Row 1: Name, Title, Location
-                    fcol1, fcol2, fcol3 = st.columns(3)
-                    with fcol1:
-                        f_name = st.text_input("Name", key="db_f_name", placeholder="john doe")
-                    with fcol2:
-                        f_title = st.text_input("Title", key="db_f_title", placeholder="backend, devops")
-                    with fcol3:
-                        f_location = st.text_input("Location", key="db_f_location", placeholder="israel, nyc")
-
-                    # Row 2: Current Company, Past Companies
-                    fcol4, fcol5 = st.columns(2)
-                    with fcol4:
-                        f_current_company = st.text_input("Current Company", key="db_f_current_company", placeholder="wiz, monday")
-                    with fcol5:
-                        f_past_companies = st.text_input("Past Companies", key="db_f_past_companies", placeholder="google, meta")
-
-                    # Row 3: Skills & Schools
-                    fcol6, fcol7 = st.columns(2)
-                    with fcol6:
-                        f_skills = st.text_input("Skills (any of)", key="db_f_skills", placeholder="python, kubernetes, react")
-                    with fcol7:
-                        f_schools = st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
-
-                    # Row 4: Date range & Email & Search button
-                    fcol8, fcol9, fcol10, fcol11 = st.columns([1, 1, 1, 1])
-                    with fcol8:
-                        f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
-                    with fcol9:
-                        f_date_before = st.date_input("Enriched Before", value=None, key="db_f_date_before")
-                    with fcol10:
-                        f_has_email = st.checkbox("Has Email", key="db_f_has_email")
-                    with fcol11:
-                        search_clicked = st.button("🔍 Search", key="db_search_btn", type="primary", use_container_width=True)
-
-                    # Helper: check if any term matches (OR logic for comma-separated)
-                    def matches_any_term(text, terms_str):
-                        """Check if text contains ANY of the comma-separated terms."""
-                        if pd.isna(text) or not text:
-                            return False
-                        text_lower = str(text).lower()
-                        terms = [t.strip().lower() for t in terms_str.split(',') if t.strip()]
-                        return any(term in text_lower for term in terms)
-
-                    # Only filter when search button clicked OR filters already applied
-                    if 'db_filters_applied' not in st.session_state:
-                        st.session_state['db_filters_applied'] = False
-
-                    if search_clicked:
-                        st.session_state['db_filters_applied'] = True
-                        # Store current filter values
-                        st.session_state['db_applied_filters'] = {
-                            'name': f_name, 'title': f_title, 'current_company': f_current_company,
-                            'past_companies': f_past_companies, 'location': f_location,
-                            'skills': f_skills, 'schools': f_schools,
-                            'date_after': f_date_after, 'date_before': f_date_before, 'has_email': f_has_email
-                        }
-
-                    # Apply filters only if search was clicked
-                    filtered_df = df.copy()
-                    has_filters = False
-
-                    if st.session_state.get('db_filters_applied') and st.session_state.get('db_applied_filters'):
-                        af = st.session_state['db_applied_filters']
-
-                        if af.get('name'):
-                            filtered_df = filtered_df[filtered_df['name'].apply(lambda x: matches_any_term(x, af['name']))]
-                            has_filters = True
-
-                        if af.get('title'):
-                            filtered_df = filtered_df[filtered_df['current_title'].apply(lambda x: matches_any_term(x, af['title']))]
-                            has_filters = True
-
-                        if af.get('current_company'):
-                            # Search only current company
-                            filtered_df = filtered_df[filtered_df['current_company'].apply(lambda x: matches_any_term(x, af['current_company']))]
-                            has_filters = True
-
-                        if af.get('past_companies') and 'all_employers' in filtered_df.columns:
-                            # Search past employers (all_employers includes all companies)
-                            filtered_df = filtered_df[filtered_df['all_employers'].astype(str).apply(lambda x: matches_any_term(x, af['past_companies']))]
-                            has_filters = True
-
-                        if af.get('location') and 'location' in filtered_df.columns:
-                            filtered_df = filtered_df[filtered_df['location'].apply(lambda x: matches_any_term(x, af['location']))]
-                            has_filters = True
-
-                        if af.get('skills') and 'skills' in filtered_df.columns:
-                            filtered_df = filtered_df[filtered_df['skills'].apply(lambda x: matches_any_term(x, af['skills']))]
-                            has_filters = True
-
-                        if af.get('schools') and 'all_schools' in filtered_df.columns:
-                            filtered_df = filtered_df[filtered_df['all_schools'].astype(str).apply(lambda x: matches_any_term(x, af['schools']))]
-                            has_filters = True
-
-                        if af.get('date_after') and 'enriched_at' in filtered_df.columns:
-                            filtered_df = filtered_df[
-                                pd.to_datetime(filtered_df['enriched_at'], errors='coerce') >= pd.Timestamp(af['date_after'])
-                            ]
-                            has_filters = True
-
-                        if af.get('date_before') and 'enriched_at' in filtered_df.columns:
-                            filtered_df = filtered_df[
-                                pd.to_datetime(filtered_df['enriched_at'], errors='coerce') <= pd.Timestamp(af['date_before'])
-                            ]
-                            has_filters = True
-
-                        if af.get('has_email') and 'email' in filtered_df.columns:
-                            filtered_df = filtered_df[filtered_df['email'].notna() & (filtered_df['email'] != '')]
-                            has_filters = True
+                    if 'name' not in filtered_df.columns:
+                        filtered_df['name'] = ''
+                    if 'first_name' in filtered_df.columns and 'last_name' in filtered_df.columns:
+                        combined = (filtered_df['first_name'].fillna('') + ' ' + filtered_df['last_name'].fillna('')).str.strip()
+                        filtered_df['name'] = filtered_df['name'].fillna('').replace('', pd.NA).fillna(combined)
 
                     # Results
-                    filter_label = f" (filtered from {len(df)})" if has_filters else ""
-                    st.info(f"Showing **{len(filtered_df)}** profiles{filter_label}")
+                    st.info(f"Found **{len(filtered_df)}** profiles")
 
                     # Toggle to show all columns
                     show_all_db_cols = st.checkbox("Show all columns", value=False, key="db_show_all_cols")

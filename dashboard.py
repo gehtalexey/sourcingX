@@ -6695,8 +6695,20 @@ with tab_database:
                 # Browse & filter profiles
                 st.markdown("#### Browse Profiles")
 
-                # Fetch all profiles once
-                all_profiles = get_all_profiles(db_client, limit=500)  # Reduced for memory
+                # Full-text search (uses PostgreSQL full-text search for 100k+ profiles)
+                fulltext_query = st.text_input(
+                    "Full-text search",
+                    key="db_fulltext_search",
+                    placeholder="e.g., node.js kubernetes 8200 (searches ALL fields)"
+                )
+
+                # Fetch profiles based on search
+                if fulltext_query and fulltext_query.strip():
+                    from db import search_profiles_fulltext
+                    all_profiles = search_profiles_fulltext(db_client, fulltext_query.strip(), limit=500)
+                    st.caption(f"Searching for: **{fulltext_query}**")
+                else:
+                    all_profiles = get_all_profiles(db_client, limit=500)
 
                 if all_profiles:
                     df = profiles_to_dataframe(all_profiles)

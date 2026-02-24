@@ -5414,6 +5414,8 @@ with tab_filter2:
                 filter_sheets['not_relevant'] = 'NotRelevant Companies'
             if 'universities' not in filter_sheets:
                 filter_sheets['universities'] = 'Universities'
+            if 'target_companies' not in filter_sheets:
+                filter_sheets['target_companies'] = 'Target Companies'
 
         has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
 
@@ -5439,6 +5441,10 @@ with tab_filter2:
             st.markdown("**From Google Sheet:**")
             use_not_relevant = st.checkbox("Exclude Not Relevant Companies (all employers)", value=True, key="f2_not_relevant",
                                           help="Check against ALL past employers, not just current")
+            target_company_mode = st.radio("Target Companies (all employers):",
+                                       ["Off", "Prioritize (move to top)", "Require (filter others out)"],
+                                       key="f2_target_company_mode", horizontal=True,
+                                       help="Find profiles who worked at top companies (checks current + all past employers)")
             uni_filter_mode = st.radio("Target Universities:",
                                        ["Off", "Prioritize (move to top)", "Require (filter others out)"],
                                        key="f2_uni_mode", horizontal=True)
@@ -5519,6 +5525,82 @@ with tab_filter2:
                             # MEMORY FIX: Store only count, not full records (saves 10-50MB)
                             removed['Not Relevant Companies'] = mask.sum()
                             df = df[~mask]
+
+                # Target companies filter (current + past employers)
+                if target_company_mode != "Off" and has_sheets and filter_sheets.get('target_companies'):
+                    tc_df = load_sheet_as_df(sheet_url, filter_sheets['target_companies'])
+                    if tc_df is not None and not tc_df.empty:
+                        target_companies = set()
+                        for col in tc_df.columns:
+                            if 'company' in col.lower() or 'name' in col.lower():
+                                target_companies.update(tc_df[col].dropna().str.lower().str.strip().tolist())
+                        # If no matching columns, use all columns
+                        if not target_companies:
+                            for col in tc_df.columns:
+                                target_companies.update(tc_df[col].dropna().str.lower().str.strip().tolist())
+                        if target_companies:
+                            def matches_target_company(value):
+                                """Check if a single company value matches any target company."""
+                                if value is None:
+                                    return False
+                                try:
+                                    if pd.isna(value):
+                                        return False
+                                except (ValueError, TypeError):
+                                    pass
+                                if not value:
+                                    return False
+                                val_lower = str(value).strip().lower()
+                                for target in target_companies:
+                                    if not target:
+                                        continue
+                                    if val_lower == target or target in val_lower or val_lower in target:
+                                        return True
+                                return False
+
+                            def has_target_company(row):
+                                """Check if profile worked at a target company (current or past)."""
+                                # Check current company
+                                if 'current_company' in row.index and matches_target_company(row.get('current_company')):
+                                    return True
+                                # Check all employers (past + current)
+                                employers_data = row.get('all_employers') if 'all_employers' in row.index else None
+                                if employers_data is None:
+                                    return False
+                                try:
+                                    if pd.isna(employers_data):
+                                        return False
+                                except (ValueError, TypeError):
+                                    pass
+                                if not employers_data:
+                                    return False
+                                # Handle list/array or comma-separated string
+                                if isinstance(employers_data, (list, tuple)):
+                                    employers = [str(e).strip().lower() for e in employers_data if e]
+                                else:
+                                    employers = [e.strip().lower() for e in str(employers_data).split(',')]
+                                # Check if any employer matches a target company
+                                for emp in employers:
+                                    for target in target_companies:
+                                        if not target:
+                                            continue
+                                        if emp == target or target in emp or emp in target:
+                                            return True
+                                return False
+                            df['_target_company'] = df.apply(has_target_company, axis=1)
+                            target_company_matches = df[df['_target_company']].index.tolist()
+
+                            if target_company_mode == "Require (filter others out)":
+                                mask = ~df['_target_company']
+                                removed['Non-Target Companies'] = mask.sum()
+                                df = df[df['_target_company']]
+                                df = df.drop(columns=['_target_company'])
+                                st.info(f"Target Companies: {len(target_companies)} loaded, kept {len(df)} profiles with target company experience")
+                            else:
+                                # Prioritize - move target company profiles to top
+                                df = pd.concat([df[df['_target_company']], df[~df['_target_company']]])
+                                df = df.drop(columns=['_target_company'])
+                                st.info(f"Target Companies: {len(target_companies)} loaded, {len(target_company_matches)} matches moved to top")
 
                 # Target universities filter
                 if uni_filter_mode != "Off" and has_sheets and filter_sheets.get('universities'):

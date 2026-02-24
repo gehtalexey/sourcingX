@@ -6748,69 +6748,91 @@ with tab_database:
                     with fcol6:
                         f_schools = st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
 
-                    # Row 3: Date range & Email
-                    fcol7, fcol8, fcol9 = st.columns(3)
+                    # Row 3: Date range & Email & Search button
+                    fcol7, fcol8, fcol9, fcol10 = st.columns([1, 1, 1, 1])
                     with fcol7:
                         f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
                     with fcol8:
                         f_date_before = st.date_input("Enriched Before", value=None, key="db_f_date_before")
                     with fcol9:
                         f_has_email = st.checkbox("Has Email", key="db_f_has_email")
+                    with fcol10:
+                        search_clicked = st.button("🔍 Search", key="db_search_btn", type="primary", use_container_width=True)
 
-                    # Apply filters
+                    # Helper: check if any term matches (OR logic for comma-separated)
+                    def matches_any_term(text, terms_str):
+                        """Check if text contains ANY of the comma-separated terms."""
+                        if pd.isna(text) or not text:
+                            return False
+                        text_lower = str(text).lower()
+                        terms = [t.strip().lower() for t in terms_str.split(',') if t.strip()]
+                        return any(term in text_lower for term in terms)
+
+                    # Only filter when search button clicked OR filters already applied
+                    if 'db_filters_applied' not in st.session_state:
+                        st.session_state['db_filters_applied'] = False
+
+                    if search_clicked:
+                        st.session_state['db_filters_applied'] = True
+                        # Store current filter values
+                        st.session_state['db_applied_filters'] = {
+                            'name': f_name, 'title': f_title, 'company': f_company,
+                            'location': f_location, 'skills': f_skills, 'schools': f_schools,
+                            'date_after': f_date_after, 'date_before': f_date_before, 'has_email': f_has_email
+                        }
+
+                    # Apply filters only if search was clicked
                     filtered_df = df.copy()
+                    has_filters = False
 
-                    if f_name:
-                        filtered_df = filtered_df[filtered_df['name'].str.contains(f_name, case=False, na=False)]
+                    if st.session_state.get('db_filters_applied') and st.session_state.get('db_applied_filters'):
+                        af = st.session_state['db_applied_filters']
 
-                    if f_title:
-                        filtered_df = filtered_df[filtered_df['current_title'].str.contains(f_title, case=False, na=False)]
+                        if af.get('name'):
+                            filtered_df = filtered_df[filtered_df['name'].apply(lambda x: matches_any_term(x, af['name']))]
+                            has_filters = True
 
-                    if f_company:
-                        # Search both current and all past employers
-                        if 'all_employers' in filtered_df.columns:
-                            company_mask = (
-                                filtered_df['current_company'].str.contains(f_company, case=False, na=False) |
-                                filtered_df['all_employers'].astype(str).str.contains(f_company, case=False, na=False)
-                            )
-                        else:
-                            company_mask = filtered_df['current_company'].str.contains(f_company, case=False, na=False)
-                        filtered_df = filtered_df[company_mask]
+                        if af.get('title'):
+                            filtered_df = filtered_df[filtered_df['current_title'].apply(lambda x: matches_any_term(x, af['title']))]
+                            has_filters = True
 
-                    if f_location and 'location' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['location'].str.contains(f_location, case=False, na=False)]
+                        if af.get('company'):
+                            # Search both current and all past employers (OR logic)
+                            def company_matches(row):
+                                return (matches_any_term(row.get('current_company', ''), af['company']) or
+                                        matches_any_term(str(row.get('all_employers', '')), af['company']))
+                            filtered_df = filtered_df[filtered_df.apply(company_matches, axis=1)]
+                            has_filters = True
 
-                    if f_skills and 'skills' in filtered_df.columns:
-                        # OR logic: match any of the skills
-                        skills_list = [s.strip().lower() for s in f_skills.split(',') if s.strip()]
-                        if skills_list:
-                            def has_any_skill(skills_str):
-                                if pd.isna(skills_str) or not skills_str:
-                                    return False
-                                profile_skills = str(skills_str).lower()
-                                return any(skill in profile_skills for skill in skills_list)
-                            filtered_df = filtered_df[filtered_df['skills'].apply(has_any_skill)]
+                        if af.get('location') and 'location' in filtered_df.columns:
+                            filtered_df = filtered_df[filtered_df['location'].apply(lambda x: matches_any_term(x, af['location']))]
+                            has_filters = True
 
-                    if f_schools and 'all_schools' in filtered_df.columns:
-                        filtered_df = filtered_df[
-                            filtered_df['all_schools'].astype(str).str.contains(f_schools, case=False, na=False)
-                        ]
+                        if af.get('skills') and 'skills' in filtered_df.columns:
+                            filtered_df = filtered_df[filtered_df['skills'].apply(lambda x: matches_any_term(x, af['skills']))]
+                            has_filters = True
 
-                    if f_date_after and 'enriched_at' in filtered_df.columns:
-                        filtered_df = filtered_df[
-                            pd.to_datetime(filtered_df['enriched_at'], errors='coerce') >= pd.Timestamp(f_date_after)
-                        ]
+                        if af.get('schools') and 'all_schools' in filtered_df.columns:
+                            filtered_df = filtered_df[filtered_df['all_schools'].astype(str).apply(lambda x: matches_any_term(x, af['schools']))]
+                            has_filters = True
 
-                    if f_date_before and 'enriched_at' in filtered_df.columns:
-                        filtered_df = filtered_df[
-                            pd.to_datetime(filtered_df['enriched_at'], errors='coerce') <= pd.Timestamp(f_date_before)
-                        ]
+                        if af.get('date_after') and 'enriched_at' in filtered_df.columns:
+                            filtered_df = filtered_df[
+                                pd.to_datetime(filtered_df['enriched_at'], errors='coerce') >= pd.Timestamp(af['date_after'])
+                            ]
+                            has_filters = True
 
-                    if f_has_email and 'email' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['email'].notna() & (filtered_df['email'] != '')]
+                        if af.get('date_before') and 'enriched_at' in filtered_df.columns:
+                            filtered_df = filtered_df[
+                                pd.to_datetime(filtered_df['enriched_at'], errors='coerce') <= pd.Timestamp(af['date_before'])
+                            ]
+                            has_filters = True
+
+                        if af.get('has_email') and 'email' in filtered_df.columns:
+                            filtered_df = filtered_df[filtered_df['email'].notna() & (filtered_df['email'] != '')]
+                            has_filters = True
 
                     # Results
-                    has_filters = any([f_name, f_title, f_company, f_location, f_skills, f_schools, f_date_after, f_date_before, f_has_email])
                     filter_label = f" (filtered from {len(df)})" if has_filters else ""
                     st.info(f"Showing **{len(filtered_df)}** profiles{filter_label}")
 

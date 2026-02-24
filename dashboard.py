@@ -6702,13 +6702,17 @@ with tab_database:
                     placeholder="e.g., node.js kubernetes 8200 (searches ALL fields)"
                 )
 
-                # Fetch profiles based on search
+                # Show total profiles in DB
+                total_in_db = db_client.count('profiles')
+                st.caption(f"Total profiles in database: **{total_in_db:,}**")
+
+                # Fetch profiles based on search (no limit - load all)
                 if fulltext_query and fulltext_query.strip():
                     from db import search_profiles_fulltext
-                    all_profiles = search_profiles_fulltext(db_client, fulltext_query.strip(), limit=500)
+                    all_profiles = search_profiles_fulltext(db_client, fulltext_query.strip(), limit=5000)
                     st.caption(f"Searching for: **{fulltext_query}**")
                 else:
-                    all_profiles = get_all_profiles(db_client, limit=500)
+                    all_profiles = get_all_profiles(db_client, limit=5000)
 
                 if all_profiles:
                     df = profiles_to_dataframe(all_profiles)

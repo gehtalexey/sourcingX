@@ -74,6 +74,26 @@ try:
 except ImportError:
     HAS_USAGE_TRACKER = False
 
+# Error handling patterns (custom exceptions, retry decorator, circuit breaker)
+try:
+    from error_handling import (
+        ApplicationError,
+        ExternalServiceError,
+        RateLimitError,
+        QuotaExceededError,
+        AuthenticationError,
+        ServiceUnavailableError,
+        CircuitOpenError,
+        retry_with_backoff,
+        CircuitBreaker,
+        CircuitBreakerConfig,
+        get_service_circuit,
+        classify_http_error,
+    )
+    HAS_ERROR_HANDLING = True
+except ImportError:
+    HAS_ERROR_HANDLING = False
+
 # Plotly for charts
 try:
     import plotly.express as px
@@ -88,6 +108,29 @@ try:
     HAS_AUTHENTICATOR = True
 except ImportError:
     HAS_AUTHENTICATOR = False
+
+# Security module - input validation, rate limiting, config security
+try:
+    from security import (
+        validate_linkedin_url as security_validate_linkedin_url,
+        validate_google_sheets_url,
+        validate_text_input,
+        validate_job_description,
+        validate_search_query,
+        sanitize_filename,
+        validate_config_security,
+        check_gitignore_security,
+        run_security_check,
+        get_rate_limiters,
+        ValidationError,
+        mask_secret,
+    )
+    HAS_SECURITY = True
+    _security_result = run_security_check(verbose=False)
+    if not _security_result['overall_secure']:
+        print('[Security] WARNING: Security issues detected.')
+except ImportError:
+    HAS_SECURITY = False
 
 
 def _start_keep_alive():
@@ -270,6 +313,15 @@ def load_config():
                 config['salesql_api_key'] = st.secrets['salesql_api_key']
     except Exception:
         pass
+
+    # Validate config security if security module is available
+    if HAS_SECURITY:
+        validation = validate_config_security(config)
+        if not validation['valid']:
+            for issue in validation['issues']:
+                print(f'[Security] Config issue: {issue}')
+        for warning in validation.get('warnings', []):
+            print(f'[Security] Config warning: {warning}')
 
     return config
 

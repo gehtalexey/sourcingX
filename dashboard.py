@@ -5645,6 +5645,10 @@ with tab_filter2:
         with col1:
             # Sheet-based filters
             st.markdown("**From Google Sheet:**")
+            use_past_candidates = st.checkbox("Exclude Past Candidates", value=True, key="f2_past_candidates",
+                                             help="Remove profiles already contacted (matched by LinkedIn URL or name)")
+            use_blacklist = st.checkbox("Exclude Blacklist Companies", value=True, key="f2_blacklist",
+                                       help="Remove profiles whose current company is on the blacklist")
             use_not_relevant = st.checkbox("Exclude Not Relevant Companies (all employers)", value=True, key="f2_not_relevant",
                                           help="Check against ALL past employers, not just current")
             target_company_mode = st.radio("Target Companies (all employers):",
@@ -5701,6 +5705,76 @@ with tab_filter2:
                 priority_matches = []
 
                 sheet_url = filter_sheets.get('url', '') if has_sheets else ''
+
+                # Past candidates filter (match by LinkedIn URL, then by name)
+                if use_past_candidates and has_sheets and filter_sheets.get('past_candidates'):
+                    past_df = load_sheet_as_df(sheet_url, filter_sheets['past_candidates'])
+                    if past_df is not None and not past_df.empty:
+                        df['_is_past'] = False
+
+                        # Normalize LinkedIn URL helper
+                        def _norm_url(url):
+                            if pd.isna(url) or not url:
+                                return ''
+                            url = str(url).lower().strip().rstrip('/')
+                            if '/in/' in url:
+                                return url.split('/in/')[-1].split('/')[0].split('?')[0]
+                            return url
+
+                        # Try LinkedIn URL matching first
+                        linkedin_col = None
+                        for c in ['LinkedIn', 'linkedin_url', 'LinkedIn URL', 'linkedinUrl', 'profile_url', 'URL']:
+                            if c in past_df.columns:
+                                linkedin_col = c
+                                break
+                        if linkedin_col and 'linkedin_url' in df.columns:
+                            past_urls = set(_norm_url(u) for u in past_df[linkedin_col].dropna())
+                            df['_norm_url'] = df['linkedin_url'].apply(_norm_url)
+                            df['_is_past'] = df['_norm_url'].isin(past_urls)
+                            df = df.drop(columns=['_norm_url'])
+
+                        # Also try name matching
+                        import re as _re
+                        def _norm_name(name):
+                            if pd.isna(name) or not name:
+                                return ''
+                            name = _re.sub(r'[^\w\s]', '', str(name).lower().strip())
+                            return ' '.join(name.split())
+
+                        name_col = None
+                        for c in ['Name', 'name', 'Full Name', 'fullName', 'Candidate Name']:
+                            if c in past_df.columns:
+                                name_col = c
+                                break
+                        if name_col:
+                            past_names = set(_norm_name(n) for n in past_df[name_col].dropna() if str(n).strip())
+                            if past_names:
+                                if 'name' in df.columns:
+                                    df['_is_past'] = df['_is_past'] | df['name'].apply(_norm_name).isin(past_names)
+                                if 'first_name' in df.columns and 'last_name' in df.columns:
+                                    full = df.apply(lambda r: _norm_name(f"{r.get('first_name', '')} {r.get('last_name', '')}"), axis=1)
+                                    df['_is_past'] = df['_is_past'] | full.isin(past_names)
+
+                        past_count = df['_is_past'].sum()
+                        removed['Past Candidates'] = past_count
+                        df = df[~df['_is_past']].drop(columns=['_is_past'])
+
+                # Blacklist companies filter (current company)
+                if use_blacklist and has_sheets and filter_sheets.get('blacklist'):
+                    bl_df = load_sheet_as_df(sheet_url, filter_sheets['blacklist'])
+                    if bl_df is not None and not bl_df.empty:
+                        blacklist_items = set()
+                        for c in bl_df.columns:
+                            blacklist_items.update(bl_df[c].dropna().str.lower().str.strip().tolist())
+                        if blacklist_items and 'current_company' in df.columns:
+                            def _is_blacklisted(company):
+                                if pd.isna(company) or not company:
+                                    return False
+                                comp = str(company).lower().strip()
+                                return any(bl in comp or comp in bl for bl in blacklist_items if bl)
+                            mask = df['current_company'].apply(_is_blacklisted)
+                            removed['Blacklist Companies'] = mask.sum()
+                            df = df[~mask]
 
                 # Not relevant companies filter (checks ALL employers)
                 if use_not_relevant and has_sheets and filter_sheets.get('not_relevant'):

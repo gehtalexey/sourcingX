@@ -543,77 +543,64 @@ def search_profiles_filtered(client: SupabaseClient, filters: dict, limit: int =
     Returns:
         List of profile dicts
     """
-    # Build AND conditions - each filter is an AND clause
-    and_clauses = []
+    # Build params - each filter passed directly (implicitly ANDed by PostgREST)
+    params = {}
 
-    def make_or_clause(column: str, terms_str: str) -> str:
-        """Build OR clause for a single filter field."""
+    def make_filter_value(terms_str: str) -> str:
+        """Build filter value with OR support for multiple terms."""
         terms = [t.strip() for t in terms_str.split(',') if t.strip()]
         if len(terms) == 1:
-            return f"{column}.ilike.*{terms[0]}*"
-        # Multiple terms: wrap in or()
-        conditions = ','.join([f"{column}.ilike.*{t}*" for t in terms])
+            return f"ilike.*{terms[0]}*"
+        # Multiple terms: use or() syntax
+        conditions = ','.join([f"ilike.*{t}*" for t in terms])
         return f"or({conditions})"
 
+    # String columns - direct ilike filter
     if filters.get('name'):
-        and_clauses.append(make_or_clause('name', filters['name']))
+        params['name'] = make_filter_value(filters['name'])
 
     if filters.get('current_title'):
-        and_clauses.append(make_or_clause('current_title', filters['current_title']))
-
-    if filters.get('past_titles'):
-        # all_titles is an array, cast to text for ilike
-        terms = [t.strip() for t in filters['past_titles'].split(',') if t.strip()]
-        if len(terms) == 1:
-            and_clauses.append(f"all_titles::text.ilike.*{terms[0]}*")
-        else:
-            conditions = ','.join([f"all_titles::text.ilike.*{t}*" for t in terms])
-            and_clauses.append(f"or({conditions})")
+        params['current_title'] = make_filter_value(filters['current_title'])
 
     if filters.get('current_company'):
-        and_clauses.append(make_or_clause('current_company', filters['current_company']))
-
-    if filters.get('past_companies'):
-        # all_employers is an array, cast to text for ilike
-        terms = [t.strip() for t in filters['past_companies'].split(',') if t.strip()]
-        if len(terms) == 1:
-            and_clauses.append(f"all_employers::text.ilike.*{terms[0]}*")
-        else:
-            conditions = ','.join([f"all_employers::text.ilike.*{t}*" for t in terms])
-            and_clauses.append(f"or({conditions})")
+        params['current_company'] = make_filter_value(filters['current_company'])
 
     if filters.get('location'):
-        and_clauses.append(make_or_clause('location', filters['location']))
+        params['location'] = make_filter_value(filters['location'])
+
+    # Array columns - use 'ov' (overlaps) for OR matching (any of the terms)
+    # Note: This requires exact term match within array, not partial match
+    if filters.get('past_titles'):
+        terms = [t.strip() for t in filters['past_titles'].split(',') if t.strip()]
+        params['all_titles'] = f"ov.{{{','.join(terms)}}}"
+
+    if filters.get('past_companies'):
+        terms = [t.strip() for t in filters['past_companies'].split(',') if t.strip()]
+        params['all_employers'] = f"ov.{{{','.join(terms)}}}"
 
     if filters.get('skills'):
         terms = [t.strip() for t in filters['skills'].split(',') if t.strip()]
-        if len(terms) == 1:
-            and_clauses.append(f"skills::text.ilike.*{terms[0]}*")
-        else:
-            conditions = ','.join([f"skills::text.ilike.*{t}*" for t in terms])
-            and_clauses.append(f"or({conditions})")
+        params['skills'] = f"ov.{{{','.join(terms)}}}"
 
     if filters.get('schools'):
         terms = [t.strip() for t in filters['schools'].split(',') if t.strip()]
-        if len(terms) == 1:
-            and_clauses.append(f"all_schools::text.ilike.*{terms[0]}*")
-        else:
-            conditions = ','.join([f"all_schools::text.ilike.*{t}*" for t in terms])
-            and_clauses.append(f"or({conditions})")
+        params['all_schools'] = f"ov.{{{','.join(terms)}}}"
 
+    # Boolean and date filters
     if filters.get('has_email'):
-        and_clauses.append('email.not.is.null')
+        params['email'] = 'not.is.null'
 
     if filters.get('date_after'):
-        and_clauses.append(f"enriched_at.gte.{filters['date_after']}")
+        params['enriched_at'] = f"gte.{filters['date_after']}"
 
     if filters.get('date_before'):
-        and_clauses.append(f"enriched_at.lte.{filters['date_before']}")
-
-    # Build params
-    params = {}
-    if and_clauses:
-        params['and'] = f"({','.join(and_clauses)})"
+        # If both date filters, we need to combine them
+        if 'enriched_at' in params:
+            # Use and() for combining date range
+            params['and'] = f"(enriched_at.gte.{filters['date_after']},enriched_at.lte.{filters['date_before']})"
+            del params['enriched_at']
+        else:
+            params['enriched_at'] = f"lte.{filters['date_before']}"
 
     # Select without raw_data for performance (large field)
     columns = 'linkedin_url,name,current_title,current_company,all_employers,all_titles,all_schools,skills,location,email,enriched_at'

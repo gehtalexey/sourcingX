@@ -6784,51 +6784,52 @@ with tab_database:
                 # --- Search Filters (server-side) ---
                 st.markdown("##### Search Filters")
 
-                # Full-text search
-                fulltext_query = st.text_input(
-                    "Full-text search",
-                    key="db_fulltext_search",
-                    placeholder="e.g., node.js kubernetes 8200 (searches ALL fields)"
-                )
+                with st.form("db_search_form"):
+                    # Full-text search
+                    fulltext_query = st.text_input(
+                        "Full-text search",
+                        key="db_fulltext_search",
+                        placeholder="e.g., node.js kubernetes 8200 (searches ALL fields)"
+                    )
 
-                # Row 1: Name, Location
-                fcol1, fcol2 = st.columns(2)
-                with fcol1:
-                    f_name = st.text_input("Name", key="db_f_name", placeholder="john doe")
-                with fcol2:
-                    f_location = st.text_input("Location", key="db_f_location", placeholder="israel, nyc")
+                    # Row 1: Name, Location
+                    fcol1, fcol2 = st.columns(2)
+                    with fcol1:
+                        f_name = st.text_input("Name", key="db_f_name", placeholder="john doe")
+                    with fcol2:
+                        f_location = st.text_input("Location", key="db_f_location", placeholder="israel, nyc")
 
-                # Row 2: Current Title, Past Titles
-                fcol3, fcol4 = st.columns(2)
-                with fcol3:
-                    f_current_title = st.text_input("Current Title", key="db_f_current_title", placeholder="backend, devops")
-                with fcol4:
-                    f_past_titles = st.text_input("Past Titles", key="db_f_past_titles", placeholder="engineer, developer")
+                    # Row 2: Current Title, Past Titles
+                    fcol3, fcol4 = st.columns(2)
+                    with fcol3:
+                        f_current_title = st.text_input("Current Title", key="db_f_current_title", placeholder="backend, devops")
+                    with fcol4:
+                        f_past_titles = st.text_input("Past Titles", key="db_f_past_titles", placeholder="engineer, developer")
 
-                # Row 3: Current Company, Past Companies
-                fcol5, fcol6 = st.columns(2)
-                with fcol5:
-                    f_current_company = st.text_input("Current Company", key="db_f_current_company", placeholder="wiz, monday")
-                with fcol6:
-                    f_past_companies = st.text_input("Past Companies", key="db_f_past_companies", placeholder="google, meta")
+                    # Row 3: Current Company, Past Companies
+                    fcol5, fcol6 = st.columns(2)
+                    with fcol5:
+                        f_current_company = st.text_input("Current Company", key="db_f_current_company", placeholder="wiz, monday")
+                    with fcol6:
+                        f_past_companies = st.text_input("Past Companies", key="db_f_past_companies", placeholder="google, meta")
 
-                # Row 4: Skills & Schools
-                fcol7, fcol8 = st.columns(2)
-                with fcol7:
-                    f_skills = st.text_input("Skills (any of)", key="db_f_skills", placeholder="python, kubernetes, react")
-                with fcol8:
-                    f_schools = st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
+                    # Row 4: Skills & Schools
+                    fcol7, fcol8 = st.columns(2)
+                    with fcol7:
+                        f_skills = st.text_input("Skills (any of)", key="db_f_skills", placeholder="python, kubernetes, react")
+                    with fcol8:
+                        f_schools = st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
 
-                # Row 5: Date range & Email & Search button
-                fcol9, fcol10, fcol11, fcol12 = st.columns([1, 1, 1, 1])
-                with fcol9:
-                    f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
-                with fcol10:
-                    f_date_before = st.date_input("Enriched Before", value=None, key="db_f_date_before")
-                with fcol11:
-                    f_has_email = st.checkbox("Has Email", key="db_f_has_email")
-                with fcol12:
-                    search_clicked = st.button("🔍 Search", key="db_search_btn", type="primary", use_container_width=True)
+                    # Row 5: Date range & Email & Search button
+                    fcol9, fcol10, fcol11, fcol12 = st.columns([1, 1, 1, 1])
+                    with fcol9:
+                        f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
+                    with fcol10:
+                        f_date_before = st.date_input("Enriched Before", value=None, key="db_f_date_before")
+                    with fcol11:
+                        f_has_email = st.checkbox("Has Email", key="db_f_has_email")
+                    with fcol12:
+                        search_clicked = st.form_submit_button("🔍 Search", type="primary", use_container_width=True)
 
                 # Build filters dict
                 current_filters = {
@@ -6885,59 +6886,29 @@ with tab_database:
                         combined = (df['first_name'].fillna('') + ' ' + df['last_name'].fillna('')).str.strip()
                         df['name'] = df['name'].fillna('').replace('', pd.NA).fillna(combined)
 
-                    # Apply column filters CLIENT-SIDE (after full-text search)
-                    filtered_df = df.copy()
-                    af = st.session_state.get('db_applied_filters', {})
+                    # Use server-filtered results directly
+                    filtered_df = df
 
-                    # Helper for OR matching
-                    def matches_any(text, terms_str):
-                        if pd.isna(text) or not text or not terms_str:
-                            return False
-                        text_lower = str(text).lower()
-                        terms = [t.strip().lower() for t in terms_str.split(',') if t.strip()]
-                        return any(term in text_lower for term in terms)
-
-                    if af.get('name'):
-                        filtered_df = filtered_df[filtered_df['name'].apply(lambda x: matches_any(x, af['name']))]
-
-                    if af.get('current_title') and 'current_title' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['current_title'].apply(lambda x: matches_any(x, af['current_title']))]
-
-                    if af.get('past_titles') and 'all_titles' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['all_titles'].astype(str).apply(lambda x: matches_any(x, af['past_titles']))]
-
-                    if af.get('current_company') and 'current_company' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['current_company'].apply(lambda x: matches_any(x, af['current_company']))]
-
-                    if af.get('past_companies') and 'all_employers' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['all_employers'].astype(str).apply(lambda x: matches_any(x, af['past_companies']))]
-
-                    if af.get('location') and 'location' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['location'].apply(lambda x: matches_any(x, af['location']))]
-
-                    if af.get('skills') and 'skills' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['skills'].astype(str).apply(lambda x: matches_any(x, af['skills']))]
-
-                    if af.get('schools') and 'all_schools' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['all_schools'].astype(str).apply(lambda x: matches_any(x, af['schools']))]
-
-                    if af.get('has_email') and 'email' in filtered_df.columns:
-                        filtered_df = filtered_df[filtered_df['email'].notna() & (filtered_df['email'] != '')]
+                    # Display limit to prevent browser freeze
+                    DISPLAY_LIMIT = 500
 
                     # Results
-                    if len(filtered_df) < len(df):
-                        st.info(f"Found **{len(filtered_df)}** profiles (filtered from {len(df)} full-text matches)")
+                    if len(filtered_df) > DISPLAY_LIMIT:
+                        st.info(f"Found **{len(filtered_df)}** profiles (showing first {DISPLAY_LIMIT})")
                     else:
                         st.info(f"Found **{len(filtered_df)}** profiles")
 
                     # Toggle to show all columns
                     show_all_db_cols = st.checkbox("Show all columns", value=False, key="db_show_all_cols")
 
+                    # Limit display to prevent browser freeze (full data still available for actions)
+                    display_df = filtered_df.head(DISPLAY_LIMIT)
+
                     if show_all_db_cols:
                         all_cols = ['name', 'current_title', 'current_company', 'all_employers', 'all_titles', 'all_schools', 'skills', 'past_positions', 'headline', 'location', 'summary', 'connections_count', 'email', 'enriched_at', 'linkedin_url']
-                        available_cols = [c for c in all_cols if c in filtered_df.columns]
+                        available_cols = [c for c in all_cols if c in display_df.columns]
                         st.dataframe(
-                            filtered_df[available_cols] if available_cols else filtered_df,
+                            display_df[available_cols] if available_cols else display_df,
                             use_container_width=True,
                             hide_index=True,
                             column_config={
@@ -6948,10 +6919,10 @@ with tab_database:
                         st.caption(f"{len(available_cols)} columns")
                     else:
                         preview_cols = ['name', 'current_title', 'current_company', 'location', 'linkedin_url']
-                        available_cols = [c for c in preview_cols if c in filtered_df.columns]
+                        available_cols = [c for c in preview_cols if c in display_df.columns]
 
                         st.dataframe(
-                            filtered_df[available_cols] if available_cols else filtered_df,
+                            display_df[available_cols] if available_cols else display_df,
                             use_container_width=True,
                             hide_index=True,
                             column_config={

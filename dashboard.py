@@ -3043,6 +3043,13 @@ def compute_role_durations(raw):
     lines = ['ROLE DURATIONS (pre-calculated, use these numbers):']
     has_roles = False
 
+    def _fmt_duration(months):
+        """Format months as 'Xy Ym' (or just 'Xm' if under a year)."""
+        y, m = divmod(months, 12)
+        if y == 0:
+            return f"{m}m"
+        return f"{y}y {m}m"
+
     # Track company-level data for stability summary
     companies = {}  # company_name -> {min_start, max_end, is_current, roles}
 
@@ -3059,11 +3066,12 @@ def compute_role_durations(raw):
             months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if start else 0
             start_str = start.strftime('%b %Y') if start else '?'
             end_str = 'today' if is_current else end.strftime('%b %Y') if end else '?'
+            dur = _fmt_duration(months)
 
             if is_current:
-                lines.append(f"  >>> {title} at {company}: {start_str} - {end_str} = {months} months <<< CURRENT ROLE")
+                lines.append(f"  >>> {title} at {company}: {start_str} - {end_str} = {dur} <<< CURRENT ROLE")
             else:
-                lines.append(f"  {title} at {company}: {start_str} - {end_str} = {months} months")
+                lines.append(f"  {title} at {company}: {start_str} - {end_str} = {dur}")
 
             # Group by company
             if company not in companies:
@@ -3091,14 +3099,14 @@ def compute_role_durations(raw):
             current_company_name = comp_name
             current_company_months = total_months
         elif total_months < 12:
-            short_companies.append(f"{comp_name} ({total_months}mo)")
+            short_companies.append(f"{comp_name} ({_fmt_duration(total_months)})")
 
     lines.append('')
     lines.append('STABILITY SUMMARY (pre-calculated by company, use these numbers):')
     lines.append(f'  Short-stint companies (<12 months, excluding current): {len(short_companies)}' +
                  (f' — {", ".join(short_companies)}' if short_companies else ''))
     if current_company_name:
-        lines.append(f'  Current company: {current_company_name} = {current_company_months} months')
+        lines.append(f'  Current company: {current_company_name} = {_fmt_duration(current_company_months)}')
     else:
         lines.append('  Current company: none found')
 
@@ -3106,7 +3114,7 @@ def compute_role_durations(raw):
     if len(short_companies) >= 3:
         lines.append(f'>>> STABILITY VERDICT: FAIL — {len(short_companies)} short-stint companies >= 3 → MAX SCORE 4 <<<')
     elif current_company_months is not None and current_company_months < 6:
-        lines.append(f'>>> STABILITY VERDICT: FAIL — current role {current_company_months} months < 6 months → MAX SCORE 5 <<<')
+        lines.append(f'>>> STABILITY VERDICT: FAIL — current role {_fmt_duration(current_company_months)} < 6 months → MAX SCORE 5 <<<')
     else:
         lines.append('>>> STABILITY VERDICT: PASS <<<')
 

@@ -7274,7 +7274,8 @@ with tab_database:
 
                                 # Fetch profiles WITH raw_data (needed for screening)
                                 from db import get_profiles_by_urls
-                                profiles_with_raw = get_profiles_by_urls(db_client, urls, include_raw_data=True)
+                                with st.spinner(f"Loading {len(urls)} profiles with raw data..."):
+                                    profiles_with_raw = get_profiles_by_urls(db_client, urls, include_raw_data=True)
 
                                 if profiles_with_raw:
                                     # Convert to DataFrame for Filter+ tab
@@ -7290,9 +7291,13 @@ with tab_database:
                                     st.session_state.pop('passed_candidates_df', None)
                                     st.session_state.pop('screening_results', None)
 
-                                    st.success(f"Loaded {len(result_df)} profiles. Go to **Filter+** tab to continue.")
+                                    st.session_state['db_send_success'] = len(result_df)
+                                    st.rerun()
                                 else:
                                     st.warning("Could not load profiles with raw data")
+                            # Show success message after rerun
+                            if st.session_state.pop('db_send_success', None):
+                                st.success(f"Loaded {st.session_state.get('enriched_df', pd.DataFrame()).shape[0]} profiles. Go to **Filter+** tab to continue.")
                 else:
                     st.info("No profiles in database yet")
 

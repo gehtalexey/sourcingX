@@ -5647,12 +5647,8 @@ with tab_filter2:
             st.markdown("**From Google Sheet:**")
             use_past_candidates = st.checkbox("Exclude Past Candidates", value=True, key="f2_past_candidates",
                                              help="Remove profiles already contacted (matched by full name)")
-            use_blacklist = st.checkbox("Exclude Blacklist Companies", value=True, key="f2_blacklist",
-                                       help="Remove profiles at blacklisted companies")
-            if use_blacklist:
-                blacklist_scope = st.radio("Blacklist scope:", ["Current company", "All employers"],
-                                          key="f2_blacklist_scope", horizontal=True,
-                                          help="Current = only current job | All = check entire work history")
+            use_blacklist = st.checkbox("Exclude Blacklist Companies (current)", value=True, key="f2_blacklist",
+                                       help="Remove profiles whose current company is on the blacklist")
             use_not_relevant = st.checkbox("Exclude Not Relevant Companies (all employers)", value=True, key="f2_not_relevant",
                                           help="Check against ALL past employers, not just current")
             target_company_mode = st.radio("Target Companies (all employers):",
@@ -5746,38 +5742,15 @@ with tab_filter2:
                         blacklist_items = set()
                         for c in bl_df.columns:
                             blacklist_items.update(bl_df[c].dropna().str.lower().str.strip().tolist())
-                        if blacklist_items:
-                            def _matches_blacklist(value):
-                                if pd.isna(value) or not value:
+                        if blacklist_items and 'current_company' in df.columns:
+                            def _matches_blacklist(company):
+                                if pd.isna(company) or not company:
                                     return False
-                                comp = str(value).lower().strip()
+                                comp = str(company).lower().strip()
                                 return any(bl in comp or comp in bl for bl in blacklist_items if bl)
-
-                            if blacklist_scope == "All employers" and 'all_employers' in df.columns:
-                                # Check entire work history
-                                def _any_employer_blacklisted(employers_data):
-                                    if employers_data is None:
-                                        return False
-                                    try:
-                                        if pd.isna(employers_data):
-                                            return False
-                                    except (ValueError, TypeError):
-                                        pass
-                                    if not employers_data:
-                                        return False
-                                    if isinstance(employers_data, (list, tuple)):
-                                        employers = [str(e).strip() for e in employers_data if e]
-                                    else:
-                                        employers = [e.strip() for e in str(employers_data).split(',')]
-                                    return any(_matches_blacklist(emp) for emp in employers)
-                                mask = df['all_employers'].apply(_any_employer_blacklisted)
-                                removed['Blacklist Companies (all employers)'] = mask.sum()
-                                df = df[~mask]
-                            elif 'current_company' in df.columns:
-                                # Current company only
-                                mask = df['current_company'].apply(_matches_blacklist)
-                                removed['Blacklist Companies'] = mask.sum()
-                                df = df[~mask]
+                            mask = df['current_company'].apply(_matches_blacklist)
+                            removed['Blacklist Companies'] = mask.sum()
+                            df = df[~mask]
 
                 # Not relevant companies filter (checks ALL employers)
                 if use_not_relevant and has_sheets and filter_sheets.get('not_relevant'):

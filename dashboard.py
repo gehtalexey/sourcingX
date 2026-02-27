@@ -4411,19 +4411,7 @@ with tab_filter:
             st.error("Google credentials not configured. Cannot connect to Google Sheets.")
 
         if has_sheets:
-            # Try to fetch and display sheet name
-            try:
-                spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
-                sheet_name = spreadsheet.title
-                if user_sheet_url:
-                    st.success(f"📊 **{sheet_name}** (your personal filter sheet)")
-                else:
-                    st.success(f"📊 **{sheet_name}** (default filter sheet)")
-            except Exception:
-                if user_sheet_url:
-                    st.success("Using your personal filter sheet")
-                else:
-                    st.success("Using default filter sheet")
+            st.success("Filter sheet configured")
 
             # Validate sheet connection
             if st.button("Verify Sheet Connection", key="verify_sheet"):
@@ -4431,7 +4419,7 @@ with tab_filter:
                     try:
                         spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
                         tabs = [ws.title for ws in spreadsheet.worksheets()]
-                        st.success(f"Connected! Found {len(tabs)} tabs")
+                        st.success(f"Connected to **{spreadsheet.title}**! Found {len(tabs)} tabs")
                         expected_tabs = ['Past Candidates', 'Blacklist', 'NotRelevant Companies', 'Target Companies', 'Universities', 'Tech Alerts']
                         missing = [t for t in expected_tabs if t not in tabs]
                         if missing:
@@ -5138,42 +5126,38 @@ with tab_enrich:
             # Toggle to show all columns
             show_all_cols = st.checkbox("Show all columns", value=False, key="enrich_show_all_cols")
 
-            # Data is already normalized by flatten_for_csv with consistent column names:
-            # name, first_name, last_name, current_company, current_title, linkedin_url, etc.
-            display_df = enriched_df.copy()
-
             # Debug: show available columns
             with st.expander("Debug: Available columns", expanded=False):
-                st.write(f"Columns in enriched data: {list(display_df.columns)}")
+                st.write(f"Columns in enriched data: {list(enriched_df.columns)}")
                 # Show sample values for key columns
-                if len(display_df) > 0:
+                if len(enriched_df) > 0:
                     st.write("Sample row:")
-                    sample = display_df.iloc[0]
+                    sample = enriched_df.iloc[0]
                     for col in ['name', 'current_company', 'current_title', 'linkedin_url']:
-                        if col in display_df.columns:
+                        if col in enriched_df.columns:
                             st.write(f"  {col}: {sample.get(col, 'N/A')}")
 
             if show_all_cols:
                 # Show all Crustdata columns
                 all_cols = ['name', 'current_title', 'current_company', 'all_employers', 'all_titles', 'all_schools', 'skills', 'past_positions', 'headline', 'location', 'summary', 'connections_count', 'linkedin_url']
-                available_cols = [c for c in all_cols if c in display_df.columns]
+                available_cols = [c for c in all_cols if c in enriched_df.columns]
                 st.dataframe(
-                    display_df[available_cols].head(20) if available_cols else display_df.head(20),
+                    enriched_df[available_cols].head(20) if available_cols else enriched_df.head(20),
                     use_container_width=True,
                     hide_index=True,
                     column_config={
                         "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                     }
                 )
-                st.caption(f"Showing {min(20, len(display_df))} of {len(display_df)} profiles | {len(available_cols)} columns")
+                st.caption(f"Showing {min(20, len(enriched_df))} of {len(enriched_df)} profiles | {len(available_cols)} columns")
             else:
                 # Simple preview: name, title, company, linkedin
                 preview_cols = ['name', 'current_title', 'current_company', 'linkedin_url']
-                available_cols = [c for c in preview_cols if c in display_df.columns]
+                available_cols = [c for c in preview_cols if c in enriched_df.columns]
 
                 if available_cols:
                     st.dataframe(
-                        display_df[available_cols].head(20),
+                        enriched_df[available_cols].head(20),
                         use_container_width=True,
                         hide_index=True,
                         column_config={
@@ -5184,14 +5168,6 @@ with tab_enrich:
                     )
                 else:
                     st.warning("No data columns available. Check Debug expander for column names.")
-
-            # Download full enriched data
-            st.download_button(
-                "Download Enriched Data (CSV)",
-                enriched_df.to_csv(index=False),
-                "enriched_profiles.csv",
-                "text/csv"
-            )
 
         if results_df is not None and not results_df.empty:
             urls = extract_urls_from_phantombuster(results_df)
@@ -5659,16 +5635,7 @@ with tab_filter2:
         has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
 
         if has_sheets:
-            # Try to show sheet name and available tabs
-            try:
-                spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
-                tabs = [ws.title for ws in spreadsheet.worksheets()]
-                st.success(f"📊 **{spreadsheet.title}** connected")
-                with st.expander("Sheet tabs", expanded=False):
-                    st.write(f"Available tabs: {', '.join(tabs)}")
-                    st.caption("Expected tabs: Past Candidates, Blacklist, NotRelevant Companies, Universities")
-            except Exception:
-                st.success("Filter sheet connected")
+            st.success("Filter sheet configured")
 
         st.divider()
         st.markdown("**Filter Options:**")
@@ -7026,40 +6993,35 @@ with tab_database:
         try:
             db_client = _get_db_client()
             if not db_client:
-                st.warning("Supabase not configured. Add 'supabase_url' and 'supabase_key' to secrets.")
-            elif not check_connection(db_client):
-                st.error("Cannot connect to Supabase. Check your credentials.")
+                st.warning("Supabase not configured or cannot connect. Check your credentials.")
             else:
-                # Connection successful - show stats
+                # Connection successful (_get_db_client already verified connection)
                 st.success("Connected to Supabase")
 
-                # Pipeline stats - count directly from profiles table
-                stats = {}
-                try:
-                    total = db_client.count('profiles')
-                    enriched = db_client.count('profiles', {'enriched_at': 'not.is.null'})
-                    screened = db_client.count('profiles', {'screening_score': 'not.is.null'})
-                    stats = {'total': total, 'enriched': enriched, 'screened': screened, 'scraped': total, 'contacted': 0, 'stale_profiles': 0}
-                except Exception as e:
-                    st.warning(f"Could not load stats: {e}")
-                if stats:
-                    st.markdown("#### Pipeline Overview")
-                    stat_cols = st.columns(6)
-                    stat_cols[0].metric("Total", stats.get('total', 0))
-                    stat_cols[1].metric("Scraped", stats.get('scraped', 0))
-                    stat_cols[2].metric("Enriched", stats.get('enriched', 0))
-                    stat_cols[3].metric("Screened", stats.get('screened', 0))
-                    stat_cols[4].metric("Contacted", stats.get('contacted', 0))
-                    stat_cols[5].metric("Stale (>6mo)", stats.get('stale_profiles', 0))
+                # Pipeline stats - only load on demand
+                with st.expander("Pipeline Overview", expanded=False):
+                    if st.button("Load Stats", key="db_load_stats"):
+                        try:
+                            total = db_client.count('profiles')
+                            enriched = db_client.count('profiles', {'enriched_at': 'not.is.null'})
+                            screened = db_client.count('profiles', {'screening_score': 'not.is.null'})
+                            st.session_state['db_pipeline_stats'] = {'total': total, 'enriched': enriched, 'screened': screened, 'scraped': total, 'contacted': 0, 'stale_profiles': 0}
+                        except Exception as e:
+                            st.warning(f"Could not load stats: {e}")
+                    stats = st.session_state.get('db_pipeline_stats', {})
+                    if stats:
+                        stat_cols = st.columns(6)
+                        stat_cols[0].metric("Total", stats.get('total', 0))
+                        stat_cols[1].metric("Scraped", stats.get('scraped', 0))
+                        stat_cols[2].metric("Enriched", stats.get('enriched', 0))
+                        stat_cols[3].metric("Screened", stats.get('screened', 0))
+                        stat_cols[4].metric("Contacted", stats.get('contacted', 0))
+                        stat_cols[5].metric("Stale (>6mo)", stats.get('stale_profiles', 0))
 
                 st.divider()
 
                 # Browse & filter profiles
                 st.markdown("#### Browse Profiles")
-
-                # Show total profiles in DB
-                total_in_db = db_client.count('profiles')
-                st.caption(f"Total profiles in database: **{total_in_db:,}**")
 
                 # --- Search Filters (server-side) ---
                 st.markdown("##### Search Filters")
@@ -7390,233 +7352,245 @@ with tab_usage:
         try:
             db_client = _get_db_client()
             if not db_client:
-                st.warning("Supabase not configured. Add 'supabase_url' and 'supabase_key' to secrets.")
-            elif not check_connection(db_client):
-                st.error("Cannot connect to Supabase. Check your credentials.")
+                st.warning("Supabase not configured or cannot connect. Check your credentials.")
             else:
                 # Date range selector
-                date_range = st.selectbox(
-                    "Date Range",
-                    ["Today", "7 Days", "30 Days", "All Time"],
-                    index=1,
-                    key="usage_date_range"
-                )
+                ucol1, ucol2 = st.columns([2, 1])
+                with ucol1:
+                    date_range = st.selectbox(
+                        "Date Range",
+                        ["Today", "7 Days", "30 Days", "All Time"],
+                        index=1,
+                        key="usage_date_range"
+                    )
+                with ucol2:
+                    load_usage = st.button("Load Usage Data", type="primary", key="load_usage_btn")
 
                 # Map selection to days
                 days_map = {"Today": 1, "7 Days": 7, "30 Days": 30, "All Time": None}
                 selected_days = days_map[date_range]
 
-                # Fetch usage summary
-                summary = get_usage_summary(db_client, days=selected_days)
+                # Fetch usage summary only when requested
+                if load_usage:
+                    st.session_state['usage_summary'] = get_usage_summary(db_client, days=selected_days)
+                    st.session_state['usage_selected_days'] = selected_days
+                summary = st.session_state.get('usage_summary', {})
 
-                # Display metrics in columns
-                st.markdown("#### Provider Summary")
-                metric_cols = st.columns(4)
-
-                with metric_cols[0]:
-                    crustdata = summary.get('crustdata', {})
-                    crust_cost = crustdata.get('cost_usd', 0)
-                    st.metric(
-                        "Crustdata",
-                        f"${crust_cost:.2f}",
-                        help="$1,500 for 150K credits (3 credits/profile, $0.03/profile)"
-                    )
-                    st.caption(f"{int(crustdata.get('credits', 0)):,} credits | {crustdata.get('requests', 0)} requests")
-
-                with metric_cols[1]:
-                    salesql = summary.get('salesql', {})
-                    st.metric(
-                        "SalesQL",
-                        f"{int(salesql.get('lookups', 0)):,} lookups",
-                        help="5,000/day limit"
-                    )
-                    st.caption(f"{salesql.get('requests', 0)} requests")
-
-                with metric_cols[2]:
-                    openai = summary.get('openai', {})
-                    cost = openai.get('cost_usd', 0)
-                    st.metric(
-                        "OpenAI",
-                        f"${cost:.4f}",
-                        help="gpt-4o-mini: $0.15/1M input, $0.60/1M output"
-                    )
-                    tokens_in = openai.get('tokens_input', 0)
-                    tokens_out = openai.get('tokens_output', 0)
-                    st.caption(f"{tokens_in:,} in / {tokens_out:,} out tokens")
-
-                with metric_cols[3]:
-                    phantombuster = summary.get('phantombuster', {})
-                    st.metric(
-                        "PhantomBuster",
-                        f"{phantombuster.get('runs', 0)} runs",
-                        help="Scraping operations"
-                    )
-                    st.caption(f"{phantombuster.get('profiles_scraped', 0):,} profiles scraped")
-
-                st.divider()
-
-                # Charts section
-                if HAS_PLOTLY and selected_days:
-                    st.markdown("#### Usage Over Time")
-
-                    # Fetch daily usage data
-                    daily_data = get_usage_by_date(db_client, days=selected_days or 365)
-
-                    if daily_data:
-                        df_daily = pd.DataFrame(daily_data)
-
-                        # Line chart for usage over time
-                        fig_line = go.Figure()
-
-                        fig_line.add_trace(go.Scatter(
-                            x=df_daily['date'],
-                            y=df_daily['crustdata'],
-                            mode='lines+markers',
-                            name='Crustdata (credits)',
-                            line=dict(color='#615fff')
-                        ))
-
-                        fig_line.add_trace(go.Scatter(
-                            x=df_daily['date'],
-                            y=df_daily['salesql'],
-                            mode='lines+markers',
-                            name='SalesQL (lookups)',
-                            line=dict(color='#38bdf8')
-                        ))
-
-                        fig_line.add_trace(go.Scatter(
-                            x=df_daily['date'],
-                            y=df_daily['phantombuster'],
-                            mode='lines+markers',
-                            name='PhantomBuster (runs)',
-                            line=dict(color='#a78bfa')
-                        ))
-
-                        fig_line.update_layout(
-                            title='API Usage by Day',
-                            xaxis_title='Date',
-                            yaxis_title='Count',
-                            hovermode='x unified',
-                            legend=dict(orientation='h', yanchor='bottom', y=1.02),
-                            height=350,
-                            paper_bgcolor='rgba(0,0,0,0)',
-                            plot_bgcolor='rgba(0,0,0,0)',
-                            font=dict(color='#e2e8f0'),
-                        )
-
-                        st.plotly_chart(fig_line, use_container_width=True)
-
-                        # Cost chart (OpenAI)
-                        if df_daily['openai'].sum() > 0:
-                            fig_cost = px.area(
-                                df_daily,
-                                x='date',
-                                y='openai',
-                                title='OpenAI Cost by Day ($)',
-                                labels={'openai': 'Cost (USD)', 'date': 'Date'}
-                            )
-                            fig_cost.update_traces(fill='tozeroy', line_color='#34d399')
-                            fig_cost.update_layout(height=250, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#e2e8f0'))
-                            st.plotly_chart(fig_cost, use_container_width=True)
-
-                    else:
-                        st.info("No usage data available for the selected period")
-
-                    # Pie chart for cost breakdown
-                    st.markdown("#### Cost Breakdown")
-                    cost_data = {
-                        'Provider': ['Crustdata', 'OpenAI'],
-                        'Cost': [
-                            summary.get('crustdata', {}).get('cost_usd', 0),
-                            summary.get('openai', {}).get('cost_usd', 0),
-                        ]
-                    }
-
-                    if sum(cost_data['Cost']) > 0:
-                        fig_pie = px.pie(
-                            pd.DataFrame(cost_data),
-                            values='Cost',
-                            names='Provider',
-                            title='Cost Distribution (USD)',
-                            color_discrete_sequence=['#34d399', '#615fff', '#38bdf8', '#a78bfa']
-                        )
-                        fig_pie.update_layout(height=300, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#e2e8f0'))
-                        st.plotly_chart(fig_pie, use_container_width=True)
-                    else:
-                        st.info("No cost data to display")
-
-                elif not HAS_PLOTLY:
-                    st.info("Install plotly for charts: `pip install plotly>=5.18.0`")
-
-                st.divider()
-
-                # Detailed logs table
-                st.markdown("#### Detailed Logs")
-
-                # Filter options
-                log_cols = st.columns([2, 2, 1])
-                with log_cols[0]:
-                    provider_filter = st.selectbox(
-                        "Provider",
-                        ["All", "crustdata", "salesql", "openai", "phantombuster"],
-                        key="usage_provider_filter"
-                    )
-                with log_cols[1]:
-                    log_limit = st.selectbox(
-                        "Show",
-                        [25, 50, 100, 200],
-                        index=1,
-                        key="usage_log_limit"
-                    )
-                with log_cols[2]:
-                    if st.button("Refresh", key="usage_refresh"):
-                        st.rerun()
-
-                # Fetch logs
-                logs = get_usage_logs(
-                    db_client,
-                    provider=provider_filter if provider_filter != "All" else None,
-                    days=selected_days,
-                    limit=log_limit
-                )
-
-                if logs:
-                    # Convert to DataFrame for display
-                    logs_df = pd.DataFrame(logs)
-
-                    # Select and rename columns for display
-                    display_cols = ['created_at', 'provider', 'operation', 'request_count',
-                                    'credits_used', 'tokens_input', 'tokens_output', 'cost_usd',
-                                    'status', 'response_time_ms']
-                    available_cols = [c for c in display_cols if c in logs_df.columns]
-
-                    st.dataframe(
-                        logs_df[available_cols],
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "created_at": st.column_config.DatetimeColumn("Time", format="YYYY-MM-DD HH:mm"),
-                            "provider": st.column_config.TextColumn("Provider"),
-                            "operation": st.column_config.TextColumn("Operation"),
-                            "request_count": st.column_config.NumberColumn("Requests", format="%d"),
-                            "credits_used": st.column_config.NumberColumn("Credits", format="%.1f"),
-                            "tokens_input": st.column_config.NumberColumn("Tokens In", format="%d"),
-                            "tokens_output": st.column_config.NumberColumn("Tokens Out", format="%d"),
-                            "cost_usd": st.column_config.NumberColumn("Cost ($)", format="%.6f"),
-                            "status": st.column_config.TextColumn("Status"),
-                            "response_time_ms": st.column_config.NumberColumn("Time (ms)", format="%d"),
-                        }
-                    )
-
-                    # Export option
-                    st.download_button(
-                        "Download Logs (CSV)",
-                        logs_df.to_csv(index=False),
-                        f"api_usage_logs_{date_range.lower().replace(' ', '_')}.csv",
-                        "text/csv"
-                    )
+                if not summary:
+                    st.info("Click **Load Usage Data** to view API consumption metrics.")
                 else:
-                    st.info("No usage logs found for the selected filters")
+                    # Display metrics in columns
+                    st.markdown("#### Provider Summary")
+                    metric_cols = st.columns(4)
+
+                    with metric_cols[0]:
+                        crustdata = summary.get('crustdata', {})
+                        crust_cost = crustdata.get('cost_usd', 0)
+                        st.metric(
+                            "Crustdata",
+                            f"${crust_cost:.2f}",
+                            help="$1,500 for 150K credits (3 credits/profile, $0.03/profile)"
+                        )
+                        st.caption(f"{int(crustdata.get('credits', 0)):,} credits | {crustdata.get('requests', 0)} requests")
+
+                    with metric_cols[1]:
+                        salesql = summary.get('salesql', {})
+                        st.metric(
+                            "SalesQL",
+                            f"{int(salesql.get('lookups', 0)):,} lookups",
+                            help="5,000/day limit"
+                        )
+                        st.caption(f"{salesql.get('requests', 0)} requests")
+
+                    with metric_cols[2]:
+                        openai = summary.get('openai', {})
+                        cost = openai.get('cost_usd', 0)
+                        st.metric(
+                            "OpenAI",
+                            f"${cost:.4f}",
+                            help="gpt-4o-mini: $0.15/1M input, $0.60/1M output"
+                        )
+                        tokens_in = openai.get('tokens_input', 0)
+                        tokens_out = openai.get('tokens_output', 0)
+                        st.caption(f"{tokens_in:,} in / {tokens_out:,} out tokens")
+
+                    with metric_cols[3]:
+                        phantombuster = summary.get('phantombuster', {})
+                        st.metric(
+                            "PhantomBuster",
+                            f"{phantombuster.get('runs', 0)} runs",
+                            help="Scraping operations"
+                        )
+                        st.caption(f"{phantombuster.get('profiles_scraped', 0):,} profiles scraped")
+
+                    st.divider()
+
+                    # Charts section
+                    usage_days = st.session_state.get('usage_selected_days')
+                    if HAS_PLOTLY and usage_days:
+                        st.markdown("#### Usage Over Time")
+
+                        # Fetch daily usage data (only when Load was clicked — stored in session)
+                        if load_usage:
+                            st.session_state['usage_daily_data'] = get_usage_by_date(db_client, days=usage_days or 365)
+                        daily_data = st.session_state.get('usage_daily_data')
+
+                        if daily_data:
+                            df_daily = pd.DataFrame(daily_data)
+
+                            # Line chart for usage over time
+                            fig_line = go.Figure()
+
+                            fig_line.add_trace(go.Scatter(
+                                x=df_daily['date'],
+                                y=df_daily['crustdata'],
+                                mode='lines+markers',
+                                name='Crustdata (credits)',
+                                line=dict(color='#615fff')
+                            ))
+
+                            fig_line.add_trace(go.Scatter(
+                                x=df_daily['date'],
+                                y=df_daily['salesql'],
+                                mode='lines+markers',
+                                name='SalesQL (lookups)',
+                                line=dict(color='#38bdf8')
+                            ))
+
+                            fig_line.add_trace(go.Scatter(
+                                x=df_daily['date'],
+                                y=df_daily['phantombuster'],
+                                mode='lines+markers',
+                                name='PhantomBuster (runs)',
+                                line=dict(color='#a78bfa')
+                            ))
+
+                            fig_line.update_layout(
+                                title='API Usage by Day',
+                                xaxis_title='Date',
+                                yaxis_title='Count',
+                                hovermode='x unified',
+                                legend=dict(orientation='h', yanchor='bottom', y=1.02),
+                                height=350,
+                                paper_bgcolor='rgba(0,0,0,0)',
+                                plot_bgcolor='rgba(0,0,0,0)',
+                                font=dict(color='#e2e8f0'),
+                            )
+
+                            st.plotly_chart(fig_line, use_container_width=True)
+
+                            # Cost chart (OpenAI)
+                            if df_daily['openai'].sum() > 0:
+                                fig_cost = px.area(
+                                    df_daily,
+                                    x='date',
+                                    y='openai',
+                                    title='OpenAI Cost by Day ($)',
+                                    labels={'openai': 'Cost (USD)', 'date': 'Date'}
+                                )
+                                fig_cost.update_traces(fill='tozeroy', line_color='#34d399')
+                                fig_cost.update_layout(height=250, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#e2e8f0'))
+                                st.plotly_chart(fig_cost, use_container_width=True)
+
+                        else:
+                            st.info("No usage data available for the selected period")
+
+                        # Pie chart for cost breakdown
+                        st.markdown("#### Cost Breakdown")
+                        cost_data = {
+                            'Provider': ['Crustdata', 'OpenAI'],
+                            'Cost': [
+                                summary.get('crustdata', {}).get('cost_usd', 0),
+                                summary.get('openai', {}).get('cost_usd', 0),
+                            ]
+                        }
+
+                        if sum(cost_data['Cost']) > 0:
+                            fig_pie = px.pie(
+                                pd.DataFrame(cost_data),
+                                values='Cost',
+                                names='Provider',
+                                title='Cost Distribution (USD)',
+                                color_discrete_sequence=['#34d399', '#615fff', '#38bdf8', '#a78bfa']
+                            )
+                            fig_pie.update_layout(height=300, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#e2e8f0'))
+                            st.plotly_chart(fig_pie, use_container_width=True)
+                        else:
+                            st.info("No cost data to display")
+
+                    elif not HAS_PLOTLY:
+                        st.info("Install plotly for charts: `pip install plotly>=5.18.0`")
+
+                    st.divider()
+
+                    # Detailed logs table
+                    st.markdown("#### Detailed Logs")
+
+                    # Filter options
+                    log_cols = st.columns([2, 2, 1])
+                    with log_cols[0]:
+                        provider_filter = st.selectbox(
+                            "Provider",
+                            ["All", "crustdata", "salesql", "openai", "phantombuster"],
+                            key="usage_provider_filter"
+                        )
+                    with log_cols[1]:
+                        log_limit = st.selectbox(
+                            "Show",
+                            [25, 50, 100, 200],
+                            index=1,
+                            key="usage_log_limit"
+                        )
+                    with log_cols[2]:
+                        load_logs = st.button("Load Logs", key="usage_load_logs")
+
+                    if load_logs:
+                        st.session_state['usage_logs'] = get_usage_logs(
+                            db_client,
+                            provider=provider_filter if provider_filter != "All" else None,
+                            days=selected_days,
+                            limit=log_limit
+                        )
+
+                    logs = st.session_state.get('usage_logs')
+
+                    if logs:
+                        # Convert to DataFrame for display
+                        logs_df = pd.DataFrame(logs)
+
+                        # Select and rename columns for display
+                        display_cols = ['created_at', 'provider', 'operation', 'request_count',
+                                        'credits_used', 'tokens_input', 'tokens_output', 'cost_usd',
+                                        'status', 'response_time_ms']
+                        available_cols = [c for c in display_cols if c in logs_df.columns]
+
+                        st.dataframe(
+                            logs_df[available_cols],
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "created_at": st.column_config.DatetimeColumn("Time", format="YYYY-MM-DD HH:mm"),
+                                "provider": st.column_config.TextColumn("Provider"),
+                                "operation": st.column_config.TextColumn("Operation"),
+                                "request_count": st.column_config.NumberColumn("Requests", format="%d"),
+                                "credits_used": st.column_config.NumberColumn("Credits", format="%.1f"),
+                                "tokens_input": st.column_config.NumberColumn("Tokens In", format="%d"),
+                                "tokens_output": st.column_config.NumberColumn("Tokens Out", format="%d"),
+                                "cost_usd": st.column_config.NumberColumn("Cost ($)", format="%.6f"),
+                                "status": st.column_config.TextColumn("Status"),
+                                "response_time_ms": st.column_config.NumberColumn("Time (ms)", format="%d"),
+                            }
+                        )
+
+                        # Export option
+                        st.download_button(
+                            "Download Logs (CSV)",
+                            logs_df.to_csv(index=False),
+                            f"api_usage_logs_{date_range.lower().replace(' ', '_')}.csv",
+                            "text/csv"
+                        )
+                    elif load_logs:
+                        st.info("No usage logs found for the selected filters")
 
         except Exception as e:
             st.error(f"Usage dashboard error: {e}")

@@ -1,5 +1,10 @@
 # SourcingX — AI-Powered Recruiting Automation
 
+## Workflow Rules
+
+- **Desktop (Claude Code CLI):** Always ask before making changes on `master` branch. Offer to create a feature branch first.
+- **Mobile (Claude app):** Branches are created automatically - safe by default.
+
 ## Project Overview
 
 SourcingX is a Streamlit-based recruiting automation platform that screens LinkedIn profiles against job descriptions using AI. It integrates with Crustdata (profile enrichment), PhantomBuster (LinkedIn scraping), SalesQL (email lookup), and OpenAI (AI screening).

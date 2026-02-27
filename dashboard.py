@@ -11,8 +11,9 @@ import re
 import requests
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from openai import OpenAI
+import anthropic
 import gspread
 from google.oauth2.service_account import Credentials
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -280,6 +281,17 @@ def load_api_key():
 def load_openai_key():
     config = load_config()
     return config.get('openai_api_key')
+
+def load_anthropic_key():
+    config = load_config()
+    key = config.get('anthropic_api_key')
+    if not key:
+        try:
+            if 'anthropic_api_key' in st.secrets:
+                key = st.secrets['anthropic_api_key']
+        except Exception:
+            pass
+    return key
 
 
 def load_phantombuster_key():
@@ -2995,6 +3007,170 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
 # =============================================================================
 
 
+# --- Pre-computation helpers (Python does date math, AI does decisions) ---
+
+def _first_sentence(text):
+    """Extract first sentence from text, max 200 chars."""
+    if not text:
+        return ''
+    s = text.split('.')[0][:200]
+    return s.strip() + '.' if s else ''
+
+
+def _parse_date(d):
+    """Parse ISO date string to datetime. Returns None on failure."""
+    if not d:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(d))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def compute_role_durations(raw):
+    """Pre-calculate role durations from raw Crustdata JSON.
+
+    Python does ONLY date math. No role classification, no verdicts.
+    Returns formatted text block with duration per role.
+    """
+    if not isinstance(raw, dict):
+        return ""
+
+    today = datetime.now(timezone.utc)
+    lines = ['ROLE DURATIONS (pre-calculated, use these numbers):']
+    has_roles = False
+
+    # Track company-level data for stability summary
+    companies = {}  # company_name -> {min_start, max_end, is_current, roles}
+
+    for emp_key in ['past_employers', 'current_employers']:
+        for emp in (raw.get(emp_key) or []):
+            title = (emp.get('employee_title') or '').strip()
+            if not title:
+                continue
+            has_roles = True
+            company = emp.get('employer_name', '?')
+            start = _parse_date(emp.get('start_date'))
+            end = _parse_date(emp.get('end_date')) or today
+            is_current = emp.get('end_date') is None
+            months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if start else 0
+            start_str = start.strftime('%b %Y') if start else '?'
+            end_str = 'today' if is_current else end.strftime('%b %Y') if end else '?'
+
+            if is_current:
+                lines.append(f"  >>> {title} at {company}: {start_str} - {end_str} = {months} months <<< CURRENT ROLE")
+            else:
+                lines.append(f"  {title} at {company}: {start_str} - {end_str} = {months} months")
+
+            # Group by company
+            if company not in companies:
+                companies[company] = {'min_start': start, 'max_end': end, 'is_current': False}
+            else:
+                if start and (companies[company]['min_start'] is None or start < companies[company]['min_start']):
+                    companies[company]['min_start'] = start
+                if end > companies[company]['max_end']:
+                    companies[company]['max_end'] = end
+            if is_current:
+                companies[company]['is_current'] = True
+
+    if not has_roles:
+        return ""
+
+    # Compute stability summary
+    short_companies = []
+    current_company_name = None
+    current_company_months = None
+
+    for comp_name, comp_data in companies.items():
+        total_months = max(0, (comp_data['max_end'].year - comp_data['min_start'].year) * 12 +
+                           (comp_data['max_end'].month - comp_data['min_start'].month)) if comp_data['min_start'] else 0
+        if comp_data['is_current']:
+            current_company_name = comp_name
+            current_company_months = total_months
+        elif total_months < 12:
+            short_companies.append(f"{comp_name} ({total_months}mo)")
+
+    lines.append('')
+    lines.append('STABILITY SUMMARY (pre-calculated by company, use these numbers):')
+    lines.append(f'  Short-stint companies (<12 months, excluding current): {len(short_companies)}' +
+                 (f' — {", ".join(short_companies)}' if short_companies else ''))
+    if current_company_name:
+        lines.append(f'  Current company: {current_company_name} = {current_company_months} months')
+    else:
+        lines.append('  Current company: none found')
+
+    # Pre-computed STABILITY VERDICT — hard cap the AI must follow
+    if len(short_companies) >= 3:
+        lines.append(f'>>> STABILITY VERDICT: FAIL — {len(short_companies)} short-stint companies >= 3 → MAX SCORE 4 <<<')
+    elif current_company_months is not None and current_company_months < 6:
+        lines.append(f'>>> STABILITY VERDICT: FAIL — current role {current_company_months} months < 6 months → MAX SCORE 5 <<<')
+    else:
+        lines.append('>>> STABILITY VERDICT: PASS <<<')
+
+    return '\n'.join(lines)
+
+
+def trim_raw_profile(raw):
+    """Create trimmed copy of raw Crustdata JSON for AI screening.
+
+    Removes logos, IDs, long company descriptions (keeps first sentence).
+    Skips employer entries with empty titles.
+    Does NOT modify the original dict.
+    """
+    if not isinstance(raw, dict):
+        return raw
+
+    trimmed = {}
+    for key in ['name', 'title', 'headline', 'location', 'summary', 'skills',
+                'languages', 'all_titles', 'all_employers', 'all_schools',
+                'all_degrees', 'linkedin_flagship_url', 'num_of_connections']:
+        if key in raw:
+            trimmed[key] = raw[key]
+
+    for emp_key in ['past_employers', 'current_employers']:
+        if emp_key in raw:
+            trimmed_emps = []
+            for emp in (raw[emp_key] or []):
+                title = (emp.get('employee_title') or '').strip()
+                if not title:
+                    continue
+                trimmed_emps.append({
+                    'employee_title': title,
+                    'employer_name': emp.get('employer_name'),
+                    'start_date': emp.get('start_date'),
+                    'end_date': emp.get('end_date'),
+                    'employee_description': emp.get('employee_description') or None,
+                    'employer_description': _first_sentence(emp.get('employer_linkedin_description'))
+                })
+            trimmed[emp_key] = trimmed_emps
+
+    if 'education_background' in raw:
+        trimmed['education'] = [
+            {'school': e.get('institute_name'), 'degree': e.get('degree_name'), 'field': e.get('field_of_study')}
+            for e in raw['education_background']
+        ]
+
+    return trimmed
+
+
+_DURATION_PROMPT_INSTRUCTIONS = """
+## Pre-calculated Data (use these numbers, do NOT recalculate)
+Role durations and stability data are pre-calculated above the profile JSON.
+- Use the ROLE DURATIONS for experience calculation
+- The line marked ">>> CURRENT ROLE <<<" shows the current role
+- If multiple roles at the SAME company, they are promotions — count total time at that company ONCE
+
+## STABILITY VERDICT (MANDATORY — do NOT override)
+A STABILITY VERDICT is pre-calculated above. You MUST obey it:
+- If "STABILITY VERDICT: FAIL → MAX SCORE 4" — your score CANNOT exceed 4, no matter how strong the candidate
+- If "STABILITY VERDICT: FAIL → MAX SCORE 5" — your score CANNOT exceed 5, no matter how strong the candidate
+- If "STABILITY VERDICT: PASS" — score normally
+This is a hard cap. Do NOT override it even if the candidate has top companies or perfect skills."""
+
+
 SCREENING_PROMPT = """You are a senior technical recruiter screening candidates for tech companies.
 
 Today's date: {today}
@@ -3014,29 +3190,44 @@ Today's date: {today}
 ## Key Rules:
 - Nice-to-Have = bonus only, NOT a penalty if missing
 - Israeli military service (IDF, 8200, Mamram) is mandatory in Israel and a POSITIVE signal
-- Calculate experience from employment dates in the JSON
+- Role durations are pre-calculated above the profile JSON. Use those numbers, do NOT recalculate from dates
+- If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time once
 - Check the "skills" array for technical skills
-- Read "employer_linkedin_description" to understand what each company does
+- Read "employer_description" to understand what each company does
 
 Return ONLY valid JSON in this format:
 {json_format}"""
 
 
-def screen_profile(profile: dict, job_description: str, client: OpenAI,
-                   tracker: 'UsageTracker' = None, mode: str = "detailed",
-                   ai_model: str = "gpt-4o-mini", role_prompt: str = None) -> dict:
-    """Screen a profile against a job description using OpenAI.
+def _extract_json_from_text(text):
+    """Extract JSON from text, stripping markdown code fences if present."""
+    text = text.strip()
+    if text.startswith('```'):
+        text = text.split('\n', 1)[1] if '\n' in text else text[3:]
+    if text.endswith('```'):
+        text = text[:-3].strip()
+    start = text.find('{')
+    end = text.rfind('}') + 1
+    if start >= 0 and end > start:
+        return text[start:end]
+    return text
 
-    Simple Custom GPT style approach - no complex pre-processing, just send JD + raw JSON to AI.
+
+def screen_profile(profile: dict, job_description: str, client,
+                   tracker: 'UsageTracker' = None, mode: str = "detailed",
+                   ai_model: str = "gpt-4o-mini", role_prompt: str = None,
+                   ai_provider: str = "openai") -> dict:
+    """Screen a profile against a job description using OpenAI or Anthropic.
 
     Args:
         profile: Profile dict (must have raw_crustdata or raw_data for best results)
         job_description: The job requirements to screen against
-        client: OpenAI client instance
+        client: OpenAI or Anthropic client instance
         tracker: Optional usage tracker
         mode: "quick" for cheaper/faster or "detailed" for full analysis
-        ai_model: OpenAI model to use (default: gpt-4o-mini)
-        role_prompt: Optional role-specific system prompt (like Custom GPT instructions)
+        ai_model: Model to use (e.g. gpt-4o-mini, claude-haiku-4-5-20251001)
+        role_prompt: Optional role-specific system prompt
+        ai_provider: "openai" or "anthropic"
     """
     start_time = time.time()
 
@@ -3069,6 +3260,10 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI,
                 "concerns": []
             }
 
+    # Pre-compute durations and trim raw JSON (creates new objects, doesn't modify originals)
+    durations_text = compute_role_durations(raw)
+    trimmed_raw = trim_raw_profile(raw)
+
     # JSON format based on mode
     if mode == "quick":
         json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit", "summary": "one sentence"}'
@@ -3082,9 +3277,8 @@ def screen_profile(profile: dict, job_description: str, client: OpenAI,
 
     # Use role-specific prompt if provided, otherwise use default
     if role_prompt:
-        # Role prompt is the system prompt (like Custom GPT instructions)
-        # Append JSON format requirement
         system_prompt = f"""{role_prompt}
+{_DURATION_PROMPT_INSTRUCTIONS}
 
 Today's date: {today}
 
@@ -3093,42 +3287,71 @@ Return ONLY valid JSON in this format:
     else:
         system_prompt = SCREENING_PROMPT.format(today=today, json_format=json_format)
 
-    user_prompt = f"""## Job Description:
+    # Build user prompt with pre-computed durations above profile JSON
+    durations_header = f"{durations_text}\n\n" if durations_text else ""
+    user_prompt = f"""{durations_header}## Job Description:
 {job_description}
 
 ## Candidate Profile:
 ```json
-{json.dumps(raw, indent=2, default=str)}
+{json.dumps(trimmed_raw, indent=2, default=str)}
 ```
 
 Evaluate this candidate against the job requirements and return JSON."""
 
     try:
-        response = client.chat.completions.create(
-            model=ai_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.3,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"}
-        )
-
-        elapsed_ms = int((time.time() - start_time) * 1000)
-
-        # Log usage
-        if tracker and hasattr(response, 'usage') and response.usage:
-            tracker.log_openai(
-                tokens_input=response.usage.prompt_tokens,
-                tokens_output=response.usage.completion_tokens,
+        if ai_provider == "anthropic":
+            # Anthropic API: system prompt is a separate parameter, no json_object mode
+            response = client.messages.create(
                 model=ai_model,
-                profiles_screened=1,
-                status='success',
-                response_time_ms=elapsed_ms
+                max_tokens=max(max_tokens, 1200),  # Haiku needs more tokens for detailed responses
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+                temperature=0.3
             )
+            elapsed_ms = int((time.time() - start_time) * 1000)
 
-        result = json.loads(response.choices[0].message.content)
+            # Log usage
+            if tracker and hasattr(response, 'usage') and response.usage:
+                tracker.log_openai(
+                    tokens_input=response.usage.input_tokens,
+                    tokens_output=response.usage.output_tokens,
+                    model=ai_model,
+                    profiles_screened=1,
+                    status='success',
+                    response_time_ms=elapsed_ms
+                )
+
+            raw_text = response.content[0].text
+            json_text = _extract_json_from_text(raw_text)
+            result = json.loads(json_text)
+        else:
+            # OpenAI API
+            response = client.chat.completions.create(
+                model=ai_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"}
+            )
+            elapsed_ms = int((time.time() - start_time) * 1000)
+
+            # Log usage
+            if tracker and hasattr(response, 'usage') and response.usage:
+                tracker.log_openai(
+                    tokens_input=response.usage.prompt_tokens,
+                    tokens_output=response.usage.completion_tokens,
+                    model=ai_model,
+                    profiles_screened=1,
+                    status='success',
+                    response_time_ms=elapsed_ms
+                )
+
+            result = json.loads(response.choices[0].message.content)
+
         return result
 
     except json.JSONDecodeError as e:
@@ -3262,19 +3485,22 @@ def fetch_raw_data_for_batch(profiles: list, raw_index: dict = None, db_client =
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
                           max_workers: int = 15,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
-                          ai_model: str = "gpt-4o-mini", role_prompt: str = None) -> list:
+                          ai_model: str = "gpt-4o-mini", role_prompt: str = None,
+                          ai_provider: str = "openai", api_key: str = None) -> list:
     """Screen multiple profiles in parallel using ThreadPoolExecutor.
 
     Args:
         profiles: List of profile dicts to screen
         job_description: The job description to screen against
-        openai_api_key: OpenAI API key (we create client per thread for safety)
-        max_workers: Number of concurrent threads (default 15, scales with concurrent users)
+        openai_api_key: OpenAI API key (backward compat, use api_key for new code)
+        max_workers: Number of concurrent threads
         progress_callback: Function(completed, total, result) called after each profile
         cancel_flag: Dict with 'cancelled' key to check for cancellation
         mode: "quick" for cheaper/faster or "detailed" for full analysis
-        ai_model: OpenAI model to use
-        role_prompt: Optional role-specific system prompt (like Custom GPT instructions)
+        ai_model: Model to use
+        role_prompt: Optional role-specific system prompt
+        ai_provider: "openai" or "anthropic"
+        api_key: API key for the selected provider (overrides openai_api_key)
 
     Returns:
         List of screening results with profile info included
@@ -3293,9 +3519,13 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
             return None
 
         # Create client per thread to avoid thread-safety issues
-        client = OpenAI(api_key=openai_api_key)
+        _key = api_key or openai_api_key
+        if ai_provider == "anthropic":
+            client = anthropic.Anthropic(api_key=_key)
+        else:
+            client = OpenAI(api_key=_key)
         try:
-            result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, role_prompt=role_prompt)
+            result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
             # Add profile info to result
             name = profile.get('name', '') or f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
             if not name:
@@ -3378,6 +3608,7 @@ with st.sidebar:
     _api_status = {
         'Crustdata': bool(config.get('api_key')),
         'OpenAI': bool(config.get('openai_api_key')),
+        'Anthropic': bool(config.get('anthropic_api_key')),
         'PhantomBuster': bool(config.get('phantombuster_api_key')),
         'SalesQL': bool(config.get('salesql_api_key')),
         'Google Sheets': bool(config.get('google_credentials')),
@@ -5880,13 +6111,14 @@ with tab_filter2:
 # ========== TAB 5: AI Screening ==========
 with tab_screening:
     openai_key = load_openai_key()
+    anthropic_key = load_anthropic_key()
 
     # Check if data is enriched
     enriched_df = st.session_state.get('enriched_df')
     is_enriched = enriched_df is not None and not enriched_df.empty
 
-    if not openai_key:
-        st.warning("OpenAI API key not configured. Add 'openai_api_key' to config.json")
+    if not openai_key and not anthropic_key:
+        st.warning("No AI API key configured. Add 'openai_api_key' or 'anthropic_api_key' to config.json")
     elif not is_enriched:
         st.warning("Profiles must be enriched before AI screening.")
         st.info("Go to **tab 3 (Enrich)** to enrich profiles with full LinkedIn data, then come back here.")
@@ -6000,22 +6232,39 @@ with tab_screening:
                 help="Quick: score + fit + short summary | Detailed: adds reasoning, strengths, concerns"
             )
         with col_model:
+            model_options = ["gpt-4o-mini (fast)", "gpt-4o (accurate)", "Claude Haiku (balanced)"]
             ai_model_choice = st.radio(
                 "AI Model",
-                options=["gpt-4o-mini (fast)", "gpt-4o (accurate)"],
+                options=model_options,
                 index=0,
                 key="ai_model_choice",
-                help="gpt-4o-mini: ~$0.001/profile | gpt-4o: ~$0.02/profile"
+                help="gpt-4o-mini: ~$0.001/profile | gpt-4o: ~$0.02/profile | Claude Haiku: ~$0.005/profile"
             )
-        ai_model = "gpt-4o-mini" if "mini" in ai_model_choice else "gpt-4o"
+        # Parse model choice into model name and provider
+        if "Haiku" in ai_model_choice:
+            ai_model = "claude-haiku-4-5-20251001"
+            ai_provider = "anthropic"
+        elif "mini" in ai_model_choice:
+            ai_model = "gpt-4o-mini"
+            ai_provider = "openai"
+        else:
+            ai_model = "gpt-4o"
+            ai_provider = "openai"
 
         # Dynamic concurrent workers — scales down when multiple users screen simultaneously
         max_workers = _screening_session_start()
         st.session_state['_screening_active'] = True  # Track so we can decrement on completion
 
         # Cost estimate based on mode and model
-        model_input_cost = 0.15 if ai_model == "gpt-4o-mini" else 2.50  # per 1M tokens
-        model_output_cost = 0.60 if ai_model == "gpt-4o-mini" else 10.00  # per 1M tokens
+        if ai_provider == "anthropic":
+            model_input_cost = 0.80   # Haiku: $0.80/1M input tokens
+            model_output_cost = 4.00  # Haiku: $4.00/1M output tokens
+        elif ai_model == "gpt-4o-mini":
+            model_input_cost = 0.15
+            model_output_cost = 0.60
+        else:
+            model_input_cost = 2.50
+            model_output_cost = 10.00
         if screening_mode == "Quick (cheaper)":
             output_tokens = 50  # ~50 tokens for quick response
             st.caption("Quick mode: Returns score, fit level, and brief summary only")
@@ -6035,11 +6284,14 @@ with tab_screening:
 
                 if job_description and st.button("Test Single Profile", key="test_single"):
                     try:
-                        client = OpenAI(api_key=openai_key)
+                        if ai_provider == "anthropic":
+                            client = anthropic.Anthropic(api_key=anthropic_key)
+                        else:
+                            client = OpenAI(api_key=openai_key)
                         test_mode = 'quick' if screening_mode == "Quick (cheaper)" else 'detailed'
                         role_name = st.session_state.get('active_role_name', 'General')
                         st.write(f"Testing with first profile ({test_mode} mode, role: {role_name}, model: {ai_model})...")
-                        result = screen_profile(profiles[0], job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt)
+                        result = screen_profile(profiles[0], job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
                         st.write("Result:", result)
                     except Exception as e:
                         import traceback
@@ -6199,6 +6451,8 @@ with tab_screening:
                 job_desc = batch_state.get('job_description', '')
                 screen_mode = batch_state.get('mode', 'detailed')
                 batch_ai_model = batch_state.get('ai_model', 'gpt-4o-mini')
+                batch_ai_provider = batch_state.get('ai_provider', 'openai')
+                batch_api_key = batch_state.get('api_key', openai_key)
                 batch_role_prompt = batch_state.get('role_prompt')
                 batch_size = 50  # Tier 3: 50 parallel requests, 50 × 15KB = ~750KB memory
                 current_batch = batch_state.get('current_batch', 0)
@@ -6249,7 +6503,9 @@ with tab_screening:
                             mode=screen_mode,
                             ai_model=batch_ai_model,
                             role_prompt=batch_role_prompt,
-                            progress_callback=_on_profile_screened
+                            progress_callback=_on_profile_screened,
+                            ai_provider=batch_ai_provider,
+                            api_key=batch_api_key
                         )
                         all_results.extend(batch_results)
 
@@ -6332,19 +6588,36 @@ with tab_screening:
                         st.rerun()
 
             if start_button or rescreen_selected_button or continue_button:
-                # Validate OpenAI API key before starting (uses free models.list endpoint)
-                try:
-                    test_client = OpenAI(api_key=openai_key)
-                    test_client.models.list()
-                except Exception as e:
-                    error_msg = str(e)
-                    if '401' in error_msg or 'Incorrect API key' in error_msg:
-                        st.error(f"Invalid OpenAI API key. Please check your key in config.json or Streamlit secrets.\n\nError: {error_msg[:200]}")
-                    elif '429' in error_msg:
-                        st.error(f"OpenAI rate limit or quota exceeded. Check your billing at platform.openai.com.\n\nError: {error_msg[:200]}")
-                    else:
-                        st.error(f"OpenAI connection failed: {error_msg[:200]}")
-                    st.stop()
+                # Validate API key before starting
+                if ai_provider == "anthropic":
+                    if not anthropic_key:
+                        st.error("Anthropic API key not configured. Add 'anthropic_api_key' to config.json")
+                        st.stop()
+                    try:
+                        test_client = anthropic.Anthropic(api_key=anthropic_key)
+                        test_client.messages.create(model="claude-haiku-4-5-20251001", max_tokens=10, messages=[{"role": "user", "content": "hi"}])
+                    except Exception as e:
+                        error_msg = str(e)
+                        if '401' in error_msg or 'authentication' in error_msg.lower():
+                            st.error(f"Invalid Anthropic API key. Please check your key in config.json.\n\nError: {error_msg[:200]}")
+                        elif '429' in error_msg:
+                            st.error(f"Anthropic rate limit exceeded. Check your billing at console.anthropic.com.\n\nError: {error_msg[:200]}")
+                        else:
+                            st.error(f"Anthropic connection failed: {error_msg[:200]}")
+                        st.stop()
+                else:
+                    try:
+                        test_client = OpenAI(api_key=openai_key)
+                        test_client.models.list()
+                    except Exception as e:
+                        error_msg = str(e)
+                        if '401' in error_msg or 'Incorrect API key' in error_msg:
+                            st.error(f"Invalid OpenAI API key. Please check your key in config.json or Streamlit secrets.\n\nError: {error_msg[:200]}")
+                        elif '429' in error_msg:
+                            st.error(f"OpenAI rate limit or quota exceeded. Check your billing at platform.openai.com.\n\nError: {error_msg[:200]}")
+                        else:
+                            st.error(f"OpenAI connection failed: {error_msg[:200]}")
+                        st.stop()
 
                 # Determine which profiles to screen
                 if rescreen_selected_button:
@@ -6394,6 +6667,8 @@ with tab_screening:
                     'job_description': job_description,
                     'mode': 'quick' if screening_mode == "Quick (cheaper)" else 'detailed',
                     'ai_model': ai_model,
+                    'ai_provider': ai_provider,
+                    'api_key': anthropic_key if ai_provider == "anthropic" else openai_key,
                     'role_prompt': role_prompt,  # Role-specific system prompt (like Custom GPT)
                     'current_batch': 0,
                     'results': initial_results,  # Start with existing results if re-screening selected
@@ -6864,7 +7139,7 @@ with tab_database:
                         # Full-text search first
                         from db import search_profiles_fulltext
                         all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=50000)
-                        st.caption(f"Full-text search: **{ft}**")
+                        st.caption(f"Full-text search: **{ft}**" + (" + column filters" if has_column_filters else ""))
                     elif has_column_filters:
                         # Column filters only (server-side)
                         from db import search_profiles_filtered
@@ -6886,7 +7161,46 @@ with tab_database:
                         combined = (df['first_name'].fillna('') + ' ' + df['last_name'].fillna('')).str.strip()
                         df['name'] = df['name'].fillna('').replace('', pd.NA).fillna(combined)
 
-                    # Use server-filtered results directly
+                    # Apply column filters client-side when combined with full-text search
+                    # (full-text search RPC doesn't support column filters natively)
+                    if ft and ft.strip() and has_column_filters:
+                        def _ilike_filter(series, terms_str):
+                            """Case-insensitive OR filter: matches if any term is a substring."""
+                            terms = [t.strip().lower() for t in terms_str.split(',') if t.strip()]
+                            return series.fillna('').str.lower().apply(
+                                lambda val: any(t in val for t in terms)
+                            )
+
+                        def _array_filter(series, terms_str):
+                            """Case-insensitive OR filter for array columns (stored as lists or comma-sep strings)."""
+                            terms = [t.strip().lower() for t in terms_str.split(',') if t.strip()]
+                            def matches(val):
+                                if isinstance(val, list):
+                                    joined = ' '.join(str(v) for v in val).lower()
+                                elif isinstance(val, str):
+                                    joined = val.lower()
+                                else:
+                                    return False
+                                return any(t in joined for t in terms)
+                            return series.apply(matches)
+
+                        mask = pd.Series(True, index=df.index)
+                        str_filters = {'name': 'name', 'current_title': 'current_title',
+                                       'current_company': 'current_company', 'location': 'location'}
+                        arr_filters = {'past_titles': 'all_titles', 'past_companies': 'all_employers',
+                                       'skills': 'skills', 'schools': 'all_schools'}
+
+                        for fkey, col in str_filters.items():
+                            if af.get(fkey) and col in df.columns:
+                                mask &= _ilike_filter(df[col], af[fkey])
+                        for fkey, col in arr_filters.items():
+                            if af.get(fkey) and col in df.columns:
+                                mask &= _array_filter(df[col], af[fkey])
+                        if af.get('has_email') and 'email' in df.columns:
+                            mask &= df['email'].fillna('').astype(bool)
+
+                        df = df[mask]
+
                     filtered_df = df
 
                     # Display limit to prevent browser freeze

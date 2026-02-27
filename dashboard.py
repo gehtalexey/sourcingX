@@ -3619,7 +3619,7 @@ with st.sidebar:
         'Anthropic': bool(config.get('anthropic_api_key')),
         'PhantomBuster': bool(config.get('phantombuster_api_key')),
         'SalesQL': bool(config.get('salesql_api_key')),
-        'Google Sheets': bool(config.get('google_credentials')),
+        'Google Sheets': bool(config.get('google_credentials') or config.get('google_credentials_file')),
         'Supabase': _db_ok,
     }
     _missing = [name for name, ok in _api_status.items() if not ok]

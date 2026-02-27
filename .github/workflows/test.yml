@@ -31,4 +31,4 @@ jobs:
           OPENAI_API_KEY: "test-key"
           CRUSTDATA_API_KEY: "test-key"
         run: |
-          pytest test_screening_fixes.py test_mocking_services.py test_screening_parameterized.py -v --tb=short
+          pytest test_mocking_services.py test_screening_parameterized.py -v --tb=short

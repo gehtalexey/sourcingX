@@ -13,7 +13,7 @@ SourcingX is a Streamlit-based recruiting automation platform that screens Linke
 
 - **Frontend/Backend**: Streamlit (Python) — single-file app in `dashboard.py`
 - **Database**: Supabase (PostgreSQL via REST API) — stores enriched profiles, NOT screening results
-- **AI Screening**: OpenAI `gpt-4o-mini` (default) or `gpt-4o`
+- **AI Screening**: OpenAI `gpt-4o-mini` (default), `gpt-4o`, or Claude Haiku (`anthropic`)
 - **Profile Data**: Crustdata API (enrichment), PhantomBuster (scraping)
 - **Email Lookup**: SalesQL API
 - **Config**: Google Sheets (company lists, universities, blacklists) + local CSV filters
@@ -37,7 +37,7 @@ sourcingX/
 ├── pb_dedup.py               # PhantomBuster deduplication (post-scrape filtering)
 ├── config.json               # API keys (DO NOT commit — use config.example.json)
 ├── config.example.json       # Config template with placeholder keys
-├── requirements.txt          # 9 dependencies
+├── requirements.txt          # 10 dependencies
 ├── supabase_setup.sql        # Initial database schema
 ├── conftest.py               # Pytest fixtures and mock helpers
 ├── test_screening.py         # AI screening tests
@@ -80,11 +80,16 @@ sourcingX/
 - Profile enrichment data (raw Crustdata JSON) IS stored in Supabase
 - Session-level results are kept in `st.session_state['screening_results']`
 
-### Experience calculation is pre-computed in Python
+### Experience & durations are pre-computed in Python
 - Total career experience is calculated in `dashboard.py` (search for `calculate_total_experience` or the experience limit check block)
+- `compute_role_durations()` calculates per-role months from all `past_employers` + `current_employers` in raw Crustdata JSON
+- Durations formatted as `Xy Ym` (e.g., `4y 2m`) or just `Xm` if under a year (e.g., `7m`)
+- Company-level stability summary groups roles by company (handles promotions), flags short stints (<12mo)
+- `STABILITY VERDICT` is a hard cap: FAIL (3+ short stints → max score 4, current <6mo → max score 5) or PASS
+- `trim_raw_profile()` strips logos/IDs/long descriptions from raw JSON (54-64% token reduction)
 - Military service (IDF) is detected and excluded from "reject >X years" checks
 - A `EXPERIENCE LIMIT CHECK` verdict is pre-computed and injected into the prompt
-- The AI should NEVER recalculate total experience — it must use the pre-computed value
+- The AI should NEVER recalculate durations or experience — it must use the pre-computed values
 
 ### Israeli military service handling
 - Israeli military is mandatory (age 18-21) and excluded from experience limits
@@ -103,8 +108,10 @@ sourcingX/
 
 | Function | Purpose |
 |----------|---------|
-| `screen_profile()` | Screens a single profile against JD via OpenAI |
+| `screen_profile()` | Screens a single profile against JD via OpenAI/Claude |
 | `screen_profiles_batch()` | Parallel screening with ThreadPoolExecutor |
+| `compute_role_durations()` | Pre-calculates per-role durations (Xy Ym) + stability verdict from raw JSON |
+| `trim_raw_profile()` | Strips logos/IDs/long descriptions from raw JSON (54-64% token savings) |
 | `build_raw_data_index()` | Indexes raw data by LinkedIn URL for fast lookup |
 | `fetch_raw_data_for_batch()` | Loads raw data from DB for a batch (memory efficient) |
 | `enrich_batch()` | Batch enrich profiles via Crustdata API |
@@ -146,6 +153,8 @@ The screening prompt sent to OpenAI has these sections (in order):
 5. **User prompt** with JD + pre-calculated experience + raw JSON
 
 ### Pre-calculated sections injected into user prompt:
+- **Role durations** from `compute_role_durations()` — every role with `Xy Ym` duration + stability verdict
+- **Trimmed profile** from `trim_raw_profile()` — raw JSON with noise removed
 - Current employer (title, company, start date, duration)
 - Lead/management experience (months calculated, consulting excluded)
 - Fullstack experience (title + skills analysis)
@@ -154,8 +163,8 @@ The screening prompt sent to OpenAI has these sections (in order):
 
 ## Common Pitfalls
 
-### AI hallucinating experience numbers
-The AI (especially gpt-4o-mini) may try to recalculate total experience from raw JSON and get it wrong. The fix: pre-compute the comparison in Python and inject a clear `EXPERIENCE LIMIT CHECK: X years <= Y years -> PASSES` verdict that the AI must follow.
+### AI hallucinating experience/duration numbers
+The AI (especially gpt-4o-mini) may try to recalculate experience or role durations from raw JSON and get it wrong. The fix: `compute_role_durations()` pre-calculates all durations in Python (formatted as `Xy Ym`), and a `STABILITY VERDICT` + `EXPERIENCE LIMIT CHECK` are injected as hard-cap verdicts the AI must follow. Additionally, `trim_raw_profile()` reduces token usage by 54-64%.
 
 ### "Already screened" profiles
 Screening is always fresh per JD. Never skip profiles based on previous scores. Different JDs = different scores.
@@ -240,14 +249,14 @@ Run tests with: `pytest`
 ## Development Setup
 
 1. **DevContainer** (recommended): Python 3.11, auto-forwards port 8501
-2. **Dependencies**: `pip install -r requirements.txt` (streamlit, pandas, requests, openai, gspread, google-auth, streamlit-authenticator, bcrypt, plotly)
+2. **Dependencies**: `pip install -r requirements.txt` (streamlit, pandas, requests, openai, anthropic, gspread, google-auth, streamlit-authenticator, bcrypt, plotly)
 3. **Config**: Copy `config.example.json` to `config.json` and fill in API keys (Crustdata, OpenAI, PhantomBuster, Google credentials)
 4. **Run**: `streamlit run dashboard.py`
 5. **Filter data**: CSV files in `filters/` (blacklist.csv, not_relevant_companies.csv, target_companies.csv, universities.csv)
 
 ## Conventions
 
-- All screening happens through OpenAI API (not Claude) for the dashboard
+- Screening happens through OpenAI API or Claude Haiku (anthropic) for the dashboard
 - Claude Code skills (`/screen`, `/email-opener`) use Claude for agent-based workflows
 - Config lives in `config.json` — never commit API keys
 - CSV exports use UTF-8-BOM for Excel compatibility

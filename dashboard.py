@@ -6139,42 +6139,7 @@ with tab_screening:
             profiles_df = enriched_df
             st.info(f"**{len(profiles_df)}** enriched profiles ready for screening")
 
-        # Convert DataFrame to dicts for screening
-        profiles = profiles_df.to_dict('records')
-
-        # Clean up NaN values from pandas (NaN is truthy in Python, breaks checks)
-        import math
-        for p in profiles:
-            for k, v in p.items():
-                if isinstance(v, float) and math.isnan(v):
-                    p[k] = ''
-
-        # Restore raw_data from cached profile dicts (avoids re-fetching from DB)
-        raw_cache = st.session_state.get('enriched_profiles_raw', {})
-        if raw_cache:
-            restored = 0
-            for p in profiles:
-                url = p.get('linkedin_url', '')
-                if url and not p.get('raw_data') and not p.get('raw_crustdata') and url in raw_cache:
-                    cached = raw_cache[url]
-                    if cached.get('raw_data'):
-                        p['raw_crustdata'] = cached['raw_data']
-                        restored += 1
-            if restored > 0:
-                pass  # raw_data restored silently from cache
-
-        # Check raw_data availability
-        has_raw = sum(1 for p in profiles if p.get('raw_data') or p.get('raw_crustdata'))
-        if len(profiles) > 500 and has_raw > 0:
-            for p in profiles:
-                p.pop('raw_data', None)
-                p.pop('raw_crustdata', None)
-            has_raw = 0
-            st.caption(f"{len(profiles)} profiles ready for screening (raw data will be fetched per-batch to save memory)")
-        elif has_raw > 0:
-            st.caption(f"{len(profiles)} profiles ready for screening ({has_raw}/{len(profiles)} with raw data)")
-        else:
-            st.caption(f"{len(profiles)} profiles ready for screening (raw data will be fetched from DB)")
+        num_profiles = len(profiles_df)
 
         # AI Screening Requirements Input
         st.markdown("### AI Screening Requirements")
@@ -6226,8 +6191,8 @@ with tab_screening:
             screen_count = st.number_input(
                 "Number of profiles to screen",
                 min_value=1,
-                max_value=len(profiles),
-                value=min(100, len(profiles)),
+                max_value=num_profiles,
+                value=min(100, num_profiles),
                 step=10,
                 key="screen_count"
             )
@@ -6259,10 +6224,6 @@ with tab_screening:
             ai_model = "gpt-4o"
             ai_provider = "openai"
 
-        # Dynamic concurrent workers — scales down when multiple users screen simultaneously
-        max_workers = _screening_session_start()
-        st.session_state['_screening_active'] = True  # Track so we can decrement on completion
-
         # Cost estimate based on mode and model
         if ai_provider == "anthropic":
             model_input_cost = 0.80   # Haiku: $0.80/1M input tokens
@@ -6286,9 +6247,10 @@ with tab_screening:
 
         # Debug: Show available fields and test single profile
         with st.expander("Debug: Profile Fields & Test"):
-            if profiles:
-                st.write("Available fields in profiles:", list(profiles[0].keys()))
-                st.write("Sample profile:", {k: str(v)[:100] for k, v in profiles[0].items()})
+            if not profiles_df.empty:
+                st.write("Available fields:", list(profiles_df.columns))
+                sample = {k: str(v)[:100] for k, v in profiles_df.iloc[0].to_dict().items()}
+                st.write("Sample profile:", sample)
 
                 if job_description and st.button("Test Single Profile", key="test_single"):
                     try:
@@ -6299,7 +6261,13 @@ with tab_screening:
                         test_mode = 'quick' if screening_mode == "Quick (cheaper)" else 'detailed'
                         role_name = st.session_state.get('active_role_name', 'General')
                         st.write(f"Testing with first profile ({test_mode} mode, role: {role_name}, model: {ai_model})...")
-                        result = screen_profile(profiles[0], job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
+                        test_profile = profiles_df.iloc[0].to_dict()
+                        # Clean NaN
+                        import math
+                        for k, v in test_profile.items():
+                            if isinstance(v, float) and math.isnan(v):
+                                test_profile[k] = ''
+                        result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
                         st.write("Result:", result)
                     except Exception as e:
                         import traceback
@@ -6372,19 +6340,20 @@ with tab_screening:
             rescreen_selected_button = False
 
             if existing_results and not screening_in_progress:
-                # Find profiles not yet screened
+                # Find profiles not yet screened (lightweight — just compare URLs)
                 screened_urls = {r.get('linkedin_url') for r in existing_results if r.get('linkedin_url')}
-                unscreened_profiles = [p for p in profiles if p.get('linkedin_url') not in screened_urls]
+                all_urls = set(profiles_df['linkedin_url'].dropna()) if 'linkedin_url' in profiles_df.columns else set()
+                unscreened_count = len(all_urls - screened_urls)
 
-                st.info(f"📊 **{len(existing_results)}** screened | **{len(unscreened_profiles)}** remaining | **{len(profiles)}** total")
+                st.info(f"📊 **{len(existing_results)}** screened | **{unscreened_count}** remaining | **{num_profiles}** total")
 
                 col1, col2, col3 = st.columns([2, 2, 1])
                 with col1:
                     start_button = st.button("🔄 Screen All Fresh", type="secondary", key="start_screening")
                 with col2:
-                    if unscreened_profiles:
-                        continue_count = min(len(unscreened_profiles), screen_count)
-                        continue_button = st.button(f"▶️ Continue ({continue_count} of {len(unscreened_profiles)} left)", type="primary", key="continue_screening")
+                    if unscreened_count > 0:
+                        continue_count = min(unscreened_count, screen_count)
+                        continue_button = st.button(f"▶️ Continue ({continue_count} of {unscreened_count} left)", type="primary", key="continue_screening")
                     else:
                         st.success("✅ All profiles screened!")
                 with col3:
@@ -6461,6 +6430,7 @@ with tab_screening:
                 batch_ai_model = batch_state.get('ai_model', 'gpt-4o-mini')
                 batch_ai_provider = batch_state.get('ai_provider', 'openai')
                 batch_api_key = batch_state.get('api_key', openai_key)
+                max_workers = batch_state.get('max_workers', 15)
                 batch_role_prompt = batch_state.get('role_prompt')
                 batch_size = 50  # Tier 3: 50 parallel requests, 50 × 15KB = ~750KB memory
                 current_batch = batch_state.get('current_batch', 0)
@@ -6596,6 +6566,32 @@ with tab_screening:
                         st.rerun()
 
             if start_button or rescreen_selected_button or continue_button:
+                # === Prepare profiles (only when screening starts, not on every rerun) ===
+                profiles = profiles_df.to_dict('records')
+                import math
+                for p in profiles:
+                    for k, v in p.items():
+                        if isinstance(v, float) and math.isnan(v):
+                            p[k] = ''
+                # Restore raw_data from cache
+                raw_cache = st.session_state.get('enriched_profiles_raw', {})
+                if raw_cache:
+                    for p in profiles:
+                        url = p.get('linkedin_url', '')
+                        if url and not p.get('raw_data') and not p.get('raw_crustdata') and url in raw_cache:
+                            cached = raw_cache[url]
+                            if cached.get('raw_data'):
+                                p['raw_crustdata'] = cached['raw_data']
+                # Strip raw data for large batches to save memory
+                has_raw = sum(1 for p in profiles if p.get('raw_data') or p.get('raw_crustdata'))
+                if len(profiles) > 500 and has_raw > 0:
+                    for p in profiles:
+                        p.pop('raw_data', None)
+                        p.pop('raw_crustdata', None)
+                # Dynamic concurrent workers
+                max_workers = _screening_session_start()
+                st.session_state['_screening_active'] = True
+
                 # Validate API key before starting
                 if ai_provider == "anthropic":
                     if not anthropic_key:
@@ -6680,7 +6676,8 @@ with tab_screening:
                     'role_prompt': role_prompt,  # Role-specific system prompt (like Custom GPT)
                     'current_batch': 0,
                     'results': initial_results,  # Start with existing results if re-screening selected
-                    'is_continue': False  # Always fresh screening
+                    'is_continue': False,  # Always fresh screening
+                    'max_workers': max_workers,
                 }
                 st.session_state['screening_batch_progress'] = {
                     'completed': len(initial_results),

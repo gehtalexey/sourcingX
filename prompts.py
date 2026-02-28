@@ -65,9 +65,14 @@ Output: "Stability: X short-stint companies, current role = Y months"
 
 ## Experience Calculation (CRITICAL)
 Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
-- ONLY count SW roles: Software Engineer, Developer, Backend, Frontend, Fullstack, Tech Lead, SRE, DevOps
-- DO NOT count: Military, PMO, Customer Success, Technical Support, QA, Project Manager, IT
-- Sum months from SW roles only. If JD requires "6+ years" and candidate has <6 years in SW roles, score 5-6 max
+- Count FULL: Software Engineer, Developer, Backend Engineer, Fullstack Engineer, Tech Lead, Staff Engineer, Architect
+- Count HALF: DevOps/SRE/Platform Engineer (only if candidate's skills show strong backend overlap: APIs, microservices, databases)
+- Count HALF: Frontend Engineer (adjacent SW role, shows coding ability but not backend-specific)
+- DO NOT count: Military (use pre-calculated half-credit from EXPERIENCE SUMMARY), QA, Project Manager, PMO, Customer Success, Technical Support, IT, Data Analyst
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- Sum months from relevant roles. Include the CURRENT ROLE if relevant
+- If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 
 ## Company Context
 Read `employer_description` to understand what each company does. Don't guess company type from name alone.
@@ -113,9 +118,14 @@ Output: "Stability: X short-stint companies, current role = Y months"
 
 ## Experience Calculation (CRITICAL)
 Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
-- ONLY count SW roles: Software Engineer, Developer, Frontend, Backend, Fullstack, Tech Lead
-- DO NOT count: Military, PMO, Customer Success, Technical Support, QA, Project Manager, IT
-- Sum months from SW roles only. If JD requires "6+ years" and candidate has <6 years in SW roles, score 5-6 max
+- Count FULL: Software Engineer, Developer, Frontend Engineer, Fullstack Engineer, Tech Lead, Staff Engineer, UI Engineer
+- Count HALF: Backend Engineer (adjacent SW role, shows coding depth but not frontend-specific)
+- Count HALF: UX Engineer / Design Technologist (only if profile shows real coding, not just design tools)
+- DO NOT count: Military (use pre-calculated half-credit from EXPERIENCE SUMMARY), QA, Project Manager, PMO, Customer Success, Technical Support, IT, Designer (no code)
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- Sum months from relevant roles. Include the CURRENT ROLE if relevant
+- If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 
 ## Company Context
 Read `employer_description` to understand what each company does. Don't guess company type from name alone.
@@ -164,9 +174,13 @@ Output: "Stability: X short-stint companies, current role = Y months"
 
 ## Experience Calculation (CRITICAL)
 Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
-- ONLY count SW roles: Software Engineer, Developer, Frontend, Backend, Fullstack, Tech Lead
-- DO NOT count: Military, PMO, Customer Success, Technical Support, QA, Project Manager, IT
-- Sum months from SW roles only. If JD requires "6+ years" and candidate has <6 years in SW roles → score 5-6 max
+- Count FULL: Software Engineer, Developer, Frontend Engineer, Backend Engineer, Fullstack Engineer, Tech Lead, Staff Engineer
+- Count HALF: DevOps/SRE (only if candidate's skills show strong coding overlap: built services, APIs, not just infra)
+- DO NOT count: Military (use pre-calculated half-credit from EXPERIENCE SUMMARY), QA, Project Manager, PMO, Customer Success, Technical Support, IT, Data Analyst
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- Sum months from relevant roles. Include the CURRENT ROLE if relevant
+- If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 
 ## Company Context
 Read `employer_description` to understand what each company does. Don't guess company type from name alone.
@@ -266,9 +280,14 @@ Output: "Stability: X short-stint companies, current role = Y months"
 
 ## Experience Calculation (CRITICAL)
 Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
-- Count: Tech Lead, Team Lead, Engineering Manager, Software Engineer, Architect, Staff Engineer
-- DO NOT count: Military, PMO, Customer Success, Technical Support, Project Coordinator, IT
-- Sum months from SW/Lead roles. If JD requires "6+ years" and candidate has <6 years, score 5-6 max
+- Count FULL: Tech Lead, Team Lead, Engineering Manager, Software Engineer, Architect, Staff Engineer, Principal Engineer
+- Count HALF: DevOps/SRE (only if candidate also led people or projects in that role)
+- Count HALF: Product Manager (shows cross-functional leadership but not engineering depth)
+- DO NOT count: Military (use pre-calculated half-credit from EXPERIENCE SUMMARY), PMO, Customer Success, Technical Support, Project Coordinator, IT, QA
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- Sum months from relevant roles. Include the CURRENT ROLE if relevant
+- If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 
 ## Company Context
 Read `employer_description` to understand what each company does. Don't guess company type from name alone.
@@ -314,11 +333,15 @@ Output: "Stability: X short-stint companies, current role = Y months"
 - **1-2**: Business Analyst, or wrong background entirely
 
 ## Experience Calculation (CRITICAL)
-Use `past_employers` and `current_employers` arrays to calculate PM experience.
-- Count PM roles: Product Manager, Product Owner, Group PM, VP Product, Head of Product
-- DO NOT count: Scrum Master, Project Manager, Business Analyst, Program Manager, Customer Success
-- Engineering experience counts toward TOTAL experience but not PM-specific years
-- Sum months from PM roles. If JD requires "5+ years PM" and candidate has <5 years PM, score 5-6 max
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL: Product Manager, Product Owner, Group PM, VP Product, Head of Product, Chief Product Officer
+- Count HALF: Engineering roles (Software Engineer, Tech Lead) — shows technical depth relevant to PM but not PM-specific
+- Count HALF: UX Researcher, Design Lead — adjacent to product work
+- DO NOT count: Military (use pre-calculated half-credit from EXPERIENCE SUMMARY), Scrum Master, Project Manager, Business Analyst, Program Manager, Customer Success, Sales, Marketing
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- Sum months from relevant roles. Include the CURRENT ROLE if relevant
+- If JD requires "X+ years PM" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 
 ## Company Context
 Read `employer_description` to understand what each company does. Don't guess company type from name alone.
@@ -407,12 +430,17 @@ Not all "Account Executives" are equal. Assess the REAL scope:
 - **Inside Sales Only**: For field/enterprise roles requiring face-to-face
 - **Channel/Partner Only**: No direct customer-facing sales experience
 
-## Experience Guidelines
-- Ideal: 4-10 years in B2B SaaS sales
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL: Account Executive, Sales Representative, Enterprise AE, Commercial AE, Regional Sales Manager, Sales Director
+- Count HALF: SDR/BDR (shows sales DNA but not full-cycle closing experience)
+- Count HALF: Account Manager (only if involved in upsell/expansion, not just order management)
+- DO NOT count: Customer Support, Marketing, Product, Engineering, Operations, Admin
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 - Look for quota achievement numbers — this is the #1 signal
-- Progression from SDR to AE is a positive trajectory signal
-- Industry knowledge (selling to security/DevOps/data teams) is increasingly important
-- Startup AE experience (wearing many hats, building process) is valued for startup roles
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
 
@@ -480,11 +508,17 @@ SDR is often an early-career role. Assess POTENTIAL alongside experience:
 - **Too Senior/Stuck**: 5+ years as SDR without progression to AE
 - **No Tech Affinity**: No interest in or exposure to technology
 
-## Experience Guidelines
-- Ideal: 1-3 years SDR/sales experience
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL: SDR, BDR, Sales Development Representative, Business Development Representative
+- Count HALF: Account Executive (overqualified for SDR — but shows sales ability)
+- Count HALF: Customer Support/Success with outbound component
+- DO NOT count: Marketing, Engineering, Product, Admin, Retail sales, non-B2B roles
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
 - Entry-level OK if strong potential signals (university, military, drive)
-- Look for hunger, coachability, and competitive spirit
-- SaaS SDR experience is 2x more valuable than non-tech sales experience
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
 
@@ -555,12 +589,17 @@ Marketing roles vary enormously. Assess the TYPE and DEPTH:
 - **No Metrics Focus**: Only describes activities ("ran campaigns") without outcomes
 - **Traditional Only**: Print, trade shows, PR without any digital/demand gen
 
-## Experience Guidelines
-- Ideal: 4-10 years, mostly B2B SaaS
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL: Marketing Manager, Demand Gen, Growth Marketing, Product Marketing, Content Marketing, Marketing Director, CMO, Field Marketing
+- Count HALF: Marketing Ops / Marketing Analyst (supporting role, not strategic ownership)
+- Count HALF: Communications / PR (adjacent but not core B2B SaaS marketing)
+- DO NOT count: Sales, Engineering, Customer Support, Admin, Graphic Designer (without marketing strategy)
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 - Look for pipeline/revenue impact numbers — this is the #1 signal for B2B marketing
-- Growth/demand gen valued over brand for startup roles
-- PMM experience is especially valued for companies with technical buyers
-- Developer marketing is a rare and valuable specialty
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
 
@@ -630,11 +669,18 @@ CS roles range from reactive support to strategic account management. Assess the
 - **SMB Only for Enterprise Role**: Never managed accounts >$50K ARR
 - **Implementation/Onboarding Only**: No ongoing account management
 
-## Experience Guidelines
-- Ideal: 4-10 years in CS/account management
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL: Customer Success Manager, Account Manager (with renewal/expansion), CS Director, VP Customer Success, Client Success
+- Count HALF: Account Manager (order management only, no strategic upsell)
+- Count HALF: Technical Support / Solutions Engineer (customer-facing but not CS-specific)
+- Count HALF: Implementation / Onboarding Specialist (partial CS scope)
+- DO NOT count: Sales (hunting/new biz), Marketing, Engineering, Admin, Retail customer service
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 - Look for retention and expansion numbers — #1 signal
-- Enterprise experience for enterprise roles, SMB for SMB roles (match the segment)
-- Technical product experience is increasingly important
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
 
@@ -708,11 +754,17 @@ SE is a hybrid role — assess BOTH technical depth AND customer-facing ability:
 - **No SaaS Experience**: Only hardware, on-prem, or telecommunications
 - **Pure Sales**: Account executive with no technical component
 
-## Experience Guidelines
-- Ideal: 4-10 years, mix of technical + customer-facing
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL: Solutions Engineer, Sales Engineer, Presales Engineer, Technical Account Manager, Solutions Architect
+- Count HALF: Software Engineer (strong technical foundation, but not customer-facing SE work)
+- Count HALF: Technical Support Engineer / Developer Advocate (customer-facing but different scope)
+- DO NOT count: Account Executive (sales, not technical), Marketing, Admin, QA, non-technical roles
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
 - Engineering background is the strongest signal for SE roles
-- Look for enterprise deal involvement and technical win evidence
-- The best SEs are "engineers who love customers"
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
 
@@ -788,11 +840,17 @@ Global hiring standards differ from Israel. Focus on:
 - **Non-tech Industries**: Banks, government, insurance, telecom (unless in a clearly tech role)
 - **Freelance/Gig Work Only**: No stable employment at product companies
 
-## Experience Guidelines
-- Ideal: 4-10 years total experience
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL: Software Engineer, Developer, Backend/Frontend/Fullstack Engineer, Tech Lead, Staff Engineer, Architect, SRE
+- Count HALF: DevOps/Platform Engineer (infrastructure-adjacent, shows engineering ability)
+- Count HALF: Data Engineer (engineering work but different domain)
+- DO NOT count: QA (unless SDET with strong coding), Project Manager, Product Manager, Technical Support, IT, Admin
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
 - Company brand is a strong signal globally (passed high hiring bars)
-- Modern stack and cloud experience increasingly important
-- Remote work experience is a plus for distributed teams
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
 
@@ -868,12 +926,17 @@ EM is about PEOPLE + TECHNICAL + DELIVERY. Assess all three:
 - **HR/Admin Focus**: Not engineering management
 - **Only 1-2 Reports**: Not real management scope
 
-## Experience Guidelines
-- Ideal: 8-15 years total, 3+ years in management
-- People skills + technical credibility both matter
-- Look for hiring and team growth evidence
-- Delivery track record is key — shipped products, met deadlines
-- EM at a startup is more hands-on than EM at FAANG
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL (management): Engineering Manager, R&D Manager, Dev Manager, Director of Engineering, VP Engineering
+- Count FULL (IC): Software Engineer, Tech Lead, Staff Engineer, Architect (contributes to TOTAL experience)
+- Count HALF: Product Manager, Project Manager (adjacent management but not engineering management)
+- DO NOT count: QA (unless QA Manager managing engineers), Technical Support, IT, Admin, Sales, Marketing
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- Separate TOTAL experience from MANAGEMENT experience — JDs often require both (e.g., "8+ years total, 3+ in management")
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
 
@@ -946,12 +1009,17 @@ This is about ORG BUILDING + STRATEGY + BUSINESS IMPACT:
 - **Outdated Tech Context**: >7 years since any technical involvement
 - **Only Consulting/Outsource Leadership**: Managing offshore teams ≠ building a product org
 
-## Experience Guidelines
-- Ideal: 12-20 years total, 5+ years in senior leadership
-- Strategy and org building are the #1 signals
-- Business acumen matters enormously at this level
-- Look for scale AND complexity — not just headcount
-- Startup VP/CTO is different from enterprise Director — match to the hiring company's stage
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL (leadership): VP Engineering, VP R&D, Director of Engineering, CTO, Head of Engineering
+- Count FULL (management): Engineering Manager, R&D Manager (contributes to TOTAL and management experience)
+- Count FULL (IC): Software Engineer, Tech Lead, Staff Engineer, Architect (contributes to TOTAL experience only)
+- DO NOT count: Non-tech management (Sales VP, Marketing VP), Admin, non-engineering roles
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- Separate TOTAL experience from LEADERSHIP experience — JDs often require both (e.g., "12+ years total, 5+ in senior leadership")
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
 
@@ -1030,12 +1098,19 @@ DS/ML roles vary enormously. Assess the TYPE and DEPTH:
 - **Outdated ML Only**: Only classical ML from pre-2015, no deep learning or modern frameworks
 - **Bootcamp Only**: No real work experience beyond a 3-month bootcamp
 
-## Experience Guidelines
-- Ideal: 3-10 years in DS/ML (PhD counts as 3-4 years)
-- Production experience > research alone (but research from top labs is very strong)
-- Look for end-to-end ownership: data → model → production → business impact
-- Strong CS/math fundamentals matter — look for degrees in CS, Math, Stats, Physics, EE
-- LLM/GenAI experience is increasingly a differentiator
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL: Data Scientist, ML Engineer, Machine Learning Engineer, Research Scientist, Applied Scientist, MLOps Engineer
+- Count FULL: AI Engineer (if role involved model training/development, not just API integration)
+- Count HALF: Software Engineer (strong coding foundation but not DS/ML-specific)
+- Count HALF: Data Engineer (data pipeline skills transfer but no modeling)
+- Count HALF: Data Analyst (some statistical skills but not ML depth)
+- DO NOT count: BI Analyst (dashboards/SQL only), Project Manager, Product Manager, IT, Admin
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- PhD counts as 3-4 years of experience. Production experience > research alone (but top labs are very strong)
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
 
@@ -1115,13 +1190,17 @@ QA Automation ranges from "clicks buttons" to "builds test infrastructure." Asse
 - **No Programming**: Can't write or maintain test code
 - **Outdated Tools Only**: Only HP QTP/UFT, no modern frameworks
 
-## Experience Guidelines
-- Ideal: 3-8 years in QA automation
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL: QA Automation Engineer, SDET, Test Automation Engineer, Software Engineer in Test, Automation Architect
+- Count HALF: Software Engineer (strong coding foundation transfers, but not QA-specific)
+- Count HALF: Manual QA (only if profile shows some automation scripting alongside manual work)
+- DO NOT count: Manual QA only (no automation), Project Manager, Product Manager, IT, Admin, DevOps (unless test infra focused)
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
 - Coding skills matter — treat SDET as an engineer, not a tester
-- Framework design > just writing test cases
-- Look for CI/CD and DevOps mindset
-- Modern tools (Playwright, Cypress) preferred over legacy (Selenium alone)
-- Performance testing experience is increasingly valued
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
 
@@ -1201,12 +1280,17 @@ Mobile is a specialized discipline. Assess the DEPTH and PLATFORM:
 - **No Published Apps**: No evidence of apps in production
 - **Non-tech industries**: Telecom, banks, government, insurance (without modern mobile stack)
 
-## Experience Guidelines
-- Ideal: 4-10 years mobile experience
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL: Mobile Engineer, iOS Engineer, Android Engineer, Mobile Developer, React Native Developer, Flutter Developer
+- Count FULL: Software Engineer (only if profile shows mobile development: Swift, Kotlin, React Native, Flutter, mobile SDKs)
+- Count HALF: Software Engineer (general — shows coding ability but not mobile-specific)
+- Count HALF: Frontend Engineer (UI skills transfer to mobile, but platform knowledge differs)
+- DO NOT count: Military (use pre-calculated half-credit from EXPERIENCE SUMMARY), QA, Backend-only, DevOps, IT, Technical Support, Project Manager
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
 - Platform depth matters more than breadth — deep iOS is better than shallow iOS+Android
-- Company brand matters — mobile at Wix/Monday is different from mobile at a body shop
-- Army experience counts as ~half (2 years army = 1 year work experience)
-- Look for apps you can actually find in the App Store / Google Play
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 {_ISRAEL_SPARSE_PROFILE}
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
@@ -1297,13 +1381,18 @@ This is a new role — look for BOTH software engineering AND AI skills:
 - **Only BI/Analytics**: SQL dashboards labeled as "AI"
 - **Agencies/Consulting**: Body shop consulting without real AI product work
 
-## Experience Guidelines
-- Ideal: 3-8 years total SWE experience, 1-3+ years working with AI/LLM
-- This is a NEW field — 1-2 years of focused AI engineering is meaningful
-- Strong SWE background is more important than years of AI specifically
-- Look for PRODUCTION AI experience, not just prototypes or demos
-- A senior SWE who shipped RAG features for 1 year > a "prompt engineer" with 3 years
-- Open source contributions and technical writing about AI are strong signals
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Count FULL: AI Engineer, ML Engineer, Software Engineer (with demonstrated AI/LLM work in role description or skills)
+- Count FULL: Software Engineer at AI-focused company (OpenAI, Anthropic, Cohere, AI21, etc.)
+- Count HALF: Software Engineer (general — strong coding foundation but no AI-specific work shown)
+- Count HALF: Data Scientist / Research Scientist (ML knowledge transfers but different focus than AI engineering)
+- DO NOT count: Prompt Engineer (no SWE background), BI Analyst, Data Analyst, Project Manager, Admin
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- This is a NEW field — strong SWE background is more important than years of AI specifically
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
 {_COMPANY_DESCRIPTION_ANALYSIS}""",
 }
 
@@ -1337,12 +1426,23 @@ Since this is a general prompt, follow these universal screening principles:
 6. **Industry match**: If JD specifies an industry, check if candidate has relevant experience
 7. **Be calibrated**: 10/10 is extremely rare. Most good candidates are 7-8. Average is 5-6.
 
+## Experience Calculation (CRITICAL)
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
+- Decide which roles count as FULL, HALF, or DO NOT COUNT based on the JD requirements
+- Count FULL: Roles that directly match the JD's core function
+- Count HALF: Adjacent roles that show transferable skills but aren't a direct match
+- DO NOT count: Roles completely unrelated to the JD requirements
+- For Israeli candidates: Military service half-credit is pre-calculated in the EXPERIENCE SUMMARY above. Use those numbers
+- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
+- Sum months from relevant roles. If JD requires "X+ years" and candidate has less, score 5-6 max
+- Show your work: list which roles you counted and excluded
+
 ## Common Disqualifiers (apply broadly)
 - **Current role <6 months**: Too new, not settled → score ≤5
 - **Job hopping**: Multiple companies <1.5 years each without clear reason
 - **Consulting/Body shops**: Agencies and outsourcing firms (unless JD specifically wants this)
 - **Wrong industry**: No tech experience for tech roles, no SaaS for SaaS roles
-- **Overqualified**: VP applying for IC role, OR exceeds the JD's explicit max-years limit (calculate from employment dates)
+- **Overqualified**: VP applying for IC role, OR exceeds the JD's explicit max-years limit
 - **Underqualified**: Junior applying for senior, or missing core required skills
 
 ## Important

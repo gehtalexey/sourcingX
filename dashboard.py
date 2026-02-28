@@ -3154,9 +3154,15 @@ def compute_role_durations(raw):
         if military_months > 0:
             half_mil = military_months // 2
             lines.append(f'  MILITARY SERVICE: {_fmt_duration(military_months)} (counts as HALF = {_fmt_duration(half_mil)} toward role-specific experience)')
-            industry_months = total_months - military_months
-            lines.append(f'  INDUSTRY EXPERIENCE (excl military): {_fmt_duration(max(0, industry_months))}')
-            lines.append(f'  ROLE-SPECIFIC BASELINE: industry {_fmt_duration(max(0, industry_months))} + military half-credit {_fmt_duration(half_mil)} = {_fmt_duration(max(0, industry_months) + half_mil)}')
+            # Calculate industry experience from earliest non-military role (not total_span - military)
+            if all_starts_non_mil:
+                earliest_non_mil = min(all_starts_non_mil)
+                industry_months = max(0, (today.year - earliest_non_mil.year) * 12 + (today.month - earliest_non_mil.month))
+                lines.append(f'  INDUSTRY EXPERIENCE (excl military): {_fmt_duration(industry_months)} (from {earliest_non_mil.strftime("%b %Y")} to today)')
+            else:
+                industry_months = 0
+                lines.append(f'  INDUSTRY EXPERIENCE (excl military): 0m (only military roles found)')
+            lines.append(f'  ROLE-SPECIFIC BASELINE: industry {_fmt_duration(industry_months)} + military half-credit {_fmt_duration(half_mil)} = {_fmt_duration(industry_months + half_mil)}')
         else:
             lines.append(f'  INDUSTRY EXPERIENCE: {_fmt_duration(total_months)} (no military service detected)')
         lines.append('  NOTE: AI must determine which roles are role-specific from the durations above. The baseline above is a starting point.')
@@ -3226,6 +3232,13 @@ YOU must determine ROLE-SPECIFIC EXPERIENCE from the role durations above:
 - The JD's year range (e.g. "5-15 years") and rejection threshold (e.g. "reject >15 years") apply to ROLE-SPECIFIC experience
 - Military service counts as HALF toward role-specific experience (mandatory service, positive signal)
 
+## Role Classification Edge Cases
+- "Software Engineer" / "Senior Software Engineer" is NOT automatically relevant or irrelevant.
+  Check the candidate's skills: if they have strong JD overlap (e.g. K8s, Terraform, AWS, CI/CD for a DevOps JD),
+  count the SWE role as HALF toward role-specific experience. If no skill overlap, do not count it.
+- IT Support, QA, Helpdesk, Storage Admin, Network Admin = NOT relevant, do not count
+- SysAdmin = only count if cloud-focused (AWS/GCP/Azure mentioned in role or skills)
+
 ## STABILITY VERDICT (MANDATORY — do NOT override)
 A STABILITY VERDICT is pre-calculated above. You MUST obey it:
 - If "STABILITY VERDICT: FAIL → MAX SCORE 4" — your score CANNOT exceed 4, no matter how strong the candidate
@@ -3258,6 +3271,8 @@ Today's date: {today}
 - If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at the company once
 - The JD year range (e.g. "5-15 years") applies to ROLE-SPECIFIC experience — only count roles relevant to the JD
 - Do NOT count unrelated early-career roles (tech support, help desk, QA, basic sysadmin) toward role-specific experience
+- "Software Engineer" roles: check skills for JD overlap. If strong overlap (e.g. K8s, Terraform for DevOps JD), count as HALF. If no overlap, do not count
+- SysAdmin: only count if cloud-focused (AWS/GCP/Azure). On-prem only sysadmin does not count
 - Check the "skills" array for technical skills
 - Read "employer_description" to understand what each company does
 

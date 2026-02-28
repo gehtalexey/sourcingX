@@ -214,8 +214,10 @@ Output: "Stability: X short-stint companies, current role = Y months"
 ## Experience Calculation (CRITICAL)
 Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
 - Decide which roles count as DevOps/SRE relevant (you classify)
-- Count: DevOps, SRE, Platform Engineer, Cloud Engineer, Infrastructure Engineer, Software Engineer
-- DO NOT count: Military, IT Support, Helpdesk, SysAdmin (unless cloud), Network Admin, Storage Admin
+- Count FULL: DevOps, SRE, Platform Engineer, Cloud Engineer, Infrastructure Engineer
+- Count HALF: Software Engineer (only if candidate's skills show strong DevOps overlap: K8s, Terraform, AWS, CI/CD. Otherwise do not count)
+- Count HALF: SysAdmin (only if cloud-focused with AWS/GCP/Azure. On-prem only = do not count)
+- DO NOT count: Military (use pre-calculated half-credit from EXPERIENCE SUMMARY), IT Support, Helpdesk, QA, Network Admin, Storage Admin
 - IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
 - Sum months from relevant roles. Include the CURRENT ROLE if relevant
 - If JD requires "X+ years" and candidate has less, score 5-6 max

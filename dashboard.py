@@ -269,6 +269,8 @@ def load_config():
                 config['filter_sheets'] = dict(st.secrets['filter_sheets'])
             if 'salesql_api_key' in st.secrets:
                 config['salesql_api_key'] = st.secrets['salesql_api_key']
+            if 'anthropic_api_key' in st.secrets:
+                config['anthropic_api_key'] = st.secrets['anthropic_api_key']
     except Exception:
         pass
 
@@ -2275,8 +2277,18 @@ def load_sheet_as_df(sheet_url: str, worksheet_name: str = None) -> pd.DataFrame
         else:
             worksheet = spreadsheet.sheet1
 
-        data = worksheet.get_all_records()
-        return pd.DataFrame(data)
+        rows = worksheet.get_all_values()
+        if not rows:
+            return pd.DataFrame()
+        headers = rows[0]
+        # Find last non-empty header to trim blank trailing columns
+        last_col = 0
+        for i, h in enumerate(headers):
+            if h.strip():
+                last_col = i + 1
+        headers = headers[:last_col]
+        data = [row[:last_col] for row in rows[1:]]
+        return pd.DataFrame(data, columns=headers)
     except Exception as e:
         st.error(f"Error loading sheet: {e}")
         return None
@@ -3709,7 +3721,7 @@ with st.sidebar:
     _api_status = {
         'Crustdata': bool(config.get('api_key')),
         'OpenAI': bool(config.get('openai_api_key')),
-        'Anthropic': bool(config.get('anthropic_api_key')),
+        'Anthropic': bool(load_anthropic_key()),
         'PhantomBuster': bool(config.get('phantombuster_api_key')),
         'SalesQL': bool(config.get('salesql_api_key')),
         'Google Sheets': bool(config.get('google_credentials') or config.get('google_credentials_file')),

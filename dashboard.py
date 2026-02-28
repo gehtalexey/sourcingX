@@ -3169,16 +3169,10 @@ def compute_role_durations(raw):
         lines.append(f'  TOTAL CAREER SPAN: {_fmt_duration(total_months)} (from {earliest.strftime("%b %Y")} to today)')
         if military_months > 0:
             half_mil = military_months // 2
-            lines.append(f'  MILITARY SERVICE: {_fmt_duration(military_months)} (counts as HALF = {_fmt_duration(half_mil)} toward role-specific experience)')
-            # Calculate industry experience from earliest non-military role (not total_span - military)
-            if all_starts_non_mil:
-                earliest_non_mil = min(all_starts_non_mil)
-                industry_months = max(0, (today.year - earliest_non_mil.year) * 12 + (today.month - earliest_non_mil.month))
-                lines.append(f'  INDUSTRY EXPERIENCE (excl military): {_fmt_duration(industry_months)} (from {earliest_non_mil.strftime("%b %Y")} to today)')
-            else:
-                industry_months = 0
-                lines.append(f'  INDUSTRY EXPERIENCE (excl military): 0m (only military roles found)')
-            lines.append(f'  ROLE-SPECIFIC BASELINE: industry {_fmt_duration(industry_months)} + military half-credit {_fmt_duration(half_mil)} = {_fmt_duration(industry_months + half_mil)}')
+            lines.append(f'  MILITARY SERVICE: {_fmt_duration(military_months)} (counts as HALF = {_fmt_duration(half_mil)} for role-specific)')
+            # Calculate industry experience as total minus military
+            industry_months = max(0, total_months - military_months)
+            lines.append(f'  INDUSTRY EXPERIENCE (excl military): {_fmt_duration(industry_months)}')
         else:
             lines.append(f'  INDUSTRY EXPERIENCE: {_fmt_duration(total_months)} (no military service detected)')
         lines.append('  NOTE: AI must determine which roles are role-specific from the durations above. The baseline above is a starting point.')

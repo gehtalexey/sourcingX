@@ -7222,10 +7222,10 @@ with tab_database:
                         all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=50000)
                         st.caption(f"Full-text search: **{ft}**" + (" + column filters" if has_column_filters else ""))
                     elif has_column_filters:
-                        # Column filters only (server-side)
-                        from db import search_profiles_filtered
-                        all_profiles = search_profiles_filtered(db_client, af, limit=50000)
-                        st.caption("Server-side filtered search")
+                        # Column filters only (server-side) with boolean query support
+                        from db import search_profiles_boolean
+                        all_profiles = search_profiles_boolean(db_client, af, limit=50000)
+                        st.caption("Server-side filtered search (supports: OR, AND, NOT, \"phrases\")")
                     else:
                         # No filters - load all
                         all_profiles = get_all_profiles(db_client, limit=50000)
@@ -7245,24 +7245,159 @@ with tab_database:
                     # Apply column filters client-side when combined with full-text search
                     # (full-text search RPC doesn't support column filters natively)
                     if ft and ft.strip() and has_column_filters:
-                        def _ilike_filter(series, terms_str):
-                            """Case-insensitive OR filter: matches if any term is a substring."""
-                            terms = [t.strip().lower() for t in terms_str.split(',') if t.strip()]
-                            return series.fillna('').str.lower().apply(
-                                lambda val: any(t in val for t in terms)
-                            )
+                        def _parse_boolean_query_client(query: str) -> dict:
+                            """Parse boolean query for client-side filtering.
+                            Returns AST: {'type': 'OR'|'AND'|'NOT'|'TERM', 'children'|'child'|'value': ...}
+                            """
+                            import re
+                            # Tokenize
+                            tokens = []
+                            i = 0
+                            query = query.strip()
+                            while i < len(query):
+                                if query[i].isspace():
+                                    i += 1
+                                    continue
+                                if query[i] == '"':
+                                    end = query.find('"', i + 1)
+                                    if end == -1:
+                                        end = len(query)
+                                    tokens.append(('PHRASE', query[i+1:end]))
+                                    i = end + 1
+                                    continue
+                                if query[i] == '(':
+                                    tokens.append(('LPAREN', '('))
+                                    i += 1
+                                    continue
+                                if query[i] == ')':
+                                    tokens.append(('RPAREN', ')'))
+                                    i += 1
+                                    continue
+                                if query[i] == '|':
+                                    tokens.append(('OR', 'OR'))
+                                    i += 1
+                                    continue
+                                if query[i] == '&':
+                                    tokens.append(('AND', 'AND'))
+                                    i += 1
+                                    continue
+                                if query[i] in '!-' and (i == 0 or query[i-1].isspace() or query[i-1] in '(&|'):
+                                    tokens.append(('NOT', 'NOT'))
+                                    i += 1
+                                    continue
+                                if query[i] == ',':
+                                    tokens.append(('OR', 'OR'))
+                                    i += 1
+                                    continue
+                                if query[i] == '+':
+                                    i += 1
+                                    continue
+                                word_match = re.match(r'[\w\.\-]+', query[i:])
+                                if word_match:
+                                    word = word_match.group()
+                                    upper_word = word.upper()
+                                    if upper_word == 'AND':
+                                        tokens.append(('AND', 'AND'))
+                                    elif upper_word == 'OR':
+                                        tokens.append(('OR', 'OR'))
+                                    elif upper_word == 'NOT':
+                                        tokens.append(('NOT', 'NOT'))
+                                    else:
+                                        tokens.append(('WORD', word))
+                                    i += len(word)
+                                    continue
+                                i += 1
 
-                        def _array_filter(series, terms_str):
-                            """Case-insensitive OR filter for array columns (stored as lists or comma-sep strings)."""
-                            terms = [t.strip().lower() for t in terms_str.split(',') if t.strip()]
+                            # Parse tokens to AST
+                            pos = [0]
+                            def peek():
+                                return tokens[pos[0]] if pos[0] < len(tokens) else None
+                            def consume():
+                                t = peek()
+                                pos[0] += 1
+                                return t
+                            def parse_or():
+                                left = parse_and()
+                                while peek() and peek()[0] == 'OR':
+                                    consume()
+                                    right = parse_and()
+                                    if left.get('type') == 'OR':
+                                        left['children'].append(right)
+                                    else:
+                                        left = {'type': 'OR', 'children': [left, right]}
+                                return left
+                            def parse_and():
+                                left = parse_not()
+                                while peek():
+                                    token = peek()
+                                    if token[0] == 'AND':
+                                        consume()
+                                        right = parse_not()
+                                    elif token[0] in ('WORD', 'PHRASE', 'NOT', 'LPAREN'):
+                                        right = parse_not()
+                                    else:
+                                        break
+                                    if left.get('type') == 'AND':
+                                        left['children'].append(right)
+                                    else:
+                                        left = {'type': 'AND', 'children': [left, right]}
+                                return left
+                            def parse_not():
+                                if peek() and peek()[0] == 'NOT':
+                                    consume()
+                                    return {'type': 'NOT', 'child': parse_primary()}
+                                return parse_primary()
+                            def parse_primary():
+                                token = peek()
+                                if not token:
+                                    return {'type': 'TERM', 'value': ''}
+                                if token[0] == 'LPAREN':
+                                    consume()
+                                    expr = parse_or()
+                                    if peek() and peek()[0] == 'RPAREN':
+                                        consume()
+                                    return expr
+                                if token[0] in ('WORD', 'PHRASE'):
+                                    consume()
+                                    return {'type': 'TERM', 'value': token[1]}
+                                consume()
+                                return parse_primary()
+
+                            if not tokens:
+                                return {'type': 'TERM', 'value': ''}
+                            return parse_or()
+
+                        def _eval_boolean_ast(ast: dict, text: str) -> bool:
+                            """Evaluate boolean AST against text."""
+                            text = text.lower()
+                            node_type = ast.get('type')
+                            if node_type == 'TERM':
+                                value = ast.get('value', '').lower()
+                                return value in text if value else True
+                            if node_type == 'NOT':
+                                return not _eval_boolean_ast(ast['child'], text)
+                            if node_type == 'OR':
+                                return any(_eval_boolean_ast(c, text) for c in ast['children'])
+                            if node_type == 'AND':
+                                return all(_eval_boolean_ast(c, text) for c in ast['children'])
+                            return True
+
+                        def _boolean_filter(series, query_str):
+                            """Boolean filter supporting OR, AND, NOT, phrases."""
+                            ast = _parse_boolean_query_client(query_str)
+                            return series.fillna('').apply(lambda val: _eval_boolean_ast(ast, str(val)))
+
+                        def _boolean_array_filter(series, query_str):
+                            """Boolean filter for array columns."""
+                            ast = _parse_boolean_query_client(query_str)
                             def matches(val):
                                 if isinstance(val, list):
-                                    joined = ' '.join(str(v) for v in val).lower()
+                                    joined = ' '.join(str(v) for v in val)
                                 elif isinstance(val, str):
-                                    joined = val.lower()
+                                    joined = val
                                 else:
                                     return False
-                                return any(t in joined for t in terms)
+                                return _eval_boolean_ast(ast, joined)
                             return series.apply(matches)
 
                         mask = pd.Series(True, index=df.index)
@@ -7273,10 +7408,10 @@ with tab_database:
 
                         for fkey, col in str_filters.items():
                             if af.get(fkey) and col in df.columns:
-                                mask &= _ilike_filter(df[col], af[fkey])
+                                mask &= _boolean_filter(df[col], af[fkey])
                         for fkey, col in arr_filters.items():
                             if af.get(fkey) and col in df.columns:
-                                mask &= _array_filter(df[col], af[fkey])
+                                mask &= _boolean_array_filter(df[col], af[fkey])
                         if af.get('has_email') and 'email' in df.columns:
                             mask &= df['email'].fillna('').astype(bool)
 

@@ -31,10 +31,7 @@ class MockOpenAIClient:
         self.captured_calls = []
         self.response_data = response_data or {
             "score": 7, "fit": "Good Fit",
-            "summary": "Strong candidate with relevant experience",
-            "why": "Meets core requirements",
-            "strengths": ["Good company background", "Relevant skills"],
-            "concerns": ["Could use more leadership experience"]
+            "summary": "Strong candidate with relevant experience"
         }
         self.chat = MagicMock()
         self.chat.completions = MagicMock()
@@ -292,7 +289,8 @@ def profile_builder():
                     {'employee_title': title, 'employer_name': company, 'start_date': '2022-01'}
                 ],
                 'past_employers': [], 'education_background': [],
-                'all_employers': employers or [company], 'all_titles': [title]
+                'all_employers': employers or [company], 'all_titles': [title],
+                'skills': skills or ['Python', 'JavaScript']
             }
         return profile
     return _build

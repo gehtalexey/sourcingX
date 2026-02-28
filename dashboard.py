@@ -3096,8 +3096,10 @@ def compute_role_durations(raw):
         total_months = max(0, (comp_data['max_end'].year - comp_data['min_start'].year) * 12 +
                            (comp_data['max_end'].month - comp_data['min_start'].month)) if comp_data['min_start'] else 0
         if comp_data['is_current']:
-            current_company_name = comp_name
-            current_company_months = total_months
+            # If multiple current companies, pick the longest tenure (primary role)
+            if current_company_months is None or total_months > current_company_months:
+                current_company_name = comp_name
+                current_company_months = total_months
         elif total_months < 12:
             short_companies.append(f"{comp_name} ({_fmt_duration(total_months)})")
 
@@ -3117,6 +3119,47 @@ def compute_role_durations(raw):
         lines.append(f'>>> STABILITY VERDICT: FAIL — current role {_fmt_duration(current_company_months)} < 6 months → MAX SCORE 5 <<<')
     else:
         lines.append('>>> STABILITY VERDICT: PASS <<<')
+
+    # Pre-computed EXPERIENCE SUMMARY — total career span and military detection
+    _mil_keywords = {'idf', 'israel defense forces', 'israeli air force', 'mamram', 'unit 8200',
+                     'talpiot', 'c4i', 'israeli navy', 'israeli military', 'iaf',
+                     'j6 & cyber defense', 'cyber defense directorate'}
+    all_starts = []
+    all_starts_non_mil = []
+    military_months = 0
+    for emp_key in ['past_employers', 'current_employers']:
+        for emp in (raw.get(emp_key) or []):
+            title = (emp.get('employee_title') or '').strip()
+            if not title:
+                continue
+            start = _parse_date(emp.get('start_date'))
+            end = _parse_date(emp.get('end_date')) or today
+            if not start:
+                continue
+            emp_name = (emp.get('employer_name') or '').lower()
+            emp_title = title.lower()
+            is_military = any(kw in emp_name or kw in emp_title for kw in _mil_keywords)
+            all_starts.append(start)
+            if is_military:
+                military_months += max(0, (end.year - start.year) * 12 + (end.month - start.month))
+            else:
+                all_starts_non_mil.append(start)
+
+    if all_starts:
+        lines.append('')
+        lines.append('EXPERIENCE SUMMARY (pre-calculated):')
+        earliest = min(all_starts)
+        total_months = max(0, (today.year - earliest.year) * 12 + (today.month - earliest.month))
+        lines.append(f'  TOTAL CAREER SPAN: {_fmt_duration(total_months)} (from {earliest.strftime("%b %Y")} to today)')
+        if military_months > 0:
+            half_mil = military_months // 2
+            lines.append(f'  MILITARY SERVICE: {_fmt_duration(military_months)} (counts as HALF = {_fmt_duration(half_mil)} toward role-specific experience)')
+            industry_months = total_months - military_months
+            lines.append(f'  INDUSTRY EXPERIENCE (excl military): {_fmt_duration(max(0, industry_months))}')
+            lines.append(f'  ROLE-SPECIFIC BASELINE: industry {_fmt_duration(max(0, industry_months))} + military half-credit {_fmt_duration(half_mil)} = {_fmt_duration(max(0, industry_months) + half_mil)}')
+        else:
+            lines.append(f'  INDUSTRY EXPERIENCE: {_fmt_duration(total_months)} (no military service detected)')
+        lines.append('  NOTE: AI must determine which roles are role-specific from the durations above. The baseline above is a starting point.')
 
     return '\n'.join(lines)
 
@@ -3166,16 +3209,29 @@ def trim_raw_profile(raw):
 
 _DURATION_PROMPT_INSTRUCTIONS = """
 ## Pre-calculated Data (use these numbers, do NOT recalculate)
-Role durations and stability data are pre-calculated above the profile JSON.
+Role durations, stability, and experience summary are pre-calculated above the profile JSON.
 - Use the ROLE DURATIONS for experience calculation
 - The line marked ">>> CURRENT ROLE <<<" shows the current role
 - If multiple roles at the SAME company, they are promotions — count total time at that company ONCE
+
+## EXPERIENCE RULES (MANDATORY)
+Three experience metrics are pre-calculated above:
+- TOTAL CAREER SPAN: all jobs from first to today (for general seniority context)
+- MILITARY SERVICE: Israeli military time (excluded from industry experience, counts as half for role-specific)
+- INDUSTRY EXPERIENCE: career span minus military (general non-military career)
+
+YOU must determine ROLE-SPECIFIC EXPERIENCE from the role durations above:
+- Only count roles relevant to the JD (e.g. DevOps/Infrastructure/SRE roles for a DevOps JD)
+- Do NOT count unrelated early-career roles (tech support, QA, sysadmin) toward role-specific experience
+- The JD's year range (e.g. "5-15 years") and rejection threshold (e.g. "reject >15 years") apply to ROLE-SPECIFIC experience
+- Military service counts as HALF toward role-specific experience (mandatory service, positive signal)
 
 ## STABILITY VERDICT (MANDATORY — do NOT override)
 A STABILITY VERDICT is pre-calculated above. You MUST obey it:
 - If "STABILITY VERDICT: FAIL → MAX SCORE 4" — your score CANNOT exceed 4, no matter how strong the candidate
 - If "STABILITY VERDICT: FAIL → MAX SCORE 5" — your score CANNOT exceed 5, no matter how strong the candidate
 - If "STABILITY VERDICT: PASS" — score normally
+- IMPORTANT: Stability is measured by time at current COMPANY, not current position title. Promotions within the same company do NOT reset tenure.
 This is a hard cap. Do NOT override it even if the candidate has top companies or perfect skills."""
 
 
@@ -3197,9 +3253,11 @@ Today's date: {today}
 
 ## Key Rules:
 - Nice-to-Have = bonus only, NOT a penalty if missing
-- Israeli military service (IDF, 8200, Mamram) is mandatory in Israel and a POSITIVE signal
-- Role durations are pre-calculated above the profile JSON. Use those numbers, do NOT recalculate from dates
-- If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time once
+- Israeli military service (IDF, 8200, Mamram) is mandatory in Israel and a POSITIVE signal. Counts as HALF for role-specific experience
+- Role durations and experience summary are pre-calculated above the profile JSON. Use those numbers, do NOT recalculate from dates
+- If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at the company once
+- The JD year range (e.g. "5-15 years") applies to ROLE-SPECIFIC experience — only count roles relevant to the JD
+- Do NOT count unrelated early-career roles (tech support, help desk, QA, basic sysadmin) toward role-specific experience
 - Check the "skills" array for technical skills
 - Read "employer_description" to understand what each company does
 
@@ -3263,9 +3321,7 @@ def screen_profile(profile: dict, job_description: str, client,
             return {
                 "score": 0,
                 "fit": "Skipped",
-                "summary": "Insufficient profile data",
-                "strengths": [],
-                "concerns": []
+                "summary": "Insufficient profile data"
             }
 
     # Pre-compute durations and trim raw JSON (creates new objects, doesn't modify originals)
@@ -3274,11 +3330,11 @@ def screen_profile(profile: dict, job_description: str, client,
 
     # JSON format based on mode
     if mode == "quick":
-        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit", "summary": "one sentence"}'
-        max_tokens = 150
+        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit"}'
+        max_tokens = 50
     else:
-        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit", "summary": "2-3 sentences about the candidate", "why": "2-3 sentences explaining the score with specific evidence", "strengths": ["strength1", "strength2"], "concerns": ["only if fails explicit JD requirement, otherwise empty array"]}'
-        max_tokens = 500
+        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit", "summary": "2-3 sentences: experience calc, key skills match, and score justification"}'
+        max_tokens = 300
 
     # Build prompts
     today = datetime.now().strftime("%Y-%m-%d")
@@ -3312,7 +3368,7 @@ Evaluate this candidate against the job requirements and return JSON."""
             # Anthropic API: system prompt is a separate parameter, no json_object mode
             response = client.messages.create(
                 model=ai_model,
-                max_tokens=max(max_tokens, 1200),  # Haiku needs more tokens for detailed responses
+                max_tokens=max(max_tokens, 400),  # Ensure enough tokens for Haiku's JSON response
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
                 temperature=0.3
@@ -3366,9 +3422,7 @@ Evaluate this candidate against the job requirements and return JSON."""
         return {
             "score": 0,
             "fit": "Error",
-            "summary": f"JSON parse error: {str(e)[:80]}",
-            "strengths": [],
-            "concerns": []
+            "summary": f"JSON parse error: {str(e)[:80]}"
         }
     except Exception as e:
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -3381,9 +3435,7 @@ Evaluate this candidate against the job requirements and return JSON."""
         return {
             "score": 0,
             "fit": "Error",
-            "summary": f"API error: {str(e)[:80]}",
-            "strengths": [],
-            "concerns": []
+            "summary": f"API error: {str(e)[:80]}"
         }
 
 def _ensure_raw_dict(raw):
@@ -3549,8 +3601,6 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                 "score": 0,
                 "fit": "Error",
                 "summary": f"Screen error: {str(e)[:80]}",
-                "strengths": [],
-                "concerns": [],
                 "name": profile.get('name', '') or profile.get('first_name', '') or profile.get('fullName', '') or f"Profile {index}",
                 "current_title": "",
                 "current_company": "",
@@ -3592,8 +3642,6 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                     "score": 0,
                     "fit": "Error",
                     "summary": f"Thread error: {error_msg[:80]}",
-                    "strengths": [],
-                    "concerns": [],
                     "name": f"Profile {idx}",
                     "current_title": "",
                     "current_company": "",
@@ -4411,7 +4459,18 @@ with tab_filter:
             st.error("Google credentials not configured. Cannot connect to Google Sheets.")
 
         if has_sheets:
-            st.success("Filter sheet configured")
+            # Show sheet name (cached to avoid repeated API calls)
+            cache_key = f"sheet_title_{filter_sheets.get('url', '')}"
+            if cache_key not in st.session_state:
+                try:
+                    st.session_state[cache_key] = gspread_client.open_by_url(filter_sheets['url']).title
+                except Exception:
+                    st.session_state[cache_key] = None
+            sheet_name = st.session_state.get(cache_key)
+            if sheet_name:
+                st.success(f"Filter sheet configured: **{sheet_name}**")
+            else:
+                st.success("Filter sheet configured")
 
             # Validate sheet connection
             if st.button("Verify Sheet Connection", key="verify_sheet"):
@@ -5635,7 +5694,17 @@ with tab_filter2:
         has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
 
         if has_sheets:
-            st.success("Filter sheet configured")
+            cache_key = f"sheet_title_{filter_sheets.get('url', '')}"
+            if cache_key not in st.session_state:
+                try:
+                    st.session_state[cache_key] = gspread_client.open_by_url(filter_sheets['url']).title
+                except Exception:
+                    st.session_state[cache_key] = None
+            sheet_name = st.session_state.get(cache_key)
+            if sheet_name:
+                st.success(f"Filter sheet configured: **{sheet_name}**")
+            else:
+                st.success("Filter sheet configured")
 
         st.divider()
         st.markdown("**Filter Options:**")
@@ -6219,7 +6288,7 @@ with tab_screening:
                 options=["Quick (cheaper)", "Detailed"],
                 index=1,  # Default to Detailed
                 key="screening_mode",
-                help="Quick: score + fit + short summary | Detailed: adds reasoning, strengths, concerns"
+                help="Quick: score + fit only | Detailed: adds summary with experience calc and justification"
             )
         with col_model:
             model_options = ["gpt-4o-mini (fast)", "gpt-4o (accurate)", "Claude Haiku (balanced)"]
@@ -6252,11 +6321,11 @@ with tab_screening:
             model_input_cost = 2.50
             model_output_cost = 10.00
         if screening_mode == "Quick (cheaper)":
-            output_tokens = 50  # ~50 tokens for quick response
-            st.caption("Quick mode: Returns score, fit level, and brief summary only")
+            output_tokens = 20  # ~20 tokens for score + fit only
+            st.caption("Quick mode: Returns score and fit level only")
         else:
-            output_tokens = 200  # ~200 tokens for detailed response
-            st.caption("Detailed mode: Returns full analysis with reasoning, strengths, and concerns")
+            output_tokens = 150  # ~150 tokens for score + fit + summary
+            st.caption("Detailed mode: Returns score, fit, and summary with experience calc")
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
         role_display = selected_role if selected_role != 'General (auto)' else 'General'
@@ -6768,7 +6837,7 @@ with tab_screening:
                     # Columns that should NOT be merged from old data (screening is always fresh per JD)
                     exclude_from_merge = {
                         # Session screening columns
-                        'score', 'fit', 'summary', 'why', 'strengths', 'concerns',
+                        'score', 'fit', 'summary',
                         # Database screening columns
                         'screening_score', 'screening_fit_level', 'screening_summary',
                         'screening_reasoning', 'screened_at', 'status',
@@ -6784,7 +6853,7 @@ with tab_screening:
                         )
 
                 # Reorder columns to put important ones first (linkedin_url next to name for easy click)
-                priority_cols = ['score', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'why', 'strengths', 'concerns', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
+                priority_cols = ['score', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
                 ordered_cols = [c for c in priority_cols if c in df_display.columns]
                 other_cols = [c for c in df_display.columns if c not in priority_cols and c != 'index']
                 df_display = df_display[ordered_cols + other_cols]
@@ -6918,83 +6987,17 @@ with tab_screening:
             # Export options
             st.markdown("### Export Results")
 
-            # Build raw_data index on-demand for CSV export (not stored in session_state)
-            def add_raw_data_to_results(results_list):
-                """Add raw_data column to results for CSV export (fetched on-demand from DB)."""
-                if not results_list:
-                    return []
-
-                # Try to get raw_data from database
-                raw_index = {}
-                db_client = _get_db_client() if HAS_DATABASE else None
-                if db_client:
-                    try:
-                        # Collect and normalize URLs
-                        urls_set = set()
-                        for r in results_list:
-                            orig_url = r.get('linkedin_url', '')
-                            if orig_url:
-                                urls_set.add(orig_url)
-                                norm_url = normalize_linkedin_url(orig_url)
-                                if norm_url:
-                                    urls_set.add(norm_url)
-
-                        if urls_set:
-                            # Fetch all profiles with raw_data, filter locally
-                            # More efficient than N individual queries
-                            response = db_client.select('profiles', 'linkedin_url,raw_data', limit=5000)
-                            if response:
-                                for row in response:
-                                    if row.get('raw_data') and row.get('linkedin_url'):
-                                        db_url = row['linkedin_url']
-                                        # Index by both original and normalized URL
-                                        raw_index[db_url] = row['raw_data']
-                                        norm = normalize_linkedin_url(db_url)
-                                        if norm and norm != db_url:
-                                            raw_index[norm] = row['raw_data']
-                    except Exception as e:
-                        print(f"[Export] Failed to fetch raw_data from DB: {e}")
-
-                # Fallback: try enriched_df if DB didn't have data
-                if not raw_index:
-                    enriched_df_fallback = st.session_state.get('enriched_df')
-                    if enriched_df_fallback is not None and not enriched_df_fallback.empty and 'raw_data' in enriched_df_fallback.columns:
-                        enriched_records = enriched_df_fallback.to_dict('records')
-                        raw_index = build_raw_data_index(enriched_records) if enriched_records else {}
-
-                results_with_raw = []
-                for r in results_list:
-                    r_copy = r.copy()
-                    url = r.get('linkedin_url', '')
-                    # Try original URL, then normalized
-                    raw = raw_index.get(url) or raw_index.get(normalize_linkedin_url(url) or '') or {}
-                    if raw:
-                        r_copy['raw_data'] = json.dumps(raw, ensure_ascii=False) if isinstance(raw, dict) else str(raw)
-                    else:
-                        r_copy['raw_data'] = ''
-                    results_with_raw.append(r_copy)
-                return results_with_raw
-
             # Count by fit level
             strong_list = [r for r in screening_results if r.get('fit') == 'Strong Fit']
             good_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
             partial_list = [r for r in screening_results if r.get('fit') == 'Partial Fit']
-
-            # Option to include raw_data (slower export)
-            include_raw_data = st.checkbox("Include raw data in export (slower)", value=False, key="include_raw_data_export")
-
-            # Helper to prepare export data
-            def prepare_export(results_list):
-                if include_raw_data:
-                    return add_raw_data_to_results(results_list)
-                return results_list
 
             export_col1, export_col2, export_col3, export_col4, export_col5 = st.columns(5)
 
             with export_col1:
                 st.download_button(
                     f"Strong Fit ({len(strong_list)})",
-                    pd.DataFrame(prepare_export(strong_list)).to_csv(index=False) if strong_list else "",
+                    pd.DataFrame(strong_list).to_csv(index=False) if strong_list else "",
                     "screening_strong_fit.csv",
                     "text/csv",
                     disabled=len(strong_list) == 0
@@ -7003,7 +7006,7 @@ with tab_screening:
             with export_col2:
                 st.download_button(
                     f"Good Fit ({len(good_list)})",
-                    pd.DataFrame(prepare_export(good_list)).to_csv(index=False) if good_list else "",
+                    pd.DataFrame(good_list).to_csv(index=False) if good_list else "",
                     "screening_good_fit.csv",
                     "text/csv",
                     disabled=len(good_list) == 0
@@ -7012,14 +7015,14 @@ with tab_screening:
             with export_col3:
                 st.download_button(
                     f"Partial Fit ({len(partial_list)})",
-                    pd.DataFrame(prepare_export(partial_list)).to_csv(index=False) if partial_list else "",
+                    pd.DataFrame(partial_list).to_csv(index=False) if partial_list else "",
                     "screening_partial_fit.csv",
                     "text/csv",
                     disabled=len(partial_list) == 0
                 )
 
             with export_col4:
-                full_df = pd.DataFrame(prepare_export(sorted_results))
+                full_df = pd.DataFrame(sorted_results)
                 st.download_button(
                     f"All ({len(sorted_results)})",
                     full_df.to_csv(index=False),

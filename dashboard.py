@@ -271,6 +271,8 @@ def load_config():
                 config['salesql_api_key'] = st.secrets['salesql_api_key']
             if 'anthropic_api_key' in st.secrets:
                 config['anthropic_api_key'] = st.secrets['anthropic_api_key']
+            elif 'ANTHROPIC_API_KEY' in st.secrets:
+                config['anthropic_api_key'] = st.secrets['ANTHROPIC_API_KEY']
     except Exception:
         pass
 
@@ -291,6 +293,8 @@ def load_anthropic_key():
         try:
             if 'anthropic_api_key' in st.secrets:
                 key = st.secrets['anthropic_api_key']
+            elif 'ANTHROPIC_API_KEY' in st.secrets:
+                key = st.secrets['ANTHROPIC_API_KEY']
         except Exception:
             pass
     return key

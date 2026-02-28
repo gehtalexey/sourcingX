@@ -3167,6 +3167,36 @@ def compute_role_durations(raw):
             lines.append(f'  INDUSTRY EXPERIENCE: {_fmt_duration(total_months)} (no military service detected)')
         lines.append('  NOTE: AI must determine which roles are role-specific from the durations above. The baseline above is a starting point.')
 
+    # Detect SWE roles with DevOps skill overlap — flag for AI to consider half-credit
+    _devops_skills = {'kubernetes', 'k8s', 'terraform', 'docker', 'ci/cd', 'jenkins', 'argocd',
+                      'aws', 'amazon web services', 'gcp', 'azure', 'ansible', 'helm',
+                      'infrastructure as code', 'iac', 'prometheus', 'grafana', 'datadog'}
+    _swe_keywords = {'software engineer', 'software developer', 'full stack', 'fullstack', 'backend engineer', 'frontend engineer'}
+    candidate_skills = {s.lower() for s in (raw.get('skills') or [])}
+    devops_overlap = candidate_skills & _devops_skills
+    if devops_overlap:
+        swe_roles = []
+        for emp_key in ['past_employers', 'current_employers']:
+            for emp in (raw.get(emp_key) or []):
+                title = (emp.get('employee_title') or '').strip()
+                if not title:
+                    continue
+                title_lower = title.lower()
+                emp_name = (emp.get('employer_name') or '').lower()
+                is_military = any(kw in emp_name or kw in title_lower for kw in _mil_keywords)
+                if is_military:
+                    continue
+                if any(kw in title_lower for kw in _swe_keywords):
+                    start = _parse_date(emp.get('start_date'))
+                    end = _parse_date(emp.get('end_date')) or today
+                    months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if start else 0
+                    swe_roles.append(f'{title} at {emp.get("employer_name", "?")} ({_fmt_duration(months)})')
+        if swe_roles:
+            lines.append('')
+            lines.append(f'SWE HALF-CREDIT CHECK: candidate has Software Engineer roles AND DevOps skills ({", ".join(list(devops_overlap)[:5])}):')
+            for role in swe_roles:
+                lines.append(f'  → {role} — count as HALF if role involved DevOps/infrastructure work')
+
     return '\n'.join(lines)
 
 

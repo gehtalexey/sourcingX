@@ -249,6 +249,7 @@ def load_config():
             'past_candidates': 'Past Candidates',
             'layoff_companies': 'Layoff Companies',
             'universities': 'Universities',
+            'client_wanted_companies': 'Client specific wanted companies',
         }
 
     # Override with Streamlit secrets if available (cloud deployment)
@@ -2902,11 +2903,29 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         df = df[df['_included_title']].drop(columns=['_included_title'])
 
     # 6. Duration filters (from Phantom data)
-    # Helper to parse duration strings like "2 years 3 months" to months
-    def parse_duration_to_months(duration_str):
-        if pd.isna(duration_str) or not str(duration_str).strip():
+    # Helper to parse duration to months - handles both numeric (years) and text formats
+    def parse_duration_to_months(duration_val):
+        if pd.isna(duration_val):
             return None
-        text = str(duration_str).lower()
+
+        # If it's already numeric (years as float from normalize_phantombuster_profile)
+        if isinstance(duration_val, (int, float)):
+            months = int(duration_val * 12)
+            return months if months > 0 else None
+
+        # Try to parse as numeric string first (e.g., "2.5")
+        text = str(duration_val).strip()
+        if not text:
+            return None
+        try:
+            years = float(text)
+            months = int(years * 12)
+            return months if months > 0 else None
+        except ValueError:
+            pass
+
+        # Parse text format like "2 years 3 months"
+        text = text.lower()
         years = 0
         months = 0
         import re
@@ -2919,9 +2938,17 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         total = years * 12 + months
         return total if total > 0 else None
 
-    # Check for duration columns (Phantom format)
-    role_col = 'durationInRole' if 'durationInRole' in df.columns else 'current_years_in_role' if 'current_years_in_role' in df.columns else None
-    company_col = 'durationInCompany' if 'durationInCompany' in df.columns else 'current_years_at_company' if 'current_years_at_company' in df.columns else None
+    # Check for duration columns (Phantom format) - flexible case-insensitive matching
+    def find_duration_col(df, patterns):
+        """Find first matching duration column from patterns (case-insensitive)."""
+        cols_lower = {c.lower(): c for c in df.columns}
+        for pattern in patterns:
+            if pattern.lower() in cols_lower:
+                return cols_lower[pattern.lower()]
+        return None
+
+    role_col = find_duration_col(df, ['durationInRole', 'duration_in_role', 'current_years_in_role', 'yearsInRole', 'years_in_role', 'Duration in role', 'duration in role', 'Time in role', 'time in role'])
+    company_col = find_duration_col(df, ['durationInCompany', 'duration_in_company', 'current_years_at_company', 'yearsInCompany', 'years_at_company', 'Duration in company', 'duration in company', 'Time in company', 'time in company'])
 
     # Track if duration columns are missing
     if filters.get('min_role_months') and not role_col:
@@ -4507,6 +4534,14 @@ with tab_filter:
                 filter_sheets['blacklist'] = 'Blacklist'
             if not filter_sheets.get('not_relevant'):
                 filter_sheets['not_relevant'] = 'NotRelevant Companies'
+            if not filter_sheets.get('target_companies'):
+                filter_sheets['target_companies'] = 'Target Companies'
+            if not filter_sheets.get('tech_alerts'):
+                filter_sheets['tech_alerts'] = 'Tech Alerts'
+            if not filter_sheets.get('universities'):
+                filter_sheets['universities'] = 'Universities'
+            if not filter_sheets.get('client_wanted_companies'):
+                filter_sheets['client_wanted_companies'] = 'Client specific wanted companies'
 
         has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
 
@@ -4658,8 +4693,19 @@ with tab_filter:
             )
 
             # Duration filters (only show if data has duration columns - typically PhantomBuster)
-            has_role_duration = 'durationInRole' in df.columns or 'current_years_in_role' in df.columns
-            has_company_duration = 'durationInCompany' in df.columns or 'current_years_at_company' in df.columns
+            # Check for various column name formats (case-insensitive)
+            def find_duration_col(df, patterns):
+                """Find first matching duration column from patterns (case-insensitive)."""
+                cols_lower = {c.lower(): c for c in df.columns}
+                for pattern in patterns:
+                    if pattern.lower() in cols_lower:
+                        return cols_lower[pattern.lower()]
+                return None
+
+            role_duration_col = find_duration_col(df, ['durationInRole', 'duration_in_role', 'current_years_in_role', 'yearsInRole', 'years_in_role', 'Duration in role', 'duration in role', 'Time in role', 'time in role'])
+            company_duration_col = find_duration_col(df, ['durationInCompany', 'duration_in_company', 'current_years_at_company', 'yearsInCompany', 'years_at_company', 'Duration in company', 'duration in company', 'Time in company', 'time in company'])
+            has_role_duration = role_duration_col is not None
+            has_company_duration = company_duration_col is not None
 
             min_role_months = 0
             max_role_months = 0
@@ -4679,6 +4725,19 @@ with tab_filter:
                         max_role_months = st.number_input("Max months in role", min_value=0, max_value=240, value=0, help="0 = no limit", key="max_role_months")
                     if has_company_duration:
                         max_company_months = st.number_input("Max months at company", min_value=0, max_value=240, value=0, help="0 = no limit", key="max_company_months")
+
+        # Priority Lists section (visually distinct)
+        st.divider()
+        st.markdown("##### 📊 Priority Lists (Optional)")
+        st.caption("Load company/university lists to categorize candidates after filtering")
+        prio_col1, prio_col2, prio_col3 = st.columns(3)
+        with prio_col1:
+            load_target_companies = st.checkbox("Target Companies", value=False, key="load_target_companies")
+        with prio_col2:
+            load_tech_alerts = st.checkbox("Tech Alerts / Layoffs", value=False, key="load_tech_alerts")
+        with prio_col3:
+            load_client_wanted = st.checkbox("Client Wanted", value=False, key="load_client_wanted")
+        st.divider()
 
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
         with btn_col1:
@@ -4715,7 +4774,7 @@ with tab_filter:
                     past_df = load_sheet_as_df(sheet_url, filter_sheets['past_candidates'])
                     if past_df is not None:
                         filters['past_candidates_df'] = past_df
-                        st.info(f"Loaded {len(past_df)} past candidates from Google Sheet")
+                        st.info(f"Loaded {len(past_df)} past candidates from Google Sheet (columns: {list(past_df.columns)[:5]})")
                 elif past_candidates_file:
                     filters['past_candidates_df'] = pd.read_csv(past_candidates_file)
 
@@ -4801,8 +4860,89 @@ with tab_filter:
                 cleanup_memory()  # Aggressive memory cleanup
                 save_session_state()  # Save for restore
 
-            st.success(f"Filtering complete! {stats['final']} candidates remaining")
+            # Load priority lists if selected
+            priority_loaded = []
+            if load_target_companies or load_tech_alerts or load_client_wanted:
+                with st.spinner("Loading priority lists..."):
+                    priority_df = filtered_df.copy()
+                    sheet_url = filter_sheets.get('url', '')
+
+                    # Helper function for matching
+                    def normalize_company(name):
+                        if pd.isna(name) or not str(name).strip():
+                            return ''
+                        name = str(name).lower().strip()
+                        for suffix in [' ltd', ' inc', ' corp', ' llc', ' limited', ' israel', ' il', ' technologies', ' tech', ' software', ' solutions', ' group']:
+                            if name.endswith(suffix):
+                                name = name[:-len(suffix)].strip()
+                        return name
+
+                    def matches_list(company, company_list):
+                        if pd.isna(company) or not str(company).strip():
+                            return False
+                        company_norm = normalize_company(company)
+                        if not company_norm:
+                            return False
+                        for c in company_list:
+                            c_norm = normalize_company(c)
+                            if not c_norm:
+                                continue
+                            if company_norm == c_norm:
+                                return True
+                            if len(c_norm) >= 4 and len(company_norm) >= 4:
+                                if company_norm.startswith(c_norm) or c_norm.startswith(company_norm):
+                                    return True
+                        return False
+
+                    # Target companies
+                    if load_target_companies and filter_sheets.get('target_companies'):
+                        tc_df = load_sheet_as_df(sheet_url, filter_sheets['target_companies'])
+                        if tc_df is not None and len(tc_df.columns) > 0:
+                            target_companies = []
+                            for col in tc_df.columns:
+                                if 'company' in col.lower() or 'name' in col.lower():
+                                    target_companies.extend(tc_df[col].dropna().tolist())
+                            target_list = [str(c).lower().strip() for c in target_companies if c]
+                            if target_list:
+                                priority_df['is_target_company'] = priority_df['current_company'].apply(lambda x: matches_list(x, target_list))
+                                priority_loaded.append(f"Target: {len(target_list)} companies, {priority_df['is_target_company'].sum()} matches")
+
+                    # Tech alerts / Layoffs
+                    if load_tech_alerts and filter_sheets.get('tech_alerts'):
+                        ta_df = load_sheet_as_df(sheet_url, filter_sheets['tech_alerts'])
+                        if ta_df is not None and len(ta_df.columns) > 0:
+                            tech_alerts = []
+                            for col in ta_df.columns:
+                                if 'company' in col.lower() or 'name' in col.lower():
+                                    tech_alerts.extend(ta_df[col].dropna().tolist())
+                            alerts_list = [str(c).lower().strip() for c in tech_alerts if c]
+                            if alerts_list:
+                                priority_df['is_layoff_company'] = priority_df['current_company'].apply(lambda x: matches_list(x, alerts_list))
+                                priority_loaded.append(f"Layoffs: {len(alerts_list)} companies, {priority_df['is_layoff_company'].sum()} matches")
+
+                    # Client Wanted Companies
+                    if load_client_wanted and filter_sheets.get('client_wanted_companies'):
+                        cw_df = load_sheet_as_df(sheet_url, filter_sheets['client_wanted_companies'])
+                        if cw_df is not None and len(cw_df.columns) > 0:
+                            client_wanted = []
+                            for col in cw_df.columns:
+                                client_wanted.extend(cw_df[col].dropna().tolist())
+                            client_list = [str(c).lower().strip() for c in client_wanted if c]
+                            client_list = list(set(client_list))
+                            if client_list:
+                                priority_df['is_client_wanted'] = priority_df['current_company'].apply(lambda x: matches_list(x, client_list))
+                                priority_loaded.append(f"Client Wanted: {len(client_list)} companies, {priority_df['is_client_wanted'].sum()} matches")
+
+                    # Save with priority columns
+                    st.session_state['passed_candidates_df'] = priority_df
+                    st.session_state['results_df'] = priority_df
+
+            if priority_loaded:
+                st.success(f"Filtering complete! {stats['final']} remaining. Priorities: {' | '.join(priority_loaded)}")
+            else:
+                st.success(f"Filtering complete! {stats['final']} candidates remaining")
             st.rerun()
+
 
     # Show filter stats if available
     if 'filter_stats' in st.session_state:
@@ -4903,124 +5043,21 @@ with tab_filter:
             elif not skipped_filters:
                 st.info("No candidates were filtered out.")
 
-    # Priority categories section (only show after filtering)
-    if 'filter_stats' in st.session_state and 'passed_candidates_df' in st.session_state:
-        st.divider()
-        st.markdown("### Priority Categories")
-        st.caption("Categorize candidates by target companies, layoffs, universities")
-
+    # Show priority category filters if data has priority columns
+    if 'passed_candidates_df' in st.session_state and st.session_state.get('passed_candidates_df') is not None and not st.session_state['passed_candidates_df'].empty:
         passed_df = st.session_state['passed_candidates_df']
+    elif 'results_df' in st.session_state and st.session_state.get('results_df') is not None and not st.session_state['results_df'].empty:
+        passed_df = st.session_state.get('results_df', pd.DataFrame())
+    else:
+        passed_df = pd.DataFrame()
 
-        # Priority categorization section
-        filter_sheets = get_filter_sheets_config()
-        gspread_client = get_gspread_client()
-        has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
+    has_any_priority = passed_df is not None and len(passed_df) > 0 and (
+        'is_target_company' in passed_df.columns or
+        'is_layoff_company' in passed_df.columns or
+        'is_client_wanted' in passed_df.columns
+    )
 
-        if has_sheets and st.button("Load Priority Categories", key="apply_categories"):
-            sheet_url = filter_sheets.get('url', '')
-
-            # Helper function for matching
-            def normalize_company(name):
-                if pd.isna(name) or not str(name).strip():
-                    return ''
-                name = str(name).lower().strip()
-                for suffix in [' ltd', ' inc', ' corp', ' llc', ' limited', ' israel', ' il', ' technologies', ' tech', ' software', ' solutions', ' group']:
-                    if name.endswith(suffix):
-                        name = name[:-len(suffix)].strip()
-                return name
-
-            def matches_list(company, company_list):
-                if pd.isna(company) or not str(company).strip():
-                    return False
-                company_norm = normalize_company(company)
-                if not company_norm:
-                    return False
-                for c in company_list:
-                    c_norm = normalize_company(c)
-                    if not c_norm:
-                        continue
-                    if company_norm == c_norm:
-                        return True
-                    if len(c_norm) >= 4 and len(company_norm) >= 4:
-                        if company_norm.startswith(c_norm) or c_norm.startswith(company_norm):
-                            return True
-                return False
-
-            def matches_list_in_text(text, items_list):
-                """Stricter matching for universities - avoids partial matches like
-                'Tel Aviv University' matching 'Afeka Tel Aviv College'."""
-                if pd.isna(text) or not str(text).strip():
-                    return False
-                text_lower = str(text).lower()
-                text_parts = [p.strip() for p in text_lower.replace('|', ',').split(',')]
-
-                for item in items_list:
-                    item_norm = str(item).lower().strip()
-                    if not item_norm or len(item_norm) < 3:
-                        continue
-
-                    for text_part in text_parts:
-                        # Exact match
-                        if text_part == item_norm:
-                            return True
-                        # Text part starts with item
-                        if text_part.startswith(item_norm):
-                            return True
-                        # Item starts with text part (if substantial)
-                        if item_norm.startswith(text_part) and len(text_part) > 10:
-                            return True
-                        # Word-based matching for longer items
-                        if len(item_norm) > 8:
-                            item_words = set(item_norm.split())
-                            text_words = set(text_part.split())
-                            common = item_words & text_words
-                            if len(common) >= len(item_words) * 0.7:
-                                return True
-                return False
-
-            with st.spinner("Loading priority lists..."):
-                # Target companies
-                if filter_sheets.get('target_companies'):
-                    tc_df = load_sheet_as_df(sheet_url, filter_sheets['target_companies'])
-                    if tc_df is not None and len(tc_df.columns) > 0:
-                        target_companies = []
-                        for col in tc_df.columns:
-                            if 'company' in col.lower() or 'name' in col.lower():
-                                target_companies.extend(tc_df[col].dropna().tolist())
-                        target_list = [str(c).lower().strip() for c in target_companies if c]
-                        passed_df['is_target_company'] = passed_df['current_company'].apply(lambda x: matches_list(x, target_list))
-                        st.info(f"Target Companies: {len(target_list)} loaded, {passed_df['is_target_company'].sum()} matches")
-
-                # Layoff alerts
-                if filter_sheets.get('tech_alerts'):
-                    ta_df = load_sheet_as_df(sheet_url, filter_sheets['tech_alerts'])
-                    if ta_df is not None and len(ta_df.columns) > 0:
-                        tech_alerts = []
-                        for col in ta_df.columns:
-                            if 'company' in col.lower() or 'name' in col.lower():
-                                tech_alerts.extend(ta_df[col].dropna().tolist())
-                        alerts_list = [str(c).lower().strip() for c in tech_alerts if c]
-                        passed_df['is_layoff_company'] = passed_df['current_company'].apply(lambda x: matches_list(x, alerts_list))
-                        st.info(f"Layoff Alerts: {len(alerts_list)} loaded, {passed_df['is_layoff_company'].sum()} matches")
-
-                # Universities (read ALL columns)
-                if filter_sheets.get('universities') and 'education' in passed_df.columns:
-                    uni_df = load_sheet_as_df(sheet_url, filter_sheets['universities'])
-                    if uni_df is not None and len(uni_df.columns) > 0:
-                        uni_list = []
-                        for col in uni_df.columns:
-                            uni_list.extend(uni_df[col].dropna().tolist())
-                        uni_list = list(set(uni_list))  # Dedupe
-                        passed_df['is_top_university'] = passed_df['education'].apply(lambda x: matches_list_in_text(x, uni_list))
-                        st.info(f"Top Universities: {len(uni_list)} loaded ({len(uni_df.columns)} columns), {passed_df['is_top_university'].sum()} matches")
-
-            # Save categorized data
-            st.session_state['passed_candidates_df'] = passed_df
-            st.session_state['categories_applied'] = True
-            st.rerun()
-
-        # Re-read from session state to get latest data with categories
-        passed_df = st.session_state['passed_candidates_df']
+    if has_any_priority:
 
         # Filter checkboxes at the top
         st.markdown("**Filter by category:**")
@@ -5031,31 +5068,31 @@ with tab_filter:
 
         has_target = 'is_target_company' in passed_df.columns
         has_layoff = 'is_layoff_company' in passed_df.columns
-        has_uni = 'is_top_university' in passed_df.columns
+        has_client_wanted = 'is_client_wanted' in passed_df.columns
 
         with filter_cols[1]:
             if has_target:
                 count = int(passed_df['is_target_company'].fillna(False).sum())
-                show_target = st.checkbox(f"Target Companies ({count})", value=False, key="filter_target")
+                show_target = st.checkbox(f"Target ({count})", value=False, key="filter_target")
             else:
                 show_target = False
 
         with filter_cols[2]:
             if has_layoff:
                 count = int(passed_df['is_layoff_company'].fillna(False).sum())
-                show_layoff = st.checkbox(f"Layoff Alerts ({count})", value=False, key="filter_layoff")
+                show_layoff = st.checkbox(f"Layoff ({count})", value=False, key="filter_layoff")
             else:
                 show_layoff = False
 
         with filter_cols[3]:
-            if has_uni:
-                count = int(passed_df['is_top_university'].fillna(False).sum())
-                show_uni = st.checkbox(f"Top Universities ({count})", value=False, key="filter_uni")
+            if has_client_wanted:
+                count = int(passed_df['is_client_wanted'].fillna(False).sum())
+                show_client_wanted = st.checkbox(f"Client Wanted ({count})", value=False, key="filter_client_wanted")
             else:
-                show_uni = False
+                show_client_wanted = False
 
         # Filter based on checkboxes
-        if show_all or (not show_target and not show_layoff and not show_uni):
+        if show_all or (not show_target and not show_layoff and not show_client_wanted):
             view_df = passed_df.copy()
         else:
             # Combine selected filters with OR
@@ -5064,8 +5101,8 @@ with tab_filter:
                 mask = mask | passed_df['is_target_company'].fillna(False)
             if show_layoff and has_layoff:
                 mask = mask | passed_df['is_layoff_company'].fillna(False)
-            if show_uni and has_uni:
-                mask = mask | passed_df['is_top_university'].fillna(False)
+            if show_client_wanted and has_client_wanted:
+                mask = mask | passed_df['is_client_wanted'].fillna(False)
             view_df = passed_df[mask].copy()
 
         st.success(f"**{len(view_df)}** candidates")
@@ -5088,8 +5125,8 @@ with tab_filter:
                 }
             )
 
-        # Download passed candidates
-        col1, col2 = st.columns(2)
+        # Download and Send to Enrich buttons
+        col1, col2, col3 = st.columns([1, 1, 2])
         with col1:
             csv_data = view_df.to_csv(index=False)
             st.download_button(
@@ -5098,6 +5135,12 @@ with tab_filter:
                 file_name="passed_candidates.csv",
                 mime="text/csv"
             )
+        with col2:
+            if st.button(f"📤 Send {len(view_df)} to Enrich", type="primary", key="send_to_enrich"):
+                st.session_state['results_df'] = view_df.copy()
+                st.session_state['passed_candidates_df'] = view_df.copy()
+                st.success(f"✓ {len(view_df)} profiles ready for enrichment. Go to **3. Enrich** tab.")
+                save_session_state()
 
     # Review filtered candidates section - MEMORY OPTIMIZED: only show counts
     if 'filtered_out_counts' in st.session_state and st.session_state['filtered_out_counts']:
@@ -5745,6 +5788,8 @@ with tab_filter2:
                 filter_sheets['universities'] = 'Universities'
             if 'target_companies' not in filter_sheets:
                 filter_sheets['target_companies'] = 'Target Companies'
+            if 'client_wanted_companies' not in filter_sheets:
+                filter_sheets['client_wanted_companies'] = 'Client specific wanted companies'
 
         has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
 
@@ -5782,6 +5827,14 @@ with tab_filter2:
             uni_filter_mode = st.radio("Target Universities:",
                                        ["Off", "Prioritize (move to top)", "Require (filter others out)"],
                                        key="f2_uni_mode", horizontal=True)
+            client_wanted_mode = st.radio("Client Wanted Companies:",
+                                       ["Off", "Prioritize (move to top)", "Require (filter others out)"],
+                                       key="f2_client_wanted_mode", horizontal=True,
+                                       help="Find profiles from client's target companies")
+            client_wanted_scope = st.radio("Client Wanted scope:",
+                                       ["Current company only", "All employers"],
+                                       key="f2_client_wanted_scope", horizontal=True,
+                                       help="Match against current company or all past employers")
 
         with col2:
             # Keyword filters (job titles only)
@@ -6046,6 +6099,84 @@ with tab_filter2:
                             else:
                                 df = pd.concat([df[df['_target_uni']], df[~df['_target_uni']]])
                                 df = df.drop(columns=['_target_uni'])
+
+                # Client Wanted Companies filter
+                if client_wanted_mode != "Off" and has_sheets and filter_sheets.get('client_wanted_companies'):
+                    cw_df = load_sheet_as_df(sheet_url, filter_sheets['client_wanted_companies'])
+                    if cw_df is not None and not cw_df.empty:
+                        client_wanted_companies = set()
+                        for col in cw_df.columns:
+                            if 'company' in col.lower() or 'name' in col.lower():
+                                client_wanted_companies.update(cw_df[col].dropna().str.lower().str.strip().tolist())
+                        # If no matching columns, use all columns
+                        if not client_wanted_companies:
+                            for col in cw_df.columns:
+                                client_wanted_companies.update(cw_df[col].dropna().str.lower().str.strip().tolist())
+                        if client_wanted_companies:
+                            def matches_client_wanted(value):
+                                """Check if a single company value matches any client wanted company."""
+                                if value is None:
+                                    return False
+                                try:
+                                    if pd.isna(value):
+                                        return False
+                                except (ValueError, TypeError):
+                                    pass
+                                if not value:
+                                    return False
+                                val_lower = str(value).strip().lower()
+                                for wanted in client_wanted_companies:
+                                    if not wanted:
+                                        continue
+                                    if val_lower == wanted or wanted in val_lower or val_lower in wanted:
+                                        return True
+                                return False
+
+                            def has_client_wanted_company(row):
+                                """Check if profile worked at a client wanted company."""
+                                # Check current company
+                                if 'current_company' in row.index and matches_client_wanted(row.get('current_company')):
+                                    return True
+                                # Check all employers only if scope is "All employers"
+                                if client_wanted_scope == "All employers":
+                                    employers_data = row.get('all_employers') if 'all_employers' in row.index else None
+                                    if employers_data is None:
+                                        return False
+                                    try:
+                                        if pd.isna(employers_data):
+                                            return False
+                                    except (ValueError, TypeError):
+                                        pass
+                                    if not employers_data:
+                                        return False
+                                    # Handle list/array or comma-separated string
+                                    if isinstance(employers_data, (list, tuple)):
+                                        employers = [str(e).strip().lower() for e in employers_data if e]
+                                    else:
+                                        employers = [e.strip().lower() for e in str(employers_data).split(',')]
+                                    # Check if any employer matches a client wanted company
+                                    for emp in employers:
+                                        for wanted in client_wanted_companies:
+                                            if not wanted:
+                                                continue
+                                            if emp == wanted or wanted in emp or emp in wanted:
+                                                return True
+                                return False
+                            df['_client_wanted'] = df.apply(has_client_wanted_company, axis=1)
+                            client_wanted_matches = df[df['_client_wanted']].index.tolist()
+                            scope_label = "current" if client_wanted_scope == "Current company only" else "all employers"
+
+                            if client_wanted_mode == "Require (filter others out)":
+                                mask = ~df['_client_wanted']
+                                removed['Non-Client Wanted Companies'] = mask.sum()
+                                df = df[df['_client_wanted']]
+                                df = df.drop(columns=['_client_wanted'])
+                                st.info(f"Client Wanted ({scope_label}): {len(client_wanted_companies)} loaded, kept {len(df)} profiles")
+                            else:
+                                # Prioritize - move client wanted profiles to top
+                                df = pd.concat([df[df['_client_wanted']], df[~df['_client_wanted']]])
+                                df = df.drop(columns=['_client_wanted'])
+                                st.info(f"Client Wanted ({scope_label}): {len(client_wanted_companies)} loaded, {len(client_wanted_matches)} matches moved to top")
 
                 # Include keywords filter (job titles only)
                 if include_keywords and include_keywords.strip():

@@ -6232,23 +6232,20 @@ with tab_screening:
                 help="Quick: score + fit + short summary | Detailed: adds reasoning, strengths, concerns"
             )
         with col_model:
-            model_options = ["gpt-4o-mini (fast)", "gpt-4o (accurate)", "Claude Haiku (balanced)"]
+            model_options = ["gpt-4o-mini (fast)", "Claude Haiku (balanced)"]
             ai_model_choice = st.radio(
                 "AI Model",
                 options=model_options,
                 index=0,
                 key="ai_model_choice",
-                help="gpt-4o-mini: ~$0.001/profile | gpt-4o: ~$0.02/profile | Claude Haiku: ~$0.005/profile"
+                help="gpt-4o-mini: ~$0.001/profile | Claude Haiku: ~$0.005/profile"
             )
         # Parse model choice into model name and provider
         if "Haiku" in ai_model_choice:
             ai_model = "claude-haiku-4-5-20251001"
             ai_provider = "anthropic"
-        elif "mini" in ai_model_choice:
-            ai_model = "gpt-4o-mini"
-            ai_provider = "openai"
         else:
-            ai_model = "gpt-4o"
+            ai_model = "gpt-4o-mini"
             ai_provider = "openai"
 
         # Dynamic concurrent workers — scales down when multiple users screen simultaneously

@@ -269,6 +269,10 @@ def load_config():
                 config['filter_sheets'] = dict(st.secrets['filter_sheets'])
             if 'salesql_api_key' in st.secrets:
                 config['salesql_api_key'] = st.secrets['salesql_api_key']
+            if 'anthropic_api_key' in st.secrets:
+                config['anthropic_api_key'] = st.secrets['anthropic_api_key']
+            elif 'ANTHROPIC_API_KEY' in st.secrets:
+                config['anthropic_api_key'] = st.secrets['ANTHROPIC_API_KEY']
     except Exception:
         pass
 
@@ -289,6 +293,8 @@ def load_anthropic_key():
         try:
             if 'anthropic_api_key' in st.secrets:
                 key = st.secrets['anthropic_api_key']
+            elif 'ANTHROPIC_API_KEY' in st.secrets:
+                key = st.secrets['ANTHROPIC_API_KEY']
         except Exception:
             pass
     return key
@@ -2275,8 +2281,18 @@ def load_sheet_as_df(sheet_url: str, worksheet_name: str = None) -> pd.DataFrame
         else:
             worksheet = spreadsheet.sheet1
 
-        data = worksheet.get_all_records()
-        return pd.DataFrame(data)
+        rows = worksheet.get_all_values()
+        if not rows:
+            return pd.DataFrame()
+        headers = rows[0]
+        # Find last non-empty header to trim blank trailing columns
+        last_col = 0
+        for i, h in enumerate(headers):
+            if h.strip():
+                last_col = i + 1
+        headers = headers[:last_col]
+        data = [row[:last_col] for row in rows[1:]]
+        return pd.DataFrame(data, columns=headers)
     except Exception as e:
         st.error(f"Error loading sheet: {e}")
         return None
@@ -3043,6 +3059,13 @@ def compute_role_durations(raw):
     lines = ['ROLE DURATIONS (pre-calculated, use these numbers):']
     has_roles = False
 
+    def _fmt_duration(months):
+        """Format months as 'Xy Ym' (or just 'Xm' if under a year)."""
+        y, m = divmod(months, 12)
+        if y == 0:
+            return f"{m}m"
+        return f"{y}y {m}m"
+
     # Track company-level data for stability summary
     companies = {}  # company_name -> {min_start, max_end, is_current, roles}
 
@@ -3059,11 +3082,12 @@ def compute_role_durations(raw):
             months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if start else 0
             start_str = start.strftime('%b %Y') if start else '?'
             end_str = 'today' if is_current else end.strftime('%b %Y') if end else '?'
+            dur = _fmt_duration(months)
 
             if is_current:
-                lines.append(f"  >>> {title} at {company}: {start_str} - {end_str} = {months} months <<< CURRENT ROLE")
+                lines.append(f"  >>> {title} at {company}: {start_str} - {end_str} = {dur} <<< CURRENT ROLE")
             else:
-                lines.append(f"  {title} at {company}: {start_str} - {end_str} = {months} months")
+                lines.append(f"  {title} at {company}: {start_str} - {end_str} = {dur}")
 
             # Group by company
             if company not in companies:
@@ -3088,17 +3112,19 @@ def compute_role_durations(raw):
         total_months = max(0, (comp_data['max_end'].year - comp_data['min_start'].year) * 12 +
                            (comp_data['max_end'].month - comp_data['min_start'].month)) if comp_data['min_start'] else 0
         if comp_data['is_current']:
-            current_company_name = comp_name
-            current_company_months = total_months
+            # If multiple current companies, pick the longest tenure (primary role)
+            if current_company_months is None or total_months > current_company_months:
+                current_company_name = comp_name
+                current_company_months = total_months
         elif total_months < 12:
-            short_companies.append(f"{comp_name} ({total_months}mo)")
+            short_companies.append(f"{comp_name} ({_fmt_duration(total_months)})")
 
     lines.append('')
     lines.append('STABILITY SUMMARY (pre-calculated by company, use these numbers):')
     lines.append(f'  Short-stint companies (<12 months, excluding current): {len(short_companies)}' +
                  (f' — {", ".join(short_companies)}' if short_companies else ''))
     if current_company_name:
-        lines.append(f'  Current company: {current_company_name} = {current_company_months} months')
+        lines.append(f'  Current company: {current_company_name} = {_fmt_duration(current_company_months)}')
     else:
         lines.append('  Current company: none found')
 
@@ -3106,9 +3132,80 @@ def compute_role_durations(raw):
     if len(short_companies) >= 3:
         lines.append(f'>>> STABILITY VERDICT: FAIL — {len(short_companies)} short-stint companies >= 3 → MAX SCORE 4 <<<')
     elif current_company_months is not None and current_company_months < 6:
-        lines.append(f'>>> STABILITY VERDICT: FAIL — current role {current_company_months} months < 6 months → MAX SCORE 5 <<<')
+        lines.append(f'>>> STABILITY VERDICT: FAIL — current role {_fmt_duration(current_company_months)} < 6 months → MAX SCORE 5 <<<')
     else:
         lines.append('>>> STABILITY VERDICT: PASS <<<')
+
+    # Pre-computed EXPERIENCE SUMMARY — total career span and military detection
+    _mil_keywords = {'idf', 'israel defense forces', 'israeli air force', 'mamram', 'unit 8200',
+                     'talpiot', 'c4i', 'israeli navy', 'israeli military', 'iaf',
+                     'j6 & cyber defense', 'cyber defense directorate'}
+    all_starts = []
+    all_starts_non_mil = []
+    military_months = 0
+    for emp_key in ['past_employers', 'current_employers']:
+        for emp in (raw.get(emp_key) or []):
+            title = (emp.get('employee_title') or '').strip()
+            if not title:
+                continue
+            start = _parse_date(emp.get('start_date'))
+            end = _parse_date(emp.get('end_date')) or today
+            if not start:
+                continue
+            emp_name = (emp.get('employer_name') or '').lower()
+            emp_title = title.lower()
+            is_military = any(kw in emp_name or kw in emp_title for kw in _mil_keywords)
+            all_starts.append(start)
+            if is_military:
+                military_months += max(0, (end.year - start.year) * 12 + (end.month - start.month))
+            else:
+                all_starts_non_mil.append(start)
+
+    if all_starts:
+        lines.append('')
+        lines.append('EXPERIENCE SUMMARY (pre-calculated):')
+        earliest = min(all_starts)
+        total_months = max(0, (today.year - earliest.year) * 12 + (today.month - earliest.month))
+        lines.append(f'  TOTAL CAREER SPAN: {_fmt_duration(total_months)} (from {earliest.strftime("%b %Y")} to today)')
+        if military_months > 0:
+            half_mil = military_months // 2
+            lines.append(f'  MILITARY SERVICE: {_fmt_duration(military_months)} (counts as HALF = {_fmt_duration(half_mil)} for role-specific)')
+            # Calculate industry experience as total minus military
+            industry_months = max(0, total_months - military_months)
+            lines.append(f'  INDUSTRY EXPERIENCE (excl military): {_fmt_duration(industry_months)}')
+        else:
+            lines.append(f'  INDUSTRY EXPERIENCE: {_fmt_duration(total_months)} (no military service detected)')
+        lines.append('  NOTE: AI must determine which roles are role-specific from the durations above. The baseline above is a starting point.')
+
+    # Detect SWE roles with DevOps skill overlap — flag for AI to consider half-credit
+    _devops_skills = {'kubernetes', 'k8s', 'terraform', 'docker', 'ci/cd', 'jenkins', 'argocd',
+                      'aws', 'amazon web services', 'gcp', 'azure', 'ansible', 'helm',
+                      'infrastructure as code', 'iac', 'prometheus', 'grafana', 'datadog'}
+    _swe_keywords = {'software engineer', 'software developer', 'full stack', 'fullstack', 'backend engineer', 'frontend engineer'}
+    candidate_skills = {s.lower() for s in (raw.get('skills') or [])}
+    devops_overlap = candidate_skills & _devops_skills
+    if devops_overlap:
+        swe_roles = []
+        for emp_key in ['past_employers', 'current_employers']:
+            for emp in (raw.get(emp_key) or []):
+                title = (emp.get('employee_title') or '').strip()
+                if not title:
+                    continue
+                title_lower = title.lower()
+                emp_name = (emp.get('employer_name') or '').lower()
+                is_military = any(kw in emp_name or kw in title_lower for kw in _mil_keywords)
+                if is_military:
+                    continue
+                if any(kw in title_lower for kw in _swe_keywords):
+                    start = _parse_date(emp.get('start_date'))
+                    end = _parse_date(emp.get('end_date')) or today
+                    months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if start else 0
+                    swe_roles.append(f'{title} at {emp.get("employer_name", "?")} ({_fmt_duration(months)})')
+        if swe_roles:
+            lines.append('')
+            lines.append(f'SWE HALF-CREDIT CHECK: candidate has Software Engineer roles AND DevOps skills ({", ".join(list(devops_overlap)[:5])}):')
+            for role in swe_roles:
+                lines.append(f'  → {role} — count as HALF if role involved DevOps/infrastructure work')
 
     return '\n'.join(lines)
 
@@ -3158,16 +3255,36 @@ def trim_raw_profile(raw):
 
 _DURATION_PROMPT_INSTRUCTIONS = """
 ## Pre-calculated Data (use these numbers, do NOT recalculate)
-Role durations and stability data are pre-calculated above the profile JSON.
+Role durations, stability, and experience summary are pre-calculated above the profile JSON.
 - Use the ROLE DURATIONS for experience calculation
 - The line marked ">>> CURRENT ROLE <<<" shows the current role
 - If multiple roles at the SAME company, they are promotions — count total time at that company ONCE
+
+## EXPERIENCE RULES (MANDATORY)
+Three experience metrics are pre-calculated above:
+- TOTAL CAREER SPAN: all jobs from first to today (for general seniority context)
+- MILITARY SERVICE: Israeli military time (excluded from industry experience, counts as half for role-specific)
+- INDUSTRY EXPERIENCE: career span minus military (general non-military career)
+
+YOU must determine ROLE-SPECIFIC EXPERIENCE from the role durations above:
+- Only count roles relevant to the JD (e.g. DevOps/Infrastructure/SRE roles for a DevOps JD)
+- Do NOT count unrelated early-career roles (tech support, QA, sysadmin) toward role-specific experience
+- The JD's year range (e.g. "5-15 years") and rejection threshold (e.g. "reject >15 years") apply to ROLE-SPECIFIC experience
+- Military service counts as HALF toward role-specific experience (mandatory service, positive signal)
+
+## Role Classification Edge Cases
+- "Software Engineer" / "Senior Software Engineer" is NOT automatically relevant or irrelevant.
+  Check the candidate's skills: if they have strong JD overlap (e.g. K8s, Terraform, AWS, CI/CD for a DevOps JD),
+  count the SWE role as HALF toward role-specific experience. If no skill overlap, do not count it.
+- IT Support, QA, Helpdesk, Storage Admin, Network Admin = NOT relevant, do not count
+- SysAdmin = only count if cloud-focused (AWS/GCP/Azure mentioned in role or skills)
 
 ## STABILITY VERDICT (MANDATORY — do NOT override)
 A STABILITY VERDICT is pre-calculated above. You MUST obey it:
 - If "STABILITY VERDICT: FAIL → MAX SCORE 4" — your score CANNOT exceed 4, no matter how strong the candidate
 - If "STABILITY VERDICT: FAIL → MAX SCORE 5" — your score CANNOT exceed 5, no matter how strong the candidate
 - If "STABILITY VERDICT: PASS" — score normally
+- IMPORTANT: Stability is measured by time at current COMPANY, not current position title. Promotions within the same company do NOT reset tenure.
 This is a hard cap. Do NOT override it even if the candidate has top companies or perfect skills."""
 
 
@@ -3189,9 +3306,13 @@ Today's date: {today}
 
 ## Key Rules:
 - Nice-to-Have = bonus only, NOT a penalty if missing
-- Israeli military service (IDF, 8200, Mamram) is mandatory in Israel and a POSITIVE signal
-- Role durations are pre-calculated above the profile JSON. Use those numbers, do NOT recalculate from dates
-- If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time once
+- Israeli military service (IDF, 8200, Mamram) is mandatory in Israel and a POSITIVE signal. Counts as HALF for role-specific experience
+- Role durations and experience summary are pre-calculated above the profile JSON. Use those numbers, do NOT recalculate from dates
+- If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at the company once
+- The JD year range (e.g. "5-15 years") applies to ROLE-SPECIFIC experience — only count roles relevant to the JD
+- Do NOT count unrelated early-career roles (tech support, help desk, QA, basic sysadmin) toward role-specific experience
+- "Software Engineer" roles: check skills for JD overlap. If strong overlap (e.g. K8s, Terraform for DevOps JD), count as HALF. If no overlap, do not count
+- SysAdmin: only count if cloud-focused (AWS/GCP/Azure). On-prem only sysadmin does not count
 - Check the "skills" array for technical skills
 - Read "employer_description" to understand what each company does
 
@@ -3255,9 +3376,7 @@ def screen_profile(profile: dict, job_description: str, client,
             return {
                 "score": 0,
                 "fit": "Skipped",
-                "summary": "Insufficient profile data",
-                "strengths": [],
-                "concerns": []
+                "summary": "Insufficient profile data"
             }
 
     # Pre-compute durations and trim raw JSON (creates new objects, doesn't modify originals)
@@ -3266,11 +3385,11 @@ def screen_profile(profile: dict, job_description: str, client,
 
     # JSON format based on mode
     if mode == "quick":
-        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit", "summary": "one sentence"}'
-        max_tokens = 150
+        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit"}'
+        max_tokens = 50
     else:
-        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit", "summary": "2-3 sentences about the candidate", "why": "2-3 sentences explaining the score with specific evidence", "strengths": ["strength1", "strength2"], "concerns": ["only if fails explicit JD requirement, otherwise empty array"]}'
-        max_tokens = 500
+        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit", "summary": "2-3 sentences: experience calc, key skills match, and score justification"}'
+        max_tokens = 300
 
     # Build prompts
     today = datetime.now().strftime("%Y-%m-%d")
@@ -3304,7 +3423,7 @@ Evaluate this candidate against the job requirements and return JSON."""
             # Anthropic API: system prompt is a separate parameter, no json_object mode
             response = client.messages.create(
                 model=ai_model,
-                max_tokens=max(max_tokens, 1200),  # Haiku needs more tokens for detailed responses
+                max_tokens=max(max_tokens, 400),  # Ensure enough tokens for Haiku's JSON response
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
                 temperature=0.3
@@ -3358,9 +3477,7 @@ Evaluate this candidate against the job requirements and return JSON."""
         return {
             "score": 0,
             "fit": "Error",
-            "summary": f"JSON parse error: {str(e)[:80]}",
-            "strengths": [],
-            "concerns": []
+            "summary": f"JSON parse error: {str(e)[:80]}"
         }
     except Exception as e:
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -3373,9 +3490,7 @@ Evaluate this candidate against the job requirements and return JSON."""
         return {
             "score": 0,
             "fit": "Error",
-            "summary": f"API error: {str(e)[:80]}",
-            "strengths": [],
-            "concerns": []
+            "summary": f"API error: {str(e)[:80]}"
         }
 
 def _ensure_raw_dict(raw):
@@ -3541,8 +3656,6 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                 "score": 0,
                 "fit": "Error",
                 "summary": f"Screen error: {str(e)[:80]}",
-                "strengths": [],
-                "concerns": [],
                 "name": profile.get('name', '') or profile.get('first_name', '') or profile.get('fullName', '') or f"Profile {index}",
                 "current_title": "",
                 "current_company": "",
@@ -3584,8 +3697,6 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                     "score": 0,
                     "fit": "Error",
                     "summary": f"Thread error: {error_msg[:80]}",
-                    "strengths": [],
-                    "concerns": [],
                     "name": f"Profile {idx}",
                     "current_title": "",
                     "current_company": "",
@@ -3608,10 +3719,10 @@ with st.sidebar:
     _api_status = {
         'Crustdata': bool(config.get('api_key')),
         'OpenAI': bool(config.get('openai_api_key')),
-        'Anthropic': bool(config.get('anthropic_api_key')),
+        'Anthropic': bool(load_anthropic_key()),
         'PhantomBuster': bool(config.get('phantombuster_api_key')),
         'SalesQL': bool(config.get('salesql_api_key')),
-        'Google Sheets': bool(config.get('google_credentials')),
+        'Google Sheets': bool(config.get('google_credentials') or config.get('google_credentials_file')),
         'Supabase': _db_ok,
     }
     _missing = [name for name, ok in _api_status.items() if not ok]
@@ -4403,19 +4514,18 @@ with tab_filter:
             st.error("Google credentials not configured. Cannot connect to Google Sheets.")
 
         if has_sheets:
-            # Try to fetch and display sheet name
-            try:
-                spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
-                sheet_name = spreadsheet.title
-                if user_sheet_url:
-                    st.success(f"📊 **{sheet_name}** (your personal filter sheet)")
-                else:
-                    st.success(f"📊 **{sheet_name}** (default filter sheet)")
-            except Exception:
-                if user_sheet_url:
-                    st.success("Using your personal filter sheet")
-                else:
-                    st.success("Using default filter sheet")
+            # Show sheet name (cached to avoid repeated API calls)
+            cache_key = f"sheet_title_{filter_sheets.get('url', '')}"
+            if cache_key not in st.session_state:
+                try:
+                    st.session_state[cache_key] = gspread_client.open_by_url(filter_sheets['url']).title
+                except Exception:
+                    st.session_state[cache_key] = None
+            sheet_name = st.session_state.get(cache_key)
+            if sheet_name:
+                st.success(f"Filter sheet configured: **{sheet_name}**")
+            else:
+                st.success("Filter sheet configured")
 
             # Validate sheet connection
             if st.button("Verify Sheet Connection", key="verify_sheet"):
@@ -4423,7 +4533,7 @@ with tab_filter:
                     try:
                         spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
                         tabs = [ws.title for ws in spreadsheet.worksheets()]
-                        st.success(f"Connected! Found {len(tabs)} tabs")
+                        st.success(f"Connected to **{spreadsheet.title}**! Found {len(tabs)} tabs")
                         expected_tabs = ['Past Candidates', 'Blacklist', 'NotRelevant Companies', 'Target Companies', 'Universities', 'Tech Alerts']
                         missing = [t for t in expected_tabs if t not in tabs]
                         if missing:
@@ -5130,42 +5240,38 @@ with tab_enrich:
             # Toggle to show all columns
             show_all_cols = st.checkbox("Show all columns", value=False, key="enrich_show_all_cols")
 
-            # Data is already normalized by flatten_for_csv with consistent column names:
-            # name, first_name, last_name, current_company, current_title, linkedin_url, etc.
-            display_df = enriched_df.copy()
-
             # Debug: show available columns
             with st.expander("Debug: Available columns", expanded=False):
-                st.write(f"Columns in enriched data: {list(display_df.columns)}")
+                st.write(f"Columns in enriched data: {list(enriched_df.columns)}")
                 # Show sample values for key columns
-                if len(display_df) > 0:
+                if len(enriched_df) > 0:
                     st.write("Sample row:")
-                    sample = display_df.iloc[0]
+                    sample = enriched_df.iloc[0]
                     for col in ['name', 'current_company', 'current_title', 'linkedin_url']:
-                        if col in display_df.columns:
+                        if col in enriched_df.columns:
                             st.write(f"  {col}: {sample.get(col, 'N/A')}")
 
             if show_all_cols:
                 # Show all Crustdata columns
                 all_cols = ['name', 'current_title', 'current_company', 'all_employers', 'all_titles', 'all_schools', 'skills', 'past_positions', 'headline', 'location', 'summary', 'connections_count', 'linkedin_url']
-                available_cols = [c for c in all_cols if c in display_df.columns]
+                available_cols = [c for c in all_cols if c in enriched_df.columns]
                 st.dataframe(
-                    display_df[available_cols].head(20) if available_cols else display_df.head(20),
+                    enriched_df[available_cols].head(20) if available_cols else enriched_df.head(20),
                     use_container_width=True,
                     hide_index=True,
                     column_config={
                         "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                     }
                 )
-                st.caption(f"Showing {min(20, len(display_df))} of {len(display_df)} profiles | {len(available_cols)} columns")
+                st.caption(f"Showing {min(20, len(enriched_df))} of {len(enriched_df)} profiles | {len(available_cols)} columns")
             else:
                 # Simple preview: name, title, company, linkedin
                 preview_cols = ['name', 'current_title', 'current_company', 'linkedin_url']
-                available_cols = [c for c in preview_cols if c in display_df.columns]
+                available_cols = [c for c in preview_cols if c in enriched_df.columns]
 
                 if available_cols:
                     st.dataframe(
-                        display_df[available_cols].head(20),
+                        enriched_df[available_cols].head(20),
                         use_container_width=True,
                         hide_index=True,
                         column_config={
@@ -5176,14 +5282,6 @@ with tab_enrich:
                     )
                 else:
                     st.warning("No data columns available. Check Debug expander for column names.")
-
-            # Download full enriched data
-            st.download_button(
-                "Download Enriched Data (CSV)",
-                enriched_df.to_csv(index=False),
-                "enriched_profiles.csv",
-                "text/csv"
-            )
 
         if results_df is not None and not results_df.empty:
             urls = extract_urls_from_phantombuster(results_df)
@@ -5651,16 +5749,17 @@ with tab_filter2:
         has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
 
         if has_sheets:
-            # Try to show sheet name and available tabs
-            try:
-                spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
-                tabs = [ws.title for ws in spreadsheet.worksheets()]
-                st.success(f"📊 **{spreadsheet.title}** connected")
-                with st.expander("Sheet tabs", expanded=False):
-                    st.write(f"Available tabs: {', '.join(tabs)}")
-                    st.caption("Expected tabs: Past Candidates, Blacklist, NotRelevant Companies, Universities")
-            except Exception:
-                st.success("Filter sheet connected")
+            cache_key = f"sheet_title_{filter_sheets.get('url', '')}"
+            if cache_key not in st.session_state:
+                try:
+                    st.session_state[cache_key] = gspread_client.open_by_url(filter_sheets['url']).title
+                except Exception:
+                    st.session_state[cache_key] = None
+            sheet_name = st.session_state.get(cache_key)
+            if sheet_name:
+                st.success(f"Filter sheet configured: **{sheet_name}**")
+            else:
+                st.success("Filter sheet configured")
 
         st.divider()
         st.markdown("**Filter Options:**")
@@ -5670,6 +5769,10 @@ with tab_filter2:
         with col1:
             # Sheet-based filters
             st.markdown("**From Google Sheet:**")
+            use_past_candidates = st.checkbox("Exclude Past Candidates", value=True, key="f2_past_candidates",
+                                             help="Remove profiles already contacted (matched by full name)")
+            use_blacklist = st.checkbox("Exclude Blacklist Companies (current)", value=True, key="f2_blacklist",
+                                       help="Remove profiles whose current company is on the blacklist")
             use_not_relevant = st.checkbox("Exclude Not Relevant Companies (all employers)", value=True, key="f2_not_relevant",
                                           help="Check against ALL past employers, not just current")
             target_company_mode = st.radio("Target Companies (all employers):",
@@ -5726,6 +5829,52 @@ with tab_filter2:
                 priority_matches = []
 
                 sheet_url = filter_sheets.get('url', '') if has_sheets else ''
+
+                # Past candidates filter (match by full name only)
+                if use_past_candidates and has_sheets and filter_sheets.get('past_candidates'):
+                    past_df = load_sheet_as_df(sheet_url, filter_sheets['past_candidates'])
+                    if past_df is not None and not past_df.empty:
+                        import re as _re
+                        def _norm_name(name):
+                            if pd.isna(name) or not name:
+                                return ''
+                            name = _re.sub(r'[^\w\s]', '', str(name).lower().strip())
+                            return ' '.join(name.split())
+
+                        # Find name column in sheet
+                        name_col = None
+                        for c in ['Name', 'name', 'Full Name', 'fullName', 'Candidate Name']:
+                            if c in past_df.columns:
+                                name_col = c
+                                break
+                        if name_col:
+                            past_names = set(_norm_name(n) for n in past_df[name_col].dropna() if str(n).strip())
+                            if past_names:
+                                df['_is_past'] = False
+                                if 'name' in df.columns:
+                                    df['_is_past'] = df['name'].apply(_norm_name).isin(past_names)
+                                if 'first_name' in df.columns and 'last_name' in df.columns:
+                                    full = df.apply(lambda r: _norm_name(f"{r.get('first_name', '')} {r.get('last_name', '')}"), axis=1)
+                                    df['_is_past'] = df['_is_past'] | full.isin(past_names)
+                                removed['Past Candidates'] = df['_is_past'].sum()
+                                df = df[~df['_is_past']].drop(columns=['_is_past'])
+
+                # Blacklist companies filter
+                if use_blacklist and has_sheets and filter_sheets.get('blacklist'):
+                    bl_df = load_sheet_as_df(sheet_url, filter_sheets['blacklist'])
+                    if bl_df is not None and not bl_df.empty:
+                        blacklist_items = set()
+                        for c in bl_df.columns:
+                            blacklist_items.update(bl_df[c].dropna().str.lower().str.strip().tolist())
+                        if blacklist_items and 'current_company' in df.columns:
+                            def _matches_blacklist(company):
+                                if pd.isna(company) or not company:
+                                    return False
+                                comp = str(company).lower().strip()
+                                return any(bl in comp or comp in bl for bl in blacklist_items if bl)
+                            mask = df['current_company'].apply(_matches_blacklist)
+                            removed['Blacklist Companies'] = mask.sum()
+                            df = df[~mask]
 
                 # Not relevant companies filter (checks ALL employers)
                 if use_not_relevant and has_sheets and filter_sheets.get('not_relevant'):
@@ -6131,42 +6280,7 @@ with tab_screening:
             profiles_df = enriched_df
             st.info(f"**{len(profiles_df)}** enriched profiles ready for screening")
 
-        # Convert DataFrame to dicts for screening
-        profiles = profiles_df.to_dict('records')
-
-        # Clean up NaN values from pandas (NaN is truthy in Python, breaks checks)
-        import math
-        for p in profiles:
-            for k, v in p.items():
-                if isinstance(v, float) and math.isnan(v):
-                    p[k] = ''
-
-        # Restore raw_data from cached profile dicts (avoids re-fetching from DB)
-        raw_cache = st.session_state.get('enriched_profiles_raw', {})
-        if raw_cache:
-            restored = 0
-            for p in profiles:
-                url = p.get('linkedin_url', '')
-                if url and not p.get('raw_data') and not p.get('raw_crustdata') and url in raw_cache:
-                    cached = raw_cache[url]
-                    if cached.get('raw_data'):
-                        p['raw_crustdata'] = cached['raw_data']
-                        restored += 1
-            if restored > 0:
-                pass  # raw_data restored silently from cache
-
-        # Check raw_data availability
-        has_raw = sum(1 for p in profiles if p.get('raw_data') or p.get('raw_crustdata'))
-        if len(profiles) > 500 and has_raw > 0:
-            for p in profiles:
-                p.pop('raw_data', None)
-                p.pop('raw_crustdata', None)
-            has_raw = 0
-            st.caption(f"{len(profiles)} profiles ready for screening (raw data will be fetched per-batch to save memory)")
-        elif has_raw > 0:
-            st.caption(f"{len(profiles)} profiles ready for screening ({has_raw}/{len(profiles)} with raw data)")
-        else:
-            st.caption(f"{len(profiles)} profiles ready for screening (raw data will be fetched from DB)")
+        num_profiles = len(profiles_df)
 
         # AI Screening Requirements Input
         st.markdown("### AI Screening Requirements")
@@ -6218,8 +6332,8 @@ with tab_screening:
             screen_count = st.number_input(
                 "Number of profiles to screen",
                 min_value=1,
-                max_value=len(profiles),
-                value=min(100, len(profiles)),
+                max_value=num_profiles,
+                value=min(100, num_profiles),
                 step=10,
                 key="screen_count"
             )
@@ -6229,7 +6343,7 @@ with tab_screening:
                 options=["Quick (cheaper)", "Detailed"],
                 index=1,  # Default to Detailed
                 key="screening_mode",
-                help="Quick: score + fit + short summary | Detailed: adds reasoning, strengths, concerns"
+                help="Quick: score + fit only | Detailed: adds summary with experience calc and justification"
             )
         with col_model:
             model_options = ["gpt-4o-mini (fast)", "Claude Haiku (balanced)"]
@@ -6248,10 +6362,6 @@ with tab_screening:
             ai_model = "gpt-4o-mini"
             ai_provider = "openai"
 
-        # Dynamic concurrent workers — scales down when multiple users screen simultaneously
-        max_workers = _screening_session_start()
-        st.session_state['_screening_active'] = True  # Track so we can decrement on completion
-
         # Cost estimate based on mode and model
         if ai_provider == "anthropic":
             model_input_cost = 0.80   # Haiku: $0.80/1M input tokens
@@ -6263,11 +6373,11 @@ with tab_screening:
             model_input_cost = 2.50
             model_output_cost = 10.00
         if screening_mode == "Quick (cheaper)":
-            output_tokens = 50  # ~50 tokens for quick response
-            st.caption("Quick mode: Returns score, fit level, and brief summary only")
+            output_tokens = 20  # ~20 tokens for score + fit only
+            st.caption("Quick mode: Returns score and fit level only")
         else:
-            output_tokens = 200  # ~200 tokens for detailed response
-            st.caption("Detailed mode: Returns full analysis with reasoning, strengths, and concerns")
+            output_tokens = 150  # ~150 tokens for score + fit + summary
+            st.caption("Detailed mode: Returns score, fit, and summary with experience calc")
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
         role_display = selected_role if selected_role != 'General (auto)' else 'General'
@@ -6275,9 +6385,10 @@ with tab_screening:
 
         # Debug: Show available fields and test single profile
         with st.expander("Debug: Profile Fields & Test"):
-            if profiles:
-                st.write("Available fields in profiles:", list(profiles[0].keys()))
-                st.write("Sample profile:", {k: str(v)[:100] for k, v in profiles[0].items()})
+            if not profiles_df.empty:
+                st.write("Available fields:", list(profiles_df.columns))
+                sample = {k: str(v)[:100] for k, v in profiles_df.iloc[0].to_dict().items()}
+                st.write("Sample profile:", sample)
 
                 if job_description and st.button("Test Single Profile", key="test_single"):
                     try:
@@ -6288,7 +6399,13 @@ with tab_screening:
                         test_mode = 'quick' if screening_mode == "Quick (cheaper)" else 'detailed'
                         role_name = st.session_state.get('active_role_name', 'General')
                         st.write(f"Testing with first profile ({test_mode} mode, role: {role_name}, model: {ai_model})...")
-                        result = screen_profile(profiles[0], job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
+                        test_profile = profiles_df.iloc[0].to_dict()
+                        # Clean NaN
+                        import math
+                        for k, v in test_profile.items():
+                            if isinstance(v, float) and math.isnan(v):
+                                test_profile[k] = ''
+                        result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
                         st.write("Result:", result)
                     except Exception as e:
                         import traceback
@@ -6361,19 +6478,20 @@ with tab_screening:
             rescreen_selected_button = False
 
             if existing_results and not screening_in_progress:
-                # Find profiles not yet screened
+                # Find profiles not yet screened (lightweight — just compare URLs)
                 screened_urls = {r.get('linkedin_url') for r in existing_results if r.get('linkedin_url')}
-                unscreened_profiles = [p for p in profiles if p.get('linkedin_url') not in screened_urls]
+                all_urls = set(profiles_df['linkedin_url'].dropna()) if 'linkedin_url' in profiles_df.columns else set()
+                unscreened_count = len(all_urls - screened_urls)
 
-                st.info(f"📊 **{len(existing_results)}** screened | **{len(unscreened_profiles)}** remaining | **{len(profiles)}** total")
+                st.info(f"📊 **{len(existing_results)}** screened | **{unscreened_count}** remaining | **{num_profiles}** total")
 
                 col1, col2, col3 = st.columns([2, 2, 1])
                 with col1:
                     start_button = st.button("🔄 Screen All Fresh", type="secondary", key="start_screening")
                 with col2:
-                    if unscreened_profiles:
-                        continue_count = min(len(unscreened_profiles), screen_count)
-                        continue_button = st.button(f"▶️ Continue ({continue_count} of {len(unscreened_profiles)} left)", type="primary", key="continue_screening")
+                    if unscreened_count > 0:
+                        continue_count = min(unscreened_count, screen_count)
+                        continue_button = st.button(f"▶️ Continue ({continue_count} of {unscreened_count} left)", type="primary", key="continue_screening")
                     else:
                         st.success("✅ All profiles screened!")
                 with col3:
@@ -6450,6 +6568,7 @@ with tab_screening:
                 batch_ai_model = batch_state.get('ai_model', 'gpt-4o-mini')
                 batch_ai_provider = batch_state.get('ai_provider', 'openai')
                 batch_api_key = batch_state.get('api_key', openai_key)
+                max_workers = batch_state.get('max_workers', 15)
                 batch_role_prompt = batch_state.get('role_prompt')
                 batch_size = 50  # Tier 3: 50 parallel requests, 50 × 15KB = ~750KB memory
                 current_batch = batch_state.get('current_batch', 0)
@@ -6585,6 +6704,32 @@ with tab_screening:
                         st.rerun()
 
             if start_button or rescreen_selected_button or continue_button:
+                # === Prepare profiles (only when screening starts, not on every rerun) ===
+                profiles = profiles_df.to_dict('records')
+                import math
+                for p in profiles:
+                    for k, v in p.items():
+                        if isinstance(v, float) and math.isnan(v):
+                            p[k] = ''
+                # Restore raw_data from cache
+                raw_cache = st.session_state.get('enriched_profiles_raw', {})
+                if raw_cache:
+                    for p in profiles:
+                        url = p.get('linkedin_url', '')
+                        if url and not p.get('raw_data') and not p.get('raw_crustdata') and url in raw_cache:
+                            cached = raw_cache[url]
+                            if cached.get('raw_data'):
+                                p['raw_crustdata'] = cached['raw_data']
+                # Strip raw data for large batches to save memory
+                has_raw = sum(1 for p in profiles if p.get('raw_data') or p.get('raw_crustdata'))
+                if len(profiles) > 500 and has_raw > 0:
+                    for p in profiles:
+                        p.pop('raw_data', None)
+                        p.pop('raw_crustdata', None)
+                # Dynamic concurrent workers
+                max_workers = _screening_session_start()
+                st.session_state['_screening_active'] = True
+
                 # Validate API key before starting
                 if ai_provider == "anthropic":
                     if not anthropic_key:
@@ -6669,7 +6814,8 @@ with tab_screening:
                     'role_prompt': role_prompt,  # Role-specific system prompt (like Custom GPT)
                     'current_batch': 0,
                     'results': initial_results,  # Start with existing results if re-screening selected
-                    'is_continue': False  # Always fresh screening
+                    'is_continue': False,  # Always fresh screening
+                    'max_workers': max_workers,
                 }
                 st.session_state['screening_batch_progress'] = {
                     'completed': len(initial_results),
@@ -6743,7 +6889,7 @@ with tab_screening:
                     # Columns that should NOT be merged from old data (screening is always fresh per JD)
                     exclude_from_merge = {
                         # Session screening columns
-                        'score', 'fit', 'summary', 'why', 'strengths', 'concerns',
+                        'score', 'fit', 'summary',
                         # Database screening columns
                         'screening_score', 'screening_fit_level', 'screening_summary',
                         'screening_reasoning', 'screened_at', 'status',
@@ -6759,7 +6905,7 @@ with tab_screening:
                         )
 
                 # Reorder columns to put important ones first (linkedin_url next to name for easy click)
-                priority_cols = ['score', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'why', 'strengths', 'concerns', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
+                priority_cols = ['score', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
                 ordered_cols = [c for c in priority_cols if c in df_display.columns]
                 other_cols = [c for c in df_display.columns if c not in priority_cols and c != 'index']
                 df_display = df_display[ordered_cols + other_cols]
@@ -6893,83 +7039,17 @@ with tab_screening:
             # Export options
             st.markdown("### Export Results")
 
-            # Build raw_data index on-demand for CSV export (not stored in session_state)
-            def add_raw_data_to_results(results_list):
-                """Add raw_data column to results for CSV export (fetched on-demand from DB)."""
-                if not results_list:
-                    return []
-
-                # Try to get raw_data from database
-                raw_index = {}
-                db_client = _get_db_client() if HAS_DATABASE else None
-                if db_client:
-                    try:
-                        # Collect and normalize URLs
-                        urls_set = set()
-                        for r in results_list:
-                            orig_url = r.get('linkedin_url', '')
-                            if orig_url:
-                                urls_set.add(orig_url)
-                                norm_url = normalize_linkedin_url(orig_url)
-                                if norm_url:
-                                    urls_set.add(norm_url)
-
-                        if urls_set:
-                            # Fetch all profiles with raw_data, filter locally
-                            # More efficient than N individual queries
-                            response = db_client.select('profiles', 'linkedin_url,raw_data', limit=5000)
-                            if response:
-                                for row in response:
-                                    if row.get('raw_data') and row.get('linkedin_url'):
-                                        db_url = row['linkedin_url']
-                                        # Index by both original and normalized URL
-                                        raw_index[db_url] = row['raw_data']
-                                        norm = normalize_linkedin_url(db_url)
-                                        if norm and norm != db_url:
-                                            raw_index[norm] = row['raw_data']
-                    except Exception as e:
-                        print(f"[Export] Failed to fetch raw_data from DB: {e}")
-
-                # Fallback: try enriched_df if DB didn't have data
-                if not raw_index:
-                    enriched_df_fallback = st.session_state.get('enriched_df')
-                    if enriched_df_fallback is not None and not enriched_df_fallback.empty and 'raw_data' in enriched_df_fallback.columns:
-                        enriched_records = enriched_df_fallback.to_dict('records')
-                        raw_index = build_raw_data_index(enriched_records) if enriched_records else {}
-
-                results_with_raw = []
-                for r in results_list:
-                    r_copy = r.copy()
-                    url = r.get('linkedin_url', '')
-                    # Try original URL, then normalized
-                    raw = raw_index.get(url) or raw_index.get(normalize_linkedin_url(url) or '') or {}
-                    if raw:
-                        r_copy['raw_data'] = json.dumps(raw, ensure_ascii=False) if isinstance(raw, dict) else str(raw)
-                    else:
-                        r_copy['raw_data'] = ''
-                    results_with_raw.append(r_copy)
-                return results_with_raw
-
             # Count by fit level
             strong_list = [r for r in screening_results if r.get('fit') == 'Strong Fit']
             good_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
             partial_list = [r for r in screening_results if r.get('fit') == 'Partial Fit']
-
-            # Option to include raw_data (slower export)
-            include_raw_data = st.checkbox("Include raw data in export (slower)", value=False, key="include_raw_data_export")
-
-            # Helper to prepare export data
-            def prepare_export(results_list):
-                if include_raw_data:
-                    return add_raw_data_to_results(results_list)
-                return results_list
 
             export_col1, export_col2, export_col3, export_col4, export_col5 = st.columns(5)
 
             with export_col1:
                 st.download_button(
                     f"Strong Fit ({len(strong_list)})",
-                    pd.DataFrame(prepare_export(strong_list)).to_csv(index=False) if strong_list else "",
+                    pd.DataFrame(strong_list).to_csv(index=False) if strong_list else "",
                     "screening_strong_fit.csv",
                     "text/csv",
                     disabled=len(strong_list) == 0
@@ -6978,7 +7058,7 @@ with tab_screening:
             with export_col2:
                 st.download_button(
                     f"Good Fit ({len(good_list)})",
-                    pd.DataFrame(prepare_export(good_list)).to_csv(index=False) if good_list else "",
+                    pd.DataFrame(good_list).to_csv(index=False) if good_list else "",
                     "screening_good_fit.csv",
                     "text/csv",
                     disabled=len(good_list) == 0
@@ -6987,14 +7067,14 @@ with tab_screening:
             with export_col3:
                 st.download_button(
                     f"Partial Fit ({len(partial_list)})",
-                    pd.DataFrame(prepare_export(partial_list)).to_csv(index=False) if partial_list else "",
+                    pd.DataFrame(partial_list).to_csv(index=False) if partial_list else "",
                     "screening_partial_fit.csv",
                     "text/csv",
                     disabled=len(partial_list) == 0
                 )
 
             with export_col4:
-                full_df = pd.DataFrame(prepare_export(sorted_results))
+                full_df = pd.DataFrame(sorted_results)
                 st.download_button(
                     f"All ({len(sorted_results)})",
                     full_df.to_csv(index=False),
@@ -7018,40 +7098,35 @@ with tab_database:
         try:
             db_client = _get_db_client()
             if not db_client:
-                st.warning("Supabase not configured. Add 'supabase_url' and 'supabase_key' to secrets.")
-            elif not check_connection(db_client):
-                st.error("Cannot connect to Supabase. Check your credentials.")
+                st.warning("Supabase not configured or cannot connect. Check your credentials.")
             else:
-                # Connection successful - show stats
+                # Connection successful (_get_db_client already verified connection)
                 st.success("Connected to Supabase")
 
-                # Pipeline stats - count directly from profiles table
-                stats = {}
-                try:
-                    total = db_client.count('profiles')
-                    enriched = db_client.count('profiles', {'enriched_at': 'not.is.null'})
-                    screened = db_client.count('profiles', {'screening_score': 'not.is.null'})
-                    stats = {'total': total, 'enriched': enriched, 'screened': screened, 'scraped': total, 'contacted': 0, 'stale_profiles': 0}
-                except Exception as e:
-                    st.warning(f"Could not load stats: {e}")
-                if stats:
-                    st.markdown("#### Pipeline Overview")
-                    stat_cols = st.columns(6)
-                    stat_cols[0].metric("Total", stats.get('total', 0))
-                    stat_cols[1].metric("Scraped", stats.get('scraped', 0))
-                    stat_cols[2].metric("Enriched", stats.get('enriched', 0))
-                    stat_cols[3].metric("Screened", stats.get('screened', 0))
-                    stat_cols[4].metric("Contacted", stats.get('contacted', 0))
-                    stat_cols[5].metric("Stale (>6mo)", stats.get('stale_profiles', 0))
+                # Pipeline stats - only load on demand
+                with st.expander("Pipeline Overview", expanded=False):
+                    if st.button("Load Stats", key="db_load_stats"):
+                        try:
+                            total = db_client.count('profiles')
+                            enriched = db_client.count('profiles', {'enriched_at': 'not.is.null'})
+                            screened = db_client.count('profiles', {'screening_score': 'not.is.null'})
+                            st.session_state['db_pipeline_stats'] = {'total': total, 'enriched': enriched, 'screened': screened, 'scraped': total, 'contacted': 0, 'stale_profiles': 0}
+                        except Exception as e:
+                            st.warning(f"Could not load stats: {e}")
+                    stats = st.session_state.get('db_pipeline_stats', {})
+                    if stats:
+                        stat_cols = st.columns(6)
+                        stat_cols[0].metric("Total", stats.get('total', 0))
+                        stat_cols[1].metric("Scraped", stats.get('scraped', 0))
+                        stat_cols[2].metric("Enriched", stats.get('enriched', 0))
+                        stat_cols[3].metric("Screened", stats.get('screened', 0))
+                        stat_cols[4].metric("Contacted", stats.get('contacted', 0))
+                        stat_cols[5].metric("Stale (>6mo)", stats.get('stale_profiles', 0))
 
                 st.divider()
 
                 # Browse & filter profiles
                 st.markdown("#### Browse Profiles")
-
-                # Show total profiles in DB
-                total_in_db = db_client.count('profiles')
-                st.caption(f"Total profiles in database: **{total_in_db:,}**")
 
                 # --- Search Filters (server-side) ---
                 st.markdown("##### Search Filters")
@@ -7138,10 +7213,10 @@ with tab_database:
                         all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=50000)
                         st.caption(f"Full-text search: **{ft}**" + (" + column filters" if has_column_filters else ""))
                     elif has_column_filters:
-                        # Column filters only (server-side)
-                        from db import search_profiles_filtered
-                        all_profiles = search_profiles_filtered(db_client, af, limit=50000)
-                        st.caption("Server-side filtered search")
+                        # Column filters only (server-side) with boolean query support
+                        from db import search_profiles_boolean
+                        all_profiles = search_profiles_boolean(db_client, af, limit=50000)
+                        st.caption("Server-side filtered search (supports: OR, AND, NOT, \"phrases\")")
                     else:
                         # No filters - load all
                         all_profiles = get_all_profiles(db_client, limit=50000)
@@ -7161,24 +7236,159 @@ with tab_database:
                     # Apply column filters client-side when combined with full-text search
                     # (full-text search RPC doesn't support column filters natively)
                     if ft and ft.strip() and has_column_filters:
-                        def _ilike_filter(series, terms_str):
-                            """Case-insensitive OR filter: matches if any term is a substring."""
-                            terms = [t.strip().lower() for t in terms_str.split(',') if t.strip()]
-                            return series.fillna('').str.lower().apply(
-                                lambda val: any(t in val for t in terms)
-                            )
+                        def _parse_boolean_query_client(query: str) -> dict:
+                            """Parse boolean query for client-side filtering.
+                            Returns AST: {'type': 'OR'|'AND'|'NOT'|'TERM', 'children'|'child'|'value': ...}
+                            """
+                            import re
+                            # Tokenize
+                            tokens = []
+                            i = 0
+                            query = query.strip()
+                            while i < len(query):
+                                if query[i].isspace():
+                                    i += 1
+                                    continue
+                                if query[i] == '"':
+                                    end = query.find('"', i + 1)
+                                    if end == -1:
+                                        end = len(query)
+                                    tokens.append(('PHRASE', query[i+1:end]))
+                                    i = end + 1
+                                    continue
+                                if query[i] == '(':
+                                    tokens.append(('LPAREN', '('))
+                                    i += 1
+                                    continue
+                                if query[i] == ')':
+                                    tokens.append(('RPAREN', ')'))
+                                    i += 1
+                                    continue
+                                if query[i] == '|':
+                                    tokens.append(('OR', 'OR'))
+                                    i += 1
+                                    continue
+                                if query[i] == '&':
+                                    tokens.append(('AND', 'AND'))
+                                    i += 1
+                                    continue
+                                if query[i] in '!-' and (i == 0 or query[i-1].isspace() or query[i-1] in '(&|'):
+                                    tokens.append(('NOT', 'NOT'))
+                                    i += 1
+                                    continue
+                                if query[i] == ',':
+                                    tokens.append(('OR', 'OR'))
+                                    i += 1
+                                    continue
+                                if query[i] == '+':
+                                    i += 1
+                                    continue
+                                word_match = re.match(r'[\w\.\-]+', query[i:])
+                                if word_match:
+                                    word = word_match.group()
+                                    upper_word = word.upper()
+                                    if upper_word == 'AND':
+                                        tokens.append(('AND', 'AND'))
+                                    elif upper_word == 'OR':
+                                        tokens.append(('OR', 'OR'))
+                                    elif upper_word == 'NOT':
+                                        tokens.append(('NOT', 'NOT'))
+                                    else:
+                                        tokens.append(('WORD', word))
+                                    i += len(word)
+                                    continue
+                                i += 1
 
-                        def _array_filter(series, terms_str):
-                            """Case-insensitive OR filter for array columns (stored as lists or comma-sep strings)."""
-                            terms = [t.strip().lower() for t in terms_str.split(',') if t.strip()]
+                            # Parse tokens to AST
+                            pos = [0]
+                            def peek():
+                                return tokens[pos[0]] if pos[0] < len(tokens) else None
+                            def consume():
+                                t = peek()
+                                pos[0] += 1
+                                return t
+                            def parse_or():
+                                left = parse_and()
+                                while peek() and peek()[0] == 'OR':
+                                    consume()
+                                    right = parse_and()
+                                    if left.get('type') == 'OR':
+                                        left['children'].append(right)
+                                    else:
+                                        left = {'type': 'OR', 'children': [left, right]}
+                                return left
+                            def parse_and():
+                                left = parse_not()
+                                while peek():
+                                    token = peek()
+                                    if token[0] == 'AND':
+                                        consume()
+                                        right = parse_not()
+                                    elif token[0] in ('WORD', 'PHRASE', 'NOT', 'LPAREN'):
+                                        right = parse_not()
+                                    else:
+                                        break
+                                    if left.get('type') == 'AND':
+                                        left['children'].append(right)
+                                    else:
+                                        left = {'type': 'AND', 'children': [left, right]}
+                                return left
+                            def parse_not():
+                                if peek() and peek()[0] == 'NOT':
+                                    consume()
+                                    return {'type': 'NOT', 'child': parse_primary()}
+                                return parse_primary()
+                            def parse_primary():
+                                token = peek()
+                                if not token:
+                                    return {'type': 'TERM', 'value': ''}
+                                if token[0] == 'LPAREN':
+                                    consume()
+                                    expr = parse_or()
+                                    if peek() and peek()[0] == 'RPAREN':
+                                        consume()
+                                    return expr
+                                if token[0] in ('WORD', 'PHRASE'):
+                                    consume()
+                                    return {'type': 'TERM', 'value': token[1]}
+                                consume()
+                                return parse_primary()
+
+                            if not tokens:
+                                return {'type': 'TERM', 'value': ''}
+                            return parse_or()
+
+                        def _eval_boolean_ast(ast: dict, text: str) -> bool:
+                            """Evaluate boolean AST against text."""
+                            text = text.lower()
+                            node_type = ast.get('type')
+                            if node_type == 'TERM':
+                                value = ast.get('value', '').lower()
+                                return value in text if value else True
+                            if node_type == 'NOT':
+                                return not _eval_boolean_ast(ast['child'], text)
+                            if node_type == 'OR':
+                                return any(_eval_boolean_ast(c, text) for c in ast['children'])
+                            if node_type == 'AND':
+                                return all(_eval_boolean_ast(c, text) for c in ast['children'])
+                            return True
+
+                        def _boolean_filter(series, query_str):
+                            """Boolean filter supporting OR, AND, NOT, phrases."""
+                            ast = _parse_boolean_query_client(query_str)
+                            return series.fillna('').apply(lambda val: _eval_boolean_ast(ast, str(val)))
+
+                        def _boolean_array_filter(series, query_str):
+                            """Boolean filter for array columns."""
+                            ast = _parse_boolean_query_client(query_str)
                             def matches(val):
                                 if isinstance(val, list):
-                                    joined = ' '.join(str(v) for v in val).lower()
+                                    joined = ' '.join(str(v) for v in val)
                                 elif isinstance(val, str):
-                                    joined = val.lower()
+                                    joined = val
                                 else:
                                     return False
-                                return any(t in joined for t in terms)
+                                return _eval_boolean_ast(ast, joined)
                             return series.apply(matches)
 
                         mask = pd.Series(True, index=df.index)
@@ -7189,10 +7399,10 @@ with tab_database:
 
                         for fkey, col in str_filters.items():
                             if af.get(fkey) and col in df.columns:
-                                mask &= _ilike_filter(df[col], af[fkey])
+                                mask &= _boolean_filter(df[col], af[fkey])
                         for fkey, col in arr_filters.items():
                             if af.get(fkey) and col in df.columns:
-                                mask &= _array_filter(df[col], af[fkey])
+                                mask &= _boolean_array_filter(df[col], af[fkey])
                         if af.get('has_email') and 'email' in df.columns:
                             mask &= df['email'].fillna('').astype(bool)
 
@@ -7263,7 +7473,8 @@ with tab_database:
 
                                 # Fetch profiles WITH raw_data (needed for screening)
                                 from db import get_profiles_by_urls
-                                profiles_with_raw = get_profiles_by_urls(db_client, urls, include_raw_data=True)
+                                with st.spinner(f"Loading {len(urls)} profiles with raw data..."):
+                                    profiles_with_raw = get_profiles_by_urls(db_client, urls, include_raw_data=True)
 
                                 if profiles_with_raw:
                                     # Convert to DataFrame for Filter+ tab
@@ -7279,9 +7490,13 @@ with tab_database:
                                     st.session_state.pop('passed_candidates_df', None)
                                     st.session_state.pop('screening_results', None)
 
-                                    st.success(f"Loaded {len(result_df)} profiles. Go to **Filter+** tab to continue.")
+                                    st.session_state['db_send_success'] = len(result_df)
+                                    st.rerun()
                                 else:
                                     st.warning("Could not load profiles with raw data")
+                            # Show success message after rerun
+                            if st.session_state.pop('db_send_success', None):
+                                st.success(f"Loaded {st.session_state.get('enriched_df', pd.DataFrame()).shape[0]} profiles. Go to **Filter+** tab to continue.")
                 else:
                     st.info("No profiles in database yet")
 
@@ -7377,233 +7592,245 @@ with tab_usage:
         try:
             db_client = _get_db_client()
             if not db_client:
-                st.warning("Supabase not configured. Add 'supabase_url' and 'supabase_key' to secrets.")
-            elif not check_connection(db_client):
-                st.error("Cannot connect to Supabase. Check your credentials.")
+                st.warning("Supabase not configured or cannot connect. Check your credentials.")
             else:
                 # Date range selector
-                date_range = st.selectbox(
-                    "Date Range",
-                    ["Today", "7 Days", "30 Days", "All Time"],
-                    index=1,
-                    key="usage_date_range"
-                )
+                ucol1, ucol2 = st.columns([2, 1])
+                with ucol1:
+                    date_range = st.selectbox(
+                        "Date Range",
+                        ["Today", "7 Days", "30 Days", "All Time"],
+                        index=1,
+                        key="usage_date_range"
+                    )
+                with ucol2:
+                    load_usage = st.button("Load Usage Data", type="primary", key="load_usage_btn")
 
                 # Map selection to days
                 days_map = {"Today": 1, "7 Days": 7, "30 Days": 30, "All Time": None}
                 selected_days = days_map[date_range]
 
-                # Fetch usage summary
-                summary = get_usage_summary(db_client, days=selected_days)
+                # Fetch usage summary only when requested
+                if load_usage:
+                    st.session_state['usage_summary'] = get_usage_summary(db_client, days=selected_days)
+                    st.session_state['usage_selected_days'] = selected_days
+                summary = st.session_state.get('usage_summary', {})
 
-                # Display metrics in columns
-                st.markdown("#### Provider Summary")
-                metric_cols = st.columns(4)
-
-                with metric_cols[0]:
-                    crustdata = summary.get('crustdata', {})
-                    crust_cost = crustdata.get('cost_usd', 0)
-                    st.metric(
-                        "Crustdata",
-                        f"${crust_cost:.2f}",
-                        help="$1,500 for 150K credits (3 credits/profile, $0.03/profile)"
-                    )
-                    st.caption(f"{int(crustdata.get('credits', 0)):,} credits | {crustdata.get('requests', 0)} requests")
-
-                with metric_cols[1]:
-                    salesql = summary.get('salesql', {})
-                    st.metric(
-                        "SalesQL",
-                        f"{int(salesql.get('lookups', 0)):,} lookups",
-                        help="5,000/day limit"
-                    )
-                    st.caption(f"{salesql.get('requests', 0)} requests")
-
-                with metric_cols[2]:
-                    openai = summary.get('openai', {})
-                    cost = openai.get('cost_usd', 0)
-                    st.metric(
-                        "OpenAI",
-                        f"${cost:.4f}",
-                        help="gpt-4o-mini: $0.15/1M input, $0.60/1M output"
-                    )
-                    tokens_in = openai.get('tokens_input', 0)
-                    tokens_out = openai.get('tokens_output', 0)
-                    st.caption(f"{tokens_in:,} in / {tokens_out:,} out tokens")
-
-                with metric_cols[3]:
-                    phantombuster = summary.get('phantombuster', {})
-                    st.metric(
-                        "PhantomBuster",
-                        f"{phantombuster.get('runs', 0)} runs",
-                        help="Scraping operations"
-                    )
-                    st.caption(f"{phantombuster.get('profiles_scraped', 0):,} profiles scraped")
-
-                st.divider()
-
-                # Charts section
-                if HAS_PLOTLY and selected_days:
-                    st.markdown("#### Usage Over Time")
-
-                    # Fetch daily usage data
-                    daily_data = get_usage_by_date(db_client, days=selected_days or 365)
-
-                    if daily_data:
-                        df_daily = pd.DataFrame(daily_data)
-
-                        # Line chart for usage over time
-                        fig_line = go.Figure()
-
-                        fig_line.add_trace(go.Scatter(
-                            x=df_daily['date'],
-                            y=df_daily['crustdata'],
-                            mode='lines+markers',
-                            name='Crustdata (credits)',
-                            line=dict(color='#615fff')
-                        ))
-
-                        fig_line.add_trace(go.Scatter(
-                            x=df_daily['date'],
-                            y=df_daily['salesql'],
-                            mode='lines+markers',
-                            name='SalesQL (lookups)',
-                            line=dict(color='#38bdf8')
-                        ))
-
-                        fig_line.add_trace(go.Scatter(
-                            x=df_daily['date'],
-                            y=df_daily['phantombuster'],
-                            mode='lines+markers',
-                            name='PhantomBuster (runs)',
-                            line=dict(color='#a78bfa')
-                        ))
-
-                        fig_line.update_layout(
-                            title='API Usage by Day',
-                            xaxis_title='Date',
-                            yaxis_title='Count',
-                            hovermode='x unified',
-                            legend=dict(orientation='h', yanchor='bottom', y=1.02),
-                            height=350,
-                            paper_bgcolor='rgba(0,0,0,0)',
-                            plot_bgcolor='rgba(0,0,0,0)',
-                            font=dict(color='#e2e8f0'),
-                        )
-
-                        st.plotly_chart(fig_line, use_container_width=True)
-
-                        # Cost chart (OpenAI)
-                        if df_daily['openai'].sum() > 0:
-                            fig_cost = px.area(
-                                df_daily,
-                                x='date',
-                                y='openai',
-                                title='OpenAI Cost by Day ($)',
-                                labels={'openai': 'Cost (USD)', 'date': 'Date'}
-                            )
-                            fig_cost.update_traces(fill='tozeroy', line_color='#34d399')
-                            fig_cost.update_layout(height=250, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#e2e8f0'))
-                            st.plotly_chart(fig_cost, use_container_width=True)
-
-                    else:
-                        st.info("No usage data available for the selected period")
-
-                    # Pie chart for cost breakdown
-                    st.markdown("#### Cost Breakdown")
-                    cost_data = {
-                        'Provider': ['Crustdata', 'OpenAI'],
-                        'Cost': [
-                            summary.get('crustdata', {}).get('cost_usd', 0),
-                            summary.get('openai', {}).get('cost_usd', 0),
-                        ]
-                    }
-
-                    if sum(cost_data['Cost']) > 0:
-                        fig_pie = px.pie(
-                            pd.DataFrame(cost_data),
-                            values='Cost',
-                            names='Provider',
-                            title='Cost Distribution (USD)',
-                            color_discrete_sequence=['#34d399', '#615fff', '#38bdf8', '#a78bfa']
-                        )
-                        fig_pie.update_layout(height=300, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#e2e8f0'))
-                        st.plotly_chart(fig_pie, use_container_width=True)
-                    else:
-                        st.info("No cost data to display")
-
-                elif not HAS_PLOTLY:
-                    st.info("Install plotly for charts: `pip install plotly>=5.18.0`")
-
-                st.divider()
-
-                # Detailed logs table
-                st.markdown("#### Detailed Logs")
-
-                # Filter options
-                log_cols = st.columns([2, 2, 1])
-                with log_cols[0]:
-                    provider_filter = st.selectbox(
-                        "Provider",
-                        ["All", "crustdata", "salesql", "openai", "phantombuster"],
-                        key="usage_provider_filter"
-                    )
-                with log_cols[1]:
-                    log_limit = st.selectbox(
-                        "Show",
-                        [25, 50, 100, 200],
-                        index=1,
-                        key="usage_log_limit"
-                    )
-                with log_cols[2]:
-                    if st.button("Refresh", key="usage_refresh"):
-                        st.rerun()
-
-                # Fetch logs
-                logs = get_usage_logs(
-                    db_client,
-                    provider=provider_filter if provider_filter != "All" else None,
-                    days=selected_days,
-                    limit=log_limit
-                )
-
-                if logs:
-                    # Convert to DataFrame for display
-                    logs_df = pd.DataFrame(logs)
-
-                    # Select and rename columns for display
-                    display_cols = ['created_at', 'provider', 'operation', 'request_count',
-                                    'credits_used', 'tokens_input', 'tokens_output', 'cost_usd',
-                                    'status', 'response_time_ms']
-                    available_cols = [c for c in display_cols if c in logs_df.columns]
-
-                    st.dataframe(
-                        logs_df[available_cols],
-                        use_container_width=True,
-                        hide_index=True,
-                        column_config={
-                            "created_at": st.column_config.DatetimeColumn("Time", format="YYYY-MM-DD HH:mm"),
-                            "provider": st.column_config.TextColumn("Provider"),
-                            "operation": st.column_config.TextColumn("Operation"),
-                            "request_count": st.column_config.NumberColumn("Requests", format="%d"),
-                            "credits_used": st.column_config.NumberColumn("Credits", format="%.1f"),
-                            "tokens_input": st.column_config.NumberColumn("Tokens In", format="%d"),
-                            "tokens_output": st.column_config.NumberColumn("Tokens Out", format="%d"),
-                            "cost_usd": st.column_config.NumberColumn("Cost ($)", format="%.6f"),
-                            "status": st.column_config.TextColumn("Status"),
-                            "response_time_ms": st.column_config.NumberColumn("Time (ms)", format="%d"),
-                        }
-                    )
-
-                    # Export option
-                    st.download_button(
-                        "Download Logs (CSV)",
-                        logs_df.to_csv(index=False),
-                        f"api_usage_logs_{date_range.lower().replace(' ', '_')}.csv",
-                        "text/csv"
-                    )
+                if not summary:
+                    st.info("Click **Load Usage Data** to view API consumption metrics.")
                 else:
-                    st.info("No usage logs found for the selected filters")
+                    # Display metrics in columns
+                    st.markdown("#### Provider Summary")
+                    metric_cols = st.columns(4)
+
+                    with metric_cols[0]:
+                        crustdata = summary.get('crustdata', {})
+                        crust_cost = crustdata.get('cost_usd', 0)
+                        st.metric(
+                            "Crustdata",
+                            f"${crust_cost:.2f}",
+                            help="$1,500 for 150K credits (3 credits/profile, $0.03/profile)"
+                        )
+                        st.caption(f"{int(crustdata.get('credits', 0)):,} credits | {crustdata.get('requests', 0)} requests")
+
+                    with metric_cols[1]:
+                        salesql = summary.get('salesql', {})
+                        st.metric(
+                            "SalesQL",
+                            f"{int(salesql.get('lookups', 0)):,} lookups",
+                            help="5,000/day limit"
+                        )
+                        st.caption(f"{salesql.get('requests', 0)} requests")
+
+                    with metric_cols[2]:
+                        openai = summary.get('openai', {})
+                        cost = openai.get('cost_usd', 0)
+                        st.metric(
+                            "OpenAI",
+                            f"${cost:.4f}",
+                            help="gpt-4o-mini: $0.15/1M input, $0.60/1M output"
+                        )
+                        tokens_in = openai.get('tokens_input', 0)
+                        tokens_out = openai.get('tokens_output', 0)
+                        st.caption(f"{tokens_in:,} in / {tokens_out:,} out tokens")
+
+                    with metric_cols[3]:
+                        phantombuster = summary.get('phantombuster', {})
+                        st.metric(
+                            "PhantomBuster",
+                            f"{phantombuster.get('runs', 0)} runs",
+                            help="Scraping operations"
+                        )
+                        st.caption(f"{phantombuster.get('profiles_scraped', 0):,} profiles scraped")
+
+                    st.divider()
+
+                    # Charts section
+                    usage_days = st.session_state.get('usage_selected_days')
+                    if HAS_PLOTLY and usage_days:
+                        st.markdown("#### Usage Over Time")
+
+                        # Fetch daily usage data (only when Load was clicked — stored in session)
+                        if load_usage:
+                            st.session_state['usage_daily_data'] = get_usage_by_date(db_client, days=usage_days or 365)
+                        daily_data = st.session_state.get('usage_daily_data')
+
+                        if daily_data:
+                            df_daily = pd.DataFrame(daily_data)
+
+                            # Line chart for usage over time
+                            fig_line = go.Figure()
+
+                            fig_line.add_trace(go.Scatter(
+                                x=df_daily['date'],
+                                y=df_daily['crustdata'],
+                                mode='lines+markers',
+                                name='Crustdata (credits)',
+                                line=dict(color='#615fff')
+                            ))
+
+                            fig_line.add_trace(go.Scatter(
+                                x=df_daily['date'],
+                                y=df_daily['salesql'],
+                                mode='lines+markers',
+                                name='SalesQL (lookups)',
+                                line=dict(color='#38bdf8')
+                            ))
+
+                            fig_line.add_trace(go.Scatter(
+                                x=df_daily['date'],
+                                y=df_daily['phantombuster'],
+                                mode='lines+markers',
+                                name='PhantomBuster (runs)',
+                                line=dict(color='#a78bfa')
+                            ))
+
+                            fig_line.update_layout(
+                                title='API Usage by Day',
+                                xaxis_title='Date',
+                                yaxis_title='Count',
+                                hovermode='x unified',
+                                legend=dict(orientation='h', yanchor='bottom', y=1.02),
+                                height=350,
+                                paper_bgcolor='rgba(0,0,0,0)',
+                                plot_bgcolor='rgba(0,0,0,0)',
+                                font=dict(color='#e2e8f0'),
+                            )
+
+                            st.plotly_chart(fig_line, use_container_width=True)
+
+                            # Cost chart (OpenAI)
+                            if df_daily['openai'].sum() > 0:
+                                fig_cost = px.area(
+                                    df_daily,
+                                    x='date',
+                                    y='openai',
+                                    title='OpenAI Cost by Day ($)',
+                                    labels={'openai': 'Cost (USD)', 'date': 'Date'}
+                                )
+                                fig_cost.update_traces(fill='tozeroy', line_color='#34d399')
+                                fig_cost.update_layout(height=250, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#e2e8f0'))
+                                st.plotly_chart(fig_cost, use_container_width=True)
+
+                        else:
+                            st.info("No usage data available for the selected period")
+
+                        # Pie chart for cost breakdown
+                        st.markdown("#### Cost Breakdown")
+                        cost_data = {
+                            'Provider': ['Crustdata', 'OpenAI'],
+                            'Cost': [
+                                summary.get('crustdata', {}).get('cost_usd', 0),
+                                summary.get('openai', {}).get('cost_usd', 0),
+                            ]
+                        }
+
+                        if sum(cost_data['Cost']) > 0:
+                            fig_pie = px.pie(
+                                pd.DataFrame(cost_data),
+                                values='Cost',
+                                names='Provider',
+                                title='Cost Distribution (USD)',
+                                color_discrete_sequence=['#34d399', '#615fff', '#38bdf8', '#a78bfa']
+                            )
+                            fig_pie.update_layout(height=300, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#e2e8f0'))
+                            st.plotly_chart(fig_pie, use_container_width=True)
+                        else:
+                            st.info("No cost data to display")
+
+                    elif not HAS_PLOTLY:
+                        st.info("Install plotly for charts: `pip install plotly>=5.18.0`")
+
+                    st.divider()
+
+                    # Detailed logs table
+                    st.markdown("#### Detailed Logs")
+
+                    # Filter options
+                    log_cols = st.columns([2, 2, 1])
+                    with log_cols[0]:
+                        provider_filter = st.selectbox(
+                            "Provider",
+                            ["All", "crustdata", "salesql", "openai", "phantombuster"],
+                            key="usage_provider_filter"
+                        )
+                    with log_cols[1]:
+                        log_limit = st.selectbox(
+                            "Show",
+                            [25, 50, 100, 200],
+                            index=1,
+                            key="usage_log_limit"
+                        )
+                    with log_cols[2]:
+                        load_logs = st.button("Load Logs", key="usage_load_logs")
+
+                    if load_logs:
+                        st.session_state['usage_logs'] = get_usage_logs(
+                            db_client,
+                            provider=provider_filter if provider_filter != "All" else None,
+                            days=selected_days,
+                            limit=log_limit
+                        )
+
+                    logs = st.session_state.get('usage_logs')
+
+                    if logs:
+                        # Convert to DataFrame for display
+                        logs_df = pd.DataFrame(logs)
+
+                        # Select and rename columns for display
+                        display_cols = ['created_at', 'provider', 'operation', 'request_count',
+                                        'credits_used', 'tokens_input', 'tokens_output', 'cost_usd',
+                                        'status', 'response_time_ms']
+                        available_cols = [c for c in display_cols if c in logs_df.columns]
+
+                        st.dataframe(
+                            logs_df[available_cols],
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "created_at": st.column_config.DatetimeColumn("Time", format="YYYY-MM-DD HH:mm"),
+                                "provider": st.column_config.TextColumn("Provider"),
+                                "operation": st.column_config.TextColumn("Operation"),
+                                "request_count": st.column_config.NumberColumn("Requests", format="%d"),
+                                "credits_used": st.column_config.NumberColumn("Credits", format="%.1f"),
+                                "tokens_input": st.column_config.NumberColumn("Tokens In", format="%d"),
+                                "tokens_output": st.column_config.NumberColumn("Tokens Out", format="%d"),
+                                "cost_usd": st.column_config.NumberColumn("Cost ($)", format="%.6f"),
+                                "status": st.column_config.TextColumn("Status"),
+                                "response_time_ms": st.column_config.NumberColumn("Time (ms)", format="%d"),
+                            }
+                        )
+
+                        # Export option
+                        st.download_button(
+                            "Download Logs (CSV)",
+                            logs_df.to_csv(index=False),
+                            f"api_usage_logs_{date_range.lower().replace(' ', '_')}.csv",
+                            "text/csv"
+                        )
+                    elif load_logs:
+                        st.info("No usage logs found for the selected filters")
 
         except Exception as e:
             st.error(f"Usage dashboard error: {e}")

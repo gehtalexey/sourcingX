@@ -489,33 +489,471 @@ def search_profiles(client: SupabaseClient, query: str, limit: int = 100) -> lis
     return results
 
 
-def search_profiles_fulltext(client: SupabaseClient, query: str, limit: int = 500) -> list:
-    """Full-text search across all profile data.
+def _convert_to_tsquery(query: str) -> str:
+    """Convert user-friendly boolean query to PostgreSQL tsquery syntax.
+
+    Converts:
+        OR, |, comma -> |
+        AND, & -> &
+        NOT, -, ! -> !
+        "phrase" -> phrase (keeps as single term)
+
+    Examples:
+        "node OR node.js" -> "node | node.js"
+        "python AND django" -> "python & django"
+        "engineer NOT junior" -> "engineer & !junior"
+    """
+    import re
+
+    # Handle quoted phrases - replace spaces with <-> for phrase search
+    def handle_phrase(match):
+        phrase = match.group(1)
+        # Convert spaces to <-> for tsquery phrase matching
+        words = phrase.split()
+        if len(words) > 1:
+            return ' <-> '.join(words)
+        return phrase
+
+    result = re.sub(r'"([^"]+)"', handle_phrase, query)
+
+    # Convert boolean operators (case insensitive)
+    result = re.sub(r'\bOR\b', '|', result, flags=re.IGNORECASE)
+    result = re.sub(r'\bAND\b', '&', result, flags=re.IGNORECASE)
+    result = re.sub(r'\bNOT\b', '& !', result, flags=re.IGNORECASE)
+
+    # Convert symbols
+    result = result.replace(',', ' | ')
+
+    # Handle - and ! at word boundaries (NOT operator)
+    result = re.sub(r'(?<![a-zA-Z0-9])-(?=[a-zA-Z])', '& !', result)
+    result = re.sub(r'(?<![a-zA-Z0-9])!(?=[a-zA-Z])', '& !', result)
+
+    # Clean up multiple spaces and operators
+    result = re.sub(r'\s+', ' ', result).strip()
+    result = re.sub(r'\|\s*\|', '|', result)  # || -> |
+    result = re.sub(r'&\s*&', '&', result)    # && -> &
+    result = re.sub(r'^\s*[&|]\s*', '', result)  # Remove leading operators
+    result = re.sub(r'\s*[&|]\s*$', '', result)  # Remove trailing operators
+
+    return result
+
+
+def search_profiles_fulltext(client: SupabaseClient, query: str, limit: int = 5000) -> list:
+    """Full-text search across all profile data with pagination.
 
     Searches: name, title, company, location, skills, all employers, all titles, all schools.
     Requires the search_profiles_text RPC function (see migrations/009_add_fulltext_search.sql).
+    Uses pagination to bypass Supabase 1000 row limit.
+
+    Supports boolean syntax:
+        - OR: node OR node.js, node | node.js, node, node.js
+        - AND: python AND django, python & django
+        - NOT: engineer NOT junior, engineer -junior
 
     Args:
         client: SupabaseClient instance
-        query: Search query (e.g., "node.js kubernetes 8200")
-        limit: Maximum results to return
+        query: Search query (e.g., "node OR node.js", "python AND kubernetes")
+        limit: Maximum results to return (default 5000, supports up to ~10k)
 
     Returns:
-        List of matching profile dicts, ranked by relevance
+        List of matching profile dicts, ranked by relevance (without raw_data to save memory)
     """
+    # Fields to keep (exclude raw_data and search_text to save memory)
+    KEEP_FIELDS = {'linkedin_url', 'name', 'current_title', 'current_company', 'location',
+                   'all_employers', 'all_titles', 'all_schools', 'skills', 'email',
+                   'enriched_at', 'screening_score', 'screening_fit_level', 'status'}
+
     try:
-        response = requests.post(
-            f"{client.url}/rest/v1/rpc/search_profiles_text",
-            headers=client.headers,
-            json={"query": query, "p_limit": limit},
-            timeout=30
-        )
-        response.raise_for_status()
-        return response.json()
+        all_results = []
+        page_size = 1000  # Supabase max rows per request
+        offset = 0
+
+        while len(all_results) < limit:
+            remaining = limit - len(all_results)
+            batch_size = min(page_size, remaining)
+
+            response = requests.post(
+                f"{client.url}/rest/v1/rpc/search_profiles_text",
+                headers=client.headers,
+                json={"query": query, "p_limit": batch_size, "p_offset": offset},
+                timeout=30
+            )
+            response.raise_for_status()
+            batch = response.json()
+
+            if not batch:
+                break  # No more results
+
+            # Strip large fields to save memory
+            batch = [{k: v for k, v in p.items() if k in KEEP_FIELDS} for p in batch]
+            all_results.extend(batch)
+
+            if len(batch) < batch_size:
+                break  # Last page
+
+            offset += len(batch)
+
+        return all_results
     except Exception as e:
         print(f"[DB] Full-text search error: {e}")
         # Fallback to basic search
         return search_profiles(client, query, limit)
+
+
+# ============================================================================
+# BOOLEAN QUERY PARSER
+# ============================================================================
+
+def parse_boolean_query(query: str, column: str) -> str:
+    """Parse boolean query string into PostgREST filter syntax.
+
+    Supports:
+        - Quoted phrases: "fullstack developer"
+        - OR: term1 OR term2, term1 | term2, term1, term2
+        - AND: term1 AND term2, term1 & term2, +term
+        - NOT: NOT term, -term, !term
+        - Grouping: (term1 OR term2)
+
+    Examples:
+        '"fullstack developer" OR "fullstack engineer"'
+        -> or(current_title.ilike.*fullstack developer*,current_title.ilike.*fullstack engineer*)
+
+        '"full stack" AND (lead OR leader) NOT director'
+        -> and(current_title.ilike.*full stack*,or(current_title.ilike.*lead*,current_title.ilike.*leader*),current_title.not.ilike.*director*)
+
+    Args:
+        query: Boolean query string
+        column: Database column name to search
+
+    Returns:
+        PostgREST filter string (without the column= prefix)
+    """
+    # Tokenize the query
+    tokens = _tokenize_boolean_query(query)
+
+    # Parse tokens into AST
+    ast = _parse_boolean_tokens(tokens)
+
+    # Convert AST to PostgREST syntax
+    return _ast_to_postgrest(ast, column)
+
+
+def _tokenize_boolean_query(query: str) -> list:
+    """Tokenize boolean query into list of tokens.
+
+    Token types: 'PHRASE', 'WORD', 'AND', 'OR', 'NOT', 'LPAREN', 'RPAREN'
+    """
+    tokens = []
+    i = 0
+    query = query.strip()
+
+    while i < len(query):
+        # Skip whitespace
+        if query[i].isspace():
+            i += 1
+            continue
+
+        # Quoted phrase
+        if query[i] == '"':
+            end = query.find('"', i + 1)
+            if end == -1:
+                end = len(query)
+            phrase = query[i+1:end]
+            tokens.append(('PHRASE', phrase))
+            i = end + 1
+            continue
+
+        # Parentheses
+        if query[i] == '(':
+            tokens.append(('LPAREN', '('))
+            i += 1
+            continue
+        if query[i] == ')':
+            tokens.append(('RPAREN', ')'))
+            i += 1
+            continue
+
+        # Operators as symbols
+        if query[i] == '|':
+            tokens.append(('OR', 'OR'))
+            i += 1
+            continue
+        if query[i] == '&':
+            tokens.append(('AND', 'AND'))
+            i += 1
+            continue
+        if query[i] == '!' or query[i] == '-':
+            # Check if it's at start of word (NOT operator)
+            if i == 0 or query[i-1].isspace() or query[i-1] in '(&|':
+                tokens.append(('NOT', 'NOT'))
+                i += 1
+                continue
+        if query[i] == '+':
+            # Implicit AND (ignored, AND is default between terms)
+            i += 1
+            continue
+        if query[i] == ',':
+            # Comma as OR
+            tokens.append(('OR', 'OR'))
+            i += 1
+            continue
+
+        # Word (including operators as words)
+        word_match = re.match(r'[\w\-]+', query[i:])
+        if word_match:
+            word = word_match.group()
+            upper_word = word.upper()
+            if upper_word == 'AND':
+                tokens.append(('AND', 'AND'))
+            elif upper_word == 'OR':
+                tokens.append(('OR', 'OR'))
+            elif upper_word == 'NOT':
+                tokens.append(('NOT', 'NOT'))
+            else:
+                tokens.append(('WORD', word))
+            i += len(word)
+            continue
+
+        # Unknown character, skip
+        i += 1
+
+    return tokens
+
+
+def _parse_boolean_tokens(tokens: list) -> dict:
+    """Parse tokens into an AST (Abstract Syntax Tree).
+
+    Grammar (simplified):
+        expr     -> or_expr
+        or_expr  -> and_expr (OR and_expr)*
+        and_expr -> not_expr (AND? not_expr)*
+        not_expr -> NOT? primary
+        primary  -> PHRASE | WORD | '(' expr ')'
+
+    Returns AST as nested dicts:
+        {'type': 'OR', 'children': [...]}
+        {'type': 'AND', 'children': [...]}
+        {'type': 'NOT', 'child': {...}}
+        {'type': 'TERM', 'value': '...'}
+    """
+    pos = [0]  # Use list for mutable closure
+
+    def peek():
+        if pos[0] < len(tokens):
+            return tokens[pos[0]]
+        return None
+
+    def consume():
+        token = peek()
+        pos[0] += 1
+        return token
+
+    def parse_or():
+        left = parse_and()
+        while peek() and peek()[0] == 'OR':
+            consume()  # consume OR
+            right = parse_and()
+            if left.get('type') == 'OR':
+                left['children'].append(right)
+            else:
+                left = {'type': 'OR', 'children': [left, right]}
+        return left
+
+    def parse_and():
+        left = parse_not()
+        while peek():
+            token = peek()
+            # Explicit AND
+            if token[0] == 'AND':
+                consume()
+                right = parse_not()
+            # Implicit AND (two terms next to each other)
+            elif token[0] in ('WORD', 'PHRASE', 'NOT', 'LPAREN'):
+                right = parse_not()
+            else:
+                break
+
+            if left.get('type') == 'AND':
+                left['children'].append(right)
+            else:
+                left = {'type': 'AND', 'children': [left, right]}
+        return left
+
+    def parse_not():
+        if peek() and peek()[0] == 'NOT':
+            consume()
+            child = parse_primary()
+            return {'type': 'NOT', 'child': child}
+        return parse_primary()
+
+    def parse_primary():
+        token = peek()
+        if not token:
+            return {'type': 'TERM', 'value': ''}
+
+        if token[0] == 'LPAREN':
+            consume()  # consume (
+            expr = parse_or()
+            if peek() and peek()[0] == 'RPAREN':
+                consume()  # consume )
+            return expr
+
+        if token[0] in ('WORD', 'PHRASE'):
+            consume()
+            return {'type': 'TERM', 'value': token[1]}
+
+        # Unexpected token, skip
+        consume()
+        return parse_primary()
+
+    if not tokens:
+        return {'type': 'TERM', 'value': ''}
+
+    return parse_or()
+
+
+def _ast_to_postgrest(ast: dict, column: str) -> str:
+    """Convert AST to PostgREST filter syntax.
+
+    Args:
+        ast: Parsed AST from _parse_boolean_tokens
+        column: Database column name
+
+    Returns:
+        PostgREST filter string
+    """
+    node_type = ast.get('type')
+
+    if node_type == 'TERM':
+        value = ast.get('value', '').strip()
+        if not value:
+            return ''
+        # Escape special characters in the value
+        value = value.replace('%', r'\%').replace('_', r'\_')
+        return f"{column}.ilike.*{value}*"
+
+    if node_type == 'NOT':
+        child_filter = _ast_to_postgrest(ast['child'], column)
+        if not child_filter:
+            return ''
+        # PostgREST NOT syntax: column.not.operator.value
+        # Convert "column.ilike.*val*" to "column.not.ilike.*val*"
+        if '.ilike.' in child_filter:
+            return child_filter.replace('.ilike.', '.not.ilike.')
+        return f"not.{child_filter}"
+
+    if node_type == 'OR':
+        children = [_ast_to_postgrest(c, column) for c in ast['children']]
+        children = [c for c in children if c]  # Remove empty
+        if not children:
+            return ''
+        if len(children) == 1:
+            return children[0]
+        return f"or({','.join(children)})"
+
+    if node_type == 'AND':
+        children = [_ast_to_postgrest(c, column) for c in ast['children']]
+        children = [c for c in children if c]  # Remove empty
+        if not children:
+            return ''
+        if len(children) == 1:
+            return children[0]
+        return f"and({','.join(children)})"
+
+    return ''
+
+
+def search_profiles_boolean(client: SupabaseClient, filters: dict, limit: int = 5000) -> list:
+    """Search profiles with full boolean query support.
+
+    Supports complex boolean expressions in each field:
+        - Quoted phrases: "fullstack developer"
+        - OR: term1 OR term2, term1 | term2, term1, term2
+        - AND: term1 AND term2, term1 & term2
+        - NOT: NOT term, -term
+        - Grouping: (term1 OR term2)
+
+    Args:
+        client: SupabaseClient instance
+        filters: Dict with optional keys:
+            - name: Boolean query for name
+            - current_title: Boolean query for current title
+            - current_company: Boolean query for current company
+            - location: Boolean query for location
+            - has_email: Boolean, filter for profiles with email
+            - date_after: ISO date string, enriched_at >= date
+            - date_before: ISO date string, enriched_at <= date
+        limit: Maximum results (default 5000)
+
+    Examples:
+        # Search for fullstack variations
+        search_profiles_boolean(client, {
+            'current_title': '"fullstack developer" OR "fullstack engineer" OR "full stack"'
+        })
+
+        # Complex boolean search
+        search_profiles_boolean(client, {
+            'current_title': '"full stack" AND (lead OR leader) NOT director',
+            'location': 'israel OR "tel aviv"'
+        })
+
+    Returns:
+        List of profile dicts
+    """
+    params = {}
+    and_conditions = []
+
+    # Process string columns with boolean parser
+    string_columns = {
+        'name': 'name',
+        'current_title': 'current_title',
+        'current_company': 'current_company',
+        'location': 'location'
+    }
+
+    for filter_key, column in string_columns.items():
+        query = filters.get(filter_key)
+        if query:
+            postgrest_filter = parse_boolean_query(query, column)
+            if postgrest_filter:
+                and_conditions.append(postgrest_filter)
+
+    # Boolean filters
+    if filters.get('has_email'):
+        params['email'] = 'not.is.null'
+
+    # Date filters
+    if filters.get('date_after') and filters.get('date_before'):
+        and_conditions.append(f"enriched_at.gte.{filters['date_after']}")
+        and_conditions.append(f"enriched_at.lte.{filters['date_before']}")
+    elif filters.get('date_after'):
+        params['enriched_at'] = f"gte.{filters['date_after']}"
+    elif filters.get('date_before'):
+        params['enriched_at'] = f"lte.{filters['date_before']}"
+
+    # Combine all AND conditions
+    if and_conditions:
+        if len(and_conditions) == 1:
+            # Single condition - check if it's already wrapped
+            cond = and_conditions[0]
+            if cond.startswith('or('):
+                params['or'] = f"({cond[3:-1]})"  # Extract inner, wrap in parens
+            elif cond.startswith('and('):
+                params['and'] = f"({cond[4:-1]})"
+            else:
+                # Single term condition - add directly as column filter
+                # Format: column.ilike.*value* -> column=ilike.*value*
+                parts = cond.split('.', 1)
+                if len(parts) == 2:
+                    params[parts[0]] = parts[1]
+        else:
+            # Multiple conditions - wrap in and()
+            params['and'] = f"({','.join(and_conditions)})"
+
+    # Select without raw_data for performance
+    columns = 'linkedin_url,name,current_title,current_company,all_employers,all_titles,all_schools,skills,location,email,enriched_at'
+
+    return client.select('profiles', columns, params, limit=limit)
 
 
 def search_profiles_filtered(client: SupabaseClient, filters: dict, limit: int = 5000) -> list:
@@ -545,28 +983,32 @@ def search_profiles_filtered(client: SupabaseClient, filters: dict, limit: int =
     """
     # Build params - each filter passed directly (implicitly ANDed by PostgREST)
     params = {}
+    or_groups = []  # Collect OR groups for complex AND/OR combinations
 
-    def make_filter_value(terms_str: str) -> str:
-        """Build filter value with OR support for multiple terms."""
+    def add_string_filter(column: str, terms_str: str):
+        """Add filter for a string column. Single term -> column param, multiple -> or()."""
         terms = [t.strip() for t in terms_str.split(',') if t.strip()]
         if len(terms) == 1:
-            return f"ilike.*{terms[0]}*"
-        # Multiple terms: use or() syntax
-        conditions = ','.join([f"ilike.*{t}*" for t in terms])
-        return f"or({conditions})"
+            # Single term: direct column filter
+            params[column] = f"ilike.*{terms[0]}*"
+        else:
+            # Multiple terms: create OR group
+            # PostgREST nested syntax: or(col.ilike.*term1*,col.ilike.*term2*)
+            conditions = ','.join([f"{column}.ilike.*{t}*" for t in terms])
+            or_groups.append(f"or({conditions})")
 
-    # String columns - direct ilike filter
+    # String columns - direct ilike filter or OR conditions
     if filters.get('name'):
-        params['name'] = make_filter_value(filters['name'])
+        add_string_filter('name', filters['name'])
 
     if filters.get('current_title'):
-        params['current_title'] = make_filter_value(filters['current_title'])
+        add_string_filter('current_title', filters['current_title'])
 
     if filters.get('current_company'):
-        params['current_company'] = make_filter_value(filters['current_company'])
+        add_string_filter('current_company', filters['current_company'])
 
     if filters.get('location'):
-        params['location'] = make_filter_value(filters['location'])
+        add_string_filter('location', filters['location'])
 
     # Array columns - use 'ov' (overlaps) for OR matching (any of the terms)
     # Note: This requires exact term match within array, not partial match
@@ -590,17 +1032,31 @@ def search_profiles_filtered(client: SupabaseClient, filters: dict, limit: int =
     if filters.get('has_email'):
         params['email'] = 'not.is.null'
 
-    if filters.get('date_after'):
+    # Handle date range - add to and_conditions if both dates provided
+    and_conditions = []
+    if filters.get('date_after') and filters.get('date_before'):
+        # Both dates: add as AND condition
+        and_conditions.append(f"enriched_at.gte.{filters['date_after']}")
+        and_conditions.append(f"enriched_at.lte.{filters['date_before']}")
+    elif filters.get('date_after'):
         params['enriched_at'] = f"gte.{filters['date_after']}"
+    elif filters.get('date_before'):
+        params['enriched_at'] = f"lte.{filters['date_before']}"
 
-    if filters.get('date_before'):
-        # If both date filters, we need to combine them
-        if 'enriched_at' in params:
-            # Use and() for combining date range
-            params['and'] = f"(enriched_at.gte.{filters['date_after']},enriched_at.lte.{filters['date_before']})"
-            del params['enriched_at']
+    # Combine OR groups with AND logic between them
+    # PostgREST: Multiple OR groups need and=(or(...),or(...)) to AND them together
+    if or_groups:
+        if len(or_groups) == 1 and not and_conditions:
+            # Single OR group, no other AND conditions: use 'or' parameter directly
+            inner = or_groups[0][3:-1]  # Remove 'or(' prefix and ')' suffix
+            params['or'] = f"({inner})"
         else:
-            params['enriched_at'] = f"lte.{filters['date_before']}"
+            # Multiple OR groups or mixed with AND conditions: combine in 'and'
+            and_conditions.extend(or_groups)
+
+    # Set final 'and' parameter if we have conditions
+    if and_conditions:
+        params['and'] = f"({','.join(and_conditions)})"
 
     # Select without raw_data for performance (large field)
     columns = 'linkedin_url,name,current_title,current_company,all_employers,all_titles,all_schools,skills,location,email,enriched_at'

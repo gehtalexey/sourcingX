@@ -362,7 +362,7 @@ def cleanup_memory():
     # It's the same as results_df but we need it for the UI flow
 
     # Clear filtered_out if it exists (legacy)
-    for key in ['filtered_out', 'f2_filtered_out', 'original_results_df']:
+    for key in ['filtered_out', 'f2_filtered_out']:
         if key in st.session_state:
             del st.session_state[key]
 
@@ -501,10 +501,9 @@ def _build_session_data():
     # MEMORY OPTIMIZATION: Only save essential keys, avoid redundant copies
     # - Don't save 'results' (list) when we have 'results_df' (DataFrame) - they're the same data
     # - Don't save 'enriched_results' when we have 'enriched_df'
-    # - Don't save 'original_results_df' - it's a backup that bloats memory
     # - Don't save 'passed_candidates_df' - can be reconstructed from enriched_df
     keys_to_save = [
-        'results_df', 'enriched_df',  # Only save DataFrames, not list duplicates
+        'results_df', 'enriched_df', 'original_results_df',  # Only save DataFrames, not list duplicates
         'screening_results',  # Essential - screening is expensive
         'filter_stats', 'f2_filter_stats', 'last_load_count', 'last_load_file',
         'user_sheet_url',
@@ -3866,6 +3865,7 @@ with tab_upload:
                                 if profiles:
                                     df = profiles_to_dataframe(profiles)
                                     st.session_state['results_df'] = df
+                                    st.session_state['original_results_df'] = df.copy()
                                     st.session_state['enriched_df'] = df
                                     # Cache raw profile dicts so screening doesn't re-fetch from DB
                                     # Only for small sets (<= 500) to save memory
@@ -3892,7 +3892,9 @@ with tab_upload:
             if pre_enriched_file.name.endswith('.json'):
                 pre_enriched_data = json.load(pre_enriched_file)
                 if isinstance(pre_enriched_data, list):
-                    st.session_state['results_df'] = flatten_for_csv(pre_enriched_data)
+                    df_json = flatten_for_csv(pre_enriched_data)
+                    st.session_state['results_df'] = df_json
+                    st.session_state['original_results_df'] = df_json.copy()
                     st.success(f"Loaded **{len(pre_enriched_data)}** profiles!")
             else:
                 pre_enriched_file.seek(0)
@@ -3907,6 +3909,7 @@ with tab_upload:
                 # PhantomBuster/CSV data stays in session state only (not saved to DB)
                 # DB save happens after Crustdata enrichment
                 st.session_state['results_df'] = df_uploaded
+                st.session_state['original_results_df'] = df_uploaded.copy()
                 save_session_state()  # Save for restore
 
                 # Show success message with details
@@ -4130,6 +4133,7 @@ with tab_upload:
                                         # PhantomBuster data stays in session state only (not saved to DB)
                                         # DB save happens after Crustdata enrichment
                                         st.session_state['results_df'] = pb_df
+                                        st.session_state['original_results_df'] = pb_df.copy()
                                         st.session_state['preview_page'] = 0  # Reset pagination
                                         st.session_state['last_load_count'] = len(pb_df)
                                         st.session_state['last_load_file'] = filename
@@ -4162,12 +4166,14 @@ with tab_upload:
                                                 combined_df = combined_df.drop_duplicates(subset=['name'], keep='first')
                                             new_count = len(combined_df) - len(existing_df)
                                             st.session_state['results_df'] = combined_df
+                                            st.session_state['original_results_df'] = combined_df.copy()
                                             st.session_state['last_load_count'] = new_count
                                             st.session_state['last_load_file'] = filename
                                             st.session_state['last_load_mode'] = 'added'
                                             st.session_state['last_load_total'] = len(combined_df)
                                         else:
                                             st.session_state['results_df'] = pb_df
+                                            st.session_state['original_results_df'] = pb_df.copy()
                                             st.session_state['last_load_count'] = len(pb_df)
                                             st.session_state['last_load_file'] = filename
                                             st.session_state['last_load_mode'] = 'loaded'
@@ -4186,6 +4192,7 @@ with tab_upload:
                             if not pb_df.empty:
                                 pb_df = normalize_phantombuster_columns(pb_df)
                                 st.session_state['results_df'] = pb_df
+                                st.session_state['original_results_df'] = pb_df.copy()
                                 st.session_state['preview_page'] = 0
                                 st.session_state['last_load_count'] = len(pb_df)
                                 st.session_state['last_load_file'] = selected_agent['name']
@@ -4415,6 +4422,7 @@ with tab_upload:
                         # PhantomBuster data stays in session state only (not saved to DB)
                         # DB save happens after Crustdata enrichment
                         st.session_state['results_df'] = pb_df
+                        st.session_state['original_results_df'] = pb_df.copy()
                         st.session_state['preview_page'] = 0
                         st.session_state['pb_launch_status'] = 'idle'
                         st.session_state['pb_launch_container_id'] = None
@@ -4524,9 +4532,6 @@ with tab_filter:
         st.info("Upload data in the Upload tab first.")
     else:
         df = st.session_state['results_df']
-        # Store original data if not already stored (for reset functionality)
-        if 'original_results_df' not in st.session_state or st.session_state.get('original_results_df') is None:
-            st.session_state['original_results_df'] = df.copy()
 
         st.markdown(f"**{len(df)} profiles loaded** — configure filters below")
 
@@ -4776,13 +4781,14 @@ with tab_filter:
             if st.button("Reset Filters", key="reset_filters_main"):
                 # Reset to original unfiltered data
                 original_df = st.session_state.get('original_results_df')
-                if original_df is not None and not original_df.empty:
+                has_key = 'original_results_df' in st.session_state
+                st.info(f"DEBUG: has key={has_key}, type={type(original_df).__name__}, is None={original_df is None}, empty={original_df.empty if isinstance(original_df, pd.DataFrame) else 'N/A'}")
+                if original_df is not None and not (isinstance(original_df, pd.DataFrame) and original_df.empty):
                     st.session_state['results_df'] = original_df
                     st.session_state['passed_candidates_df'] = original_df
-                    if 'filter_stats' in st.session_state:
-                        del st.session_state['filter_stats']
-                    if 'filtered_out' in st.session_state:
-                        del st.session_state['filtered_out']
+                    for key in ['filter_stats', 'filtered_out', 'filtered_out_counts', 'filtered_out_light']:
+                        if key in st.session_state:
+                            del st.session_state[key]
                     st.success(f"Reset to {len(original_df)} profiles")
                     save_session_state()
                     st.rerun()
@@ -6851,9 +6857,7 @@ with tab_screening:
                         # Clear screening_batch_state (stores profiles copy during screening)
                         if 'screening_batch_state' in st.session_state:
                             del st.session_state['screening_batch_state']
-                        # Clear original_results_df backup to save memory
-                        if 'original_results_df' in st.session_state:
-                            del st.session_state['original_results_df']
+                        # Keep original_results_df — needed for Reset Filters
                         # Clear debug data
                         for _debug_key in ['_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols']:
                             if _debug_key in st.session_state:

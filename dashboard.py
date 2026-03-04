@@ -4177,6 +4177,22 @@ with tab_upload:
                                         st.rerun()
                                     else:
                                         st.error("No results found. File may have been deleted from PhantomBuster.")
+                else:
+                    # No search history — allow loading default results directly
+                    st.caption("No search history found for this phantom. You can load the latest results directly.")
+                    if st.button("Load Latest Results", type="primary", key="pb_load_latest_btn"):
+                        with st.spinner("Loading results..."):
+                            pb_df = fetch_phantombuster_result_csv(pb_key, selected_agent['id'], debug=False)
+                            if not pb_df.empty:
+                                pb_df = normalize_phantombuster_columns(pb_df)
+                                st.session_state['results_df'] = pb_df
+                                st.session_state['preview_page'] = 0
+                                st.session_state['last_load_count'] = len(pb_df)
+                                st.session_state['last_load_file'] = selected_agent['name']
+                                save_session_state()
+                                st.rerun()
+                            else:
+                                st.error("No results found for this phantom.")
         else:
             st.warning("No phantoms found in your PhantomBuster account")
 

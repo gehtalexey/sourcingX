@@ -4349,8 +4349,22 @@ with tab_upload:
             if progress_pct > 0:
                 st.progress(min(1.0, max(0.0, progress_pct / 100)))
 
-            # Cancel button
-            if st.button("Cancel", key="pb_cancel_btn"):
+            # Cancel button — actually aborts the phantom on PhantomBuster
+            if st.button("Cancel", key="pb_cancel_btn", type="secondary"):
+                agent_id = st.session_state.get('pb_launch_agent_id')
+                if agent_id and pb_key:
+                    try:
+                        resp = requests.post(
+                            f'https://api.phantombuster.com/api/v1/agent/{agent_id}/abort',
+                            headers={'X-Phantombuster-Key': pb_key},
+                            timeout=10
+                        )
+                        if resp.status_code == 200:
+                            st.success("Phantom aborted successfully")
+                        else:
+                            st.warning(f"Abort request returned status {resp.status_code} — phantom may still be running")
+                    except Exception as e:
+                        st.warning(f"Could not abort phantom: {e}")
                 st.session_state['pb_launch_status'] = 'idle'
                 st.session_state['pb_launch_container_id'] = None
                 st.session_state['pb_launch_start_time'] = None

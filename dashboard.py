@@ -4781,8 +4781,6 @@ with tab_filter:
             if st.button("Reset Filters", key="reset_filters_main"):
                 # Reset to original unfiltered data
                 original_df = st.session_state.get('original_results_df')
-                has_key = 'original_results_df' in st.session_state
-                st.info(f"DEBUG: has key={has_key}, type={type(original_df).__name__}, is None={original_df is None}, empty={original_df.empty if isinstance(original_df, pd.DataFrame) else 'N/A'}")
                 if original_df is not None and not (isinstance(original_df, pd.DataFrame) and original_df.empty):
                     st.session_state['results_df'] = original_df
                     st.session_state['passed_candidates_df'] = original_df

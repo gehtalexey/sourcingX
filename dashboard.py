@@ -2870,30 +2870,49 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         else:
             stats['_skipped_filters'].append('not_relevant (missing current_company column)')
 
-    # 4. Exclude title keywords filter
+    # 4. Exclude title keywords filter (word boundary matching)
     if filters.get('exclude_titles') and 'current_title' in df.columns:
+        import re
         exclude_keywords = filters['exclude_titles']
+        # Multi-word keywords use substring match, single/short words use word boundary
+        exclude_patterns = []
+        for kw in exclude_keywords:
+            escaped = re.escape(kw)
+            if ' ' in kw:
+                # Multi-word phrases: substring match (e.g. "head of", "self employed")
+                exclude_patterns.append(escaped)
+            else:
+                # Single words: word boundary match (e.g. "it" won't match "digital")
+                exclude_patterns.append(r'\b' + escaped + r'\b')
+        exclude_regex = re.compile('|'.join(exclude_patterns), re.IGNORECASE)
 
         def has_excluded_title(title):
             if pd.isna(title) or not str(title).strip():
                 return False
-            title_lower = str(title).lower()
-            return any(kw in title_lower for kw in exclude_keywords)
+            return bool(exclude_regex.search(str(title)))
 
         df['_excluded_title'] = df['current_title'].apply(has_excluded_title)
         stats['excluded_titles'] = df['_excluded_title'].sum()
         _store_filtered('Excluded Titles', df['_excluded_title'])
         df = df[~df['_excluded_title']].drop(columns=['_excluded_title'])
 
-    # 5. Include title keywords filter (only keep matching)
+    # 5. Include title keywords filter (only keep matching, word boundary)
     if filters.get('include_titles') and 'current_title' in df.columns:
+        import re
         include_keywords = filters['include_titles']
+        include_patterns = []
+        for kw in include_keywords:
+            escaped = re.escape(kw)
+            if ' ' in kw:
+                include_patterns.append(escaped)
+            else:
+                include_patterns.append(r'\b' + escaped + r'\b')
+        include_regex = re.compile('|'.join(include_patterns), re.IGNORECASE)
 
         def has_included_title(title):
             if pd.isna(title) or not str(title).strip():
                 return False
-            title_lower = str(title).lower()
-            return any(kw in title_lower for kw in include_keywords)
+            return bool(include_regex.search(str(title)))
 
         df['_included_title'] = df['current_title'].apply(has_included_title)
         not_included = ~df['_included_title']
@@ -5585,13 +5604,28 @@ with tab_enrich:
                                                 seen_urls.add(p_url)
 
                                         if matched_profiles:
-                                            enriched_df = profiles_to_dataframe(matched_profiles)
+                                            db_loaded_df = profiles_to_dataframe(matched_profiles)
+                                            # Merge with existing enriched_df if it exists (e.g. from fresh enrichment)
+                                            existing_enriched = st.session_state.get('enriched_df')
+                                            if existing_enriched is not None and not existing_enriched.empty:
+                                                # Combine and deduplicate by linkedin_url
+                                                combined = pd.concat([existing_enriched, db_loaded_df], ignore_index=True)
+                                                url_col = 'linkedin_url' if 'linkedin_url' in combined.columns else None
+                                                if url_col:
+                                                    combined = combined.drop_duplicates(subset=[url_col], keep='first')
+                                                enriched_df = combined
+                                                merge_msg = f"Combined: **{len(existing_enriched)}** existing + **{len(db_loaded_df)}** from DB = **{len(enriched_df)}** total"
+                                            else:
+                                                enriched_df = db_loaded_df
+                                                merge_msg = f"Loaded **{len(matched_profiles)}** enriched profiles for screening!"
                                             # MEMORY FIX: Only store the DataFrame, not the list (saves ~50MB per 1000 profiles)
                                             st.session_state['enriched_df'] = enriched_df
+                                            # Clear pre-enrichment filter results so Screen tab shows all enriched profiles
+                                            st.session_state.pop('passed_candidates_df', None)
                                             if 'enriched_results' in st.session_state:
                                                 del st.session_state['enriched_results']
                                             save_session_state()
-                                            st.success(f"Loaded **{len(matched_profiles)}** enriched profiles for screening! (from {len(all_profiles)} in DB, {len(skipped_variations)} variations)")
+                                            st.success(f"{merge_msg} (from {len(all_profiles)} in DB, {len(skipped_variations)} variations)")
                                             st.balloons()
                                         else:
                                             st.warning(f"No matching profiles found. DB has {len(all_profiles)} profiles, tried {len(skipped_variations)} variations.")
@@ -5696,15 +5730,27 @@ with tab_enrich:
                         if successful:
                             # Save enriched data - DataFrame is the single source of truth
                             # raw_data is saved to DB during enrichment, will be fetched from DB when screening
-                            enriched_df = flatten_for_csv(successful)
+                            new_enriched_df = flatten_for_csv(successful)
+                            # Merge with existing enriched_df if it exists (e.g. from DB-loaded profiles)
+                            existing_enriched = st.session_state.get('enriched_df')
+                            if existing_enriched is not None and not existing_enriched.empty:
+                                combined = pd.concat([existing_enriched, new_enriched_df], ignore_index=True)
+                                url_col = 'linkedin_url' if 'linkedin_url' in combined.columns else None
+                                if url_col:
+                                    combined = combined.drop_duplicates(subset=[url_col], keep='last')  # keep='last' = prefer fresh enrichment
+                                enriched_df = combined
+                            else:
+                                enriched_df = new_enriched_df
                             st.session_state['enriched_df'] = enriched_df
+                            # Clear pre-enrichment filter results so Screen tab shows all enriched profiles
+                            st.session_state.pop('passed_candidates_df', None)
                             # MEMORY FIX: Don't store list version (enriched_results) - saves ~50MB per 1000 profiles
                             if 'enriched_results' in st.session_state:
                                 del st.session_state['enriched_results']
                             save_session_state()  # Save for restore
 
                             # Debug: show what was created
-                            st.write(f"**Debug:** Created enriched_df with {len(enriched_df)} rows, columns: {list(enriched_df.columns)[:10]}")
+                            st.write(f"**Debug:** Created enriched_df with {len(enriched_df)} rows ({len(new_enriched_df)} new + {len(existing_enriched) if existing_enriched is not None else 0} existing), columns: {list(enriched_df.columns)[:10]}")
 
                             # Auto-save enrichment to Supabase database
                             db_saved = 0
@@ -6212,29 +6258,41 @@ with tab_filter2:
                                 df = df.drop(columns=['_client_wanted'])
                                 st.info(f"Client Wanted ({scope_label}): {len(client_wanted_companies)} loaded, {len(client_wanted_matches)} matches moved to top")
 
-                # Include keywords filter (job titles only)
+                # Include keywords filter (job titles only, word boundary matching)
                 if include_keywords and include_keywords.strip():
+                    import re
                     keywords = [k.strip().lower() for k in include_keywords.split(',') if k.strip()]
                     if keywords:
+                        inc_patterns = []
+                        for kw in keywords:
+                            escaped = re.escape(kw)
+                            inc_patterns.append(escaped if ' ' in kw else r'\b' + escaped + r'\b')
+                        inc_regex = re.compile('|'.join(inc_patterns), re.IGNORECASE)
                         search_cols = ['past_positions', 'current_title']
                         available_search_cols = [c for c in search_cols if c in df.columns]
                         def has_include_keyword(row):
-                            text = ' '.join(str(row[c]) for c in available_search_cols if row.get(c) is not None).lower()
-                            return any(kw in text for kw in keywords)
+                            text = ' '.join(str(row[c]) for c in available_search_cols if row.get(c) is not None)
+                            return bool(inc_regex.search(text))
                         mask = df.apply(has_include_keyword, axis=1)
                         # MEMORY FIX: Store only count, not full records
                         removed['Missing Title Keywords'] = (~mask).sum()
                         df = df[mask]
 
-                # Exclude keywords filter (job titles only)
+                # Exclude keywords filter (job titles only, word boundary matching)
                 if exclude_keywords and exclude_keywords.strip():
+                    import re
                     keywords = [k.strip().lower() for k in exclude_keywords.split(',') if k.strip()]
                     if keywords:
+                        exc_patterns = []
+                        for kw in keywords:
+                            escaped = re.escape(kw)
+                            exc_patterns.append(escaped if ' ' in kw else r'\b' + escaped + r'\b')
+                        exc_regex = re.compile('|'.join(exc_patterns), re.IGNORECASE)
                         search_cols = ['past_positions', 'current_title']
                         available_search_cols = [c for c in search_cols if c in df.columns]
                         def has_exclude_keyword(row):
-                            text = ' '.join(str(row[c]) for c in available_search_cols if row.get(c) is not None).lower()
-                            return any(kw in text for kw in keywords)
+                            text = ' '.join(str(row[c]) for c in available_search_cols if row.get(c) is not None)
+                            return bool(exc_regex.search(text))
                         mask = df.apply(has_exclude_keyword, axis=1)
                         # MEMORY FIX: Store only count, not full records
                         removed['Excluded Title Keywords'] = mask.sum()

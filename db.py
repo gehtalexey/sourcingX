@@ -469,6 +469,77 @@ def get_profiles_by_urls(client: SupabaseClient, urls: list, include_raw_data: b
     return results
 
 
+def match_profiles_by_urls_rpc(
+    client: SupabaseClient,
+    urls: list,
+    enriched_after_months: int = None,
+    batch_size: int = 500
+) -> list:
+    """Match profiles via server-side RPC function.
+
+    Uses PostgreSQL function to match input URLs against profiles table with
+    fuzzy matching (handles ID suffixes, name reversals, hyphen variations).
+    Much more efficient than loading all profiles and matching in Python.
+
+    Args:
+        client: SupabaseClient instance
+        urls: List of LinkedIn URLs to match
+        enriched_after_months: Only return profiles enriched within this many months (optional)
+        batch_size: URLs per RPC call (default 500, max 2000)
+
+    Returns:
+        List of matching profile dicts (without raw_data to save bandwidth)
+    """
+    if not urls:
+        return []
+
+    # Calculate enriched_after timestamp if specified
+    enriched_after = None
+    if enriched_after_months:
+        from datetime import datetime, timedelta
+        enriched_after = (datetime.utcnow() - timedelta(days=enriched_after_months * 30)).isoformat()
+
+    # Batch large URL lists to avoid request size limits
+    batch_size = min(batch_size, 2000)  # Cap at 2000
+    all_results = []
+    seen_urls = set()  # Deduplicate across batches
+
+    for i in range(0, len(urls), batch_size):
+        batch = urls[i:i + batch_size]
+
+        try:
+            payload = {
+                "input_urls": batch,
+                "enriched_after": enriched_after
+            }
+
+            response = requests.post(
+                f"{client.url}/rest/v1/rpc/match_profiles_by_urls",
+                headers=client.headers,
+                json=payload,
+                timeout=60  # Longer timeout for large batches
+            )
+            response.raise_for_status()
+            batch_results = response.json()
+
+            # Deduplicate by linkedin_url
+            for profile in batch_results:
+                url = profile.get('linkedin_url')
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    all_results.append(profile)
+
+        except requests.exceptions.HTTPError as e:
+            print(f"[DB] match_profiles_by_urls RPC error (batch {i//batch_size + 1}): {e}")
+            # Continue with other batches
+            continue
+        except Exception as e:
+            print(f"[DB] match_profiles_by_urls unexpected error: {e}")
+            continue
+
+    return all_results
+
+
 def get_pipeline_stats(client: SupabaseClient) -> dict:
     """Get pipeline funnel statistics."""
     try:

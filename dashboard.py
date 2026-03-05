@@ -57,6 +57,7 @@ try:
         get_usage_by_date, get_enriched_urls, get_recently_enriched_urls,
         get_setting, save_setting,
         get_search_history, save_search_history_entry, delete_search_history_entry,
+        match_profiles_by_urls_rpc,
         ENRICHMENT_REFRESH_MONTHS,
     )
     import prompts
@@ -5518,90 +5519,20 @@ with tab_enrich:
                     # Option to load enriched profiles from DB for this list
                     if HAS_DATABASE and len(skipped_urls) > 0:
                         if st.button(f"Load {len(skipped_urls)} enriched profiles for screening", type="primary", key="load_enriched_for_list"):
-                            with st.spinner("Loading profiles from database..."):
+                            with st.spinner("Loading profiles from database (server-side matching)..."):
                                 try:
                                     db_client = _get_db_client()
                                     if not db_client:
                                         st.error("Database connection failed")
                                     else:
-                                        # Get all recently enriched profiles with pagination (Supabase 1000 row limit)
-                                        import datetime as dt
-                                        cutoff_date = (dt.datetime.utcnow() - dt.timedelta(days=refresh_months * 30)).isoformat()
-
-                                        # Paginate to get all profiles (capped at 5000 to prevent OOM)
-                                        all_db_profiles = []
-                                        offset = 0
-                                        page_size = 1000
-                                        max_total_profiles = 5000
-                                        while True:
-                                            if len(all_db_profiles) >= max_total_profiles:
-                                                st.warning(f"Capped at {max_total_profiles} profiles to prevent memory issues.")
-                                                break
-                                            filters = {'enriched_at': f'gte.{cutoff_date}', 'offset': str(offset)}
-                                            batch = db_client.select('profiles', '*', filters, limit=page_size)
-                                            if not batch:
-                                                break
-                                            # MEMORY FIX: Strip heavy raw data immediately after loading
-                                            for p in batch:
-                                                p.pop('raw_data', None)
-                                                p.pop('raw_crustdata', None)
-                                            all_db_profiles.extend(batch)
-                                            if len(batch) < page_size:
-                                                break
-                                            offset += page_size
-
-                                        st.write(f"Debug: Got {len(all_db_profiles)} profiles from DB (with pagination)")
-                                        all_profiles = all_db_profiles  # Already filtered by date in query
-
-                                        # Build comprehensive set of variations from skipped URLs for matching
-                                        skipped_variations = set()
-                                        for u in skipped_urls:
-                                            # Add normalized URL
-                                            normalized = normalize_linkedin_url(u)
-                                            if normalized:
-                                                skipped_variations.add(normalized)
-
-                                            # Add base username and variations
-                                            base = get_base_username_from_url(u)
-                                            if base:
-                                                skipped_variations.add(base)
-                                                # Reversed name
-                                                reversed_name = get_reversed_username(base)
-                                                if reversed_name:
-                                                    skipped_variations.add(reversed_name)
-                                                # Hyphen-free version
-                                                skipped_variations.add(base.replace('-', ''))
-
-                                        # Filter to matching profiles
-                                        matched_profiles = []
-                                        seen_urls = set()  # Avoid duplicates
-                                        for p in all_profiles:
-                                            p_url = p.get('linkedin_url') or ''
-                                            if p_url in seen_urls:
-                                                continue
-
-                                            matched = False
-                                            # Check normalized URL
-                                            p_normalized = normalize_linkedin_url(p_url)
-                                            if p_normalized and p_normalized in skipped_variations:
-                                                matched = True
-
-                                            # Check base username and variations
-                                            if not matched:
-                                                p_base = get_base_username_from_url(p_url)
-                                                if p_base:
-                                                    if p_base in skipped_variations:
-                                                        matched = True
-                                                    elif p_base.replace('-', '') in skipped_variations:
-                                                        matched = True
-                                                    else:
-                                                        p_reversed = get_reversed_username(p_base)
-                                                        if p_reversed and p_reversed in skipped_variations:
-                                                            matched = True
-
-                                            if matched:
-                                                matched_profiles.append(p)
-                                                seen_urls.add(p_url)
+                                        # Use server-side URL matching (scales to 100k+ profiles)
+                                        # Matching logic runs in PostgreSQL, only matching profiles are returned
+                                        matched_profiles = match_profiles_by_urls_rpc(
+                                            db_client,
+                                            list(skipped_urls),
+                                            enriched_after_months=refresh_months,
+                                            batch_size=500
+                                        )
 
                                         if matched_profiles:
                                             db_loaded_df = profiles_to_dataframe(matched_profiles)
@@ -5625,10 +5556,10 @@ with tab_enrich:
                                             if 'enriched_results' in st.session_state:
                                                 del st.session_state['enriched_results']
                                             save_session_state()
-                                            st.success(f"{merge_msg} (from {len(all_profiles)} in DB, {len(skipped_variations)} variations)")
+                                            st.success(f"{merge_msg} (matched {len(skipped_urls)} input URLs)")
                                             st.balloons()
                                         else:
-                                            st.warning(f"No matching profiles found. DB has {len(all_profiles)} profiles, tried {len(skipped_variations)} variations.")
+                                            st.warning(f"No matching profiles found for {len(skipped_urls)} URLs. Try re-enriching them.")
                                 except Exception as e:
                                     st.error(f"Error loading profiles: {e}")
 
@@ -7264,49 +7195,76 @@ with tab_screening:
             strong_list = [r for r in screening_results if r.get('fit') == 'Strong Fit']
             good_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
             partial_list = [r for r in screening_results if r.get('fit') == 'Partial Fit']
+            strong_good_list = [r for r in screening_results if r.get('fit') in ['Strong Fit', 'Good Fit']]
+            strong_good_partial_list = [r for r in screening_results if r.get('fit') in ['Strong Fit', 'Good Fit', 'Partial Fit']]
 
-            export_col1, export_col2, export_col3, export_col4, export_col5 = st.columns(5)
+            # Row 1: Combined exports (most useful)
+            st.caption("**Combined Exports**")
+            combo_col1, combo_col2, combo_col3, combo_col4 = st.columns(4)
 
-            with export_col1:
+            with combo_col1:
                 st.download_button(
-                    f"Strong Fit ({len(strong_list)})",
-                    pd.DataFrame(strong_list).to_csv(index=False) if strong_list else "",
-                    "screening_strong_fit.csv",
+                    f"Strong + Good ({len(strong_good_list)})",
+                    pd.DataFrame(strong_good_list).to_csv(index=False) if strong_good_list else "",
+                    "screening_strong_good_fit.csv",
                     "text/csv",
-                    disabled=len(strong_list) == 0
+                    disabled=len(strong_good_list) == 0,
+                    type="primary"
                 )
 
-            with export_col2:
+            with combo_col2:
                 st.download_button(
-                    f"Good Fit ({len(good_list)})",
-                    pd.DataFrame(good_list).to_csv(index=False) if good_list else "",
-                    "screening_good_fit.csv",
+                    f"Strong + Good + Partial ({len(strong_good_partial_list)})",
+                    pd.DataFrame(strong_good_partial_list).to_csv(index=False) if strong_good_partial_list else "",
+                    "screening_strong_good_partial_fit.csv",
                     "text/csv",
-                    disabled=len(good_list) == 0
+                    disabled=len(strong_good_partial_list) == 0
                 )
 
-            with export_col3:
-                st.download_button(
-                    f"Partial Fit ({len(partial_list)})",
-                    pd.DataFrame(partial_list).to_csv(index=False) if partial_list else "",
-                    "screening_partial_fit.csv",
-                    "text/csv",
-                    disabled=len(partial_list) == 0
-                )
-
-            with export_col4:
+            with combo_col3:
                 full_df = pd.DataFrame(sorted_results)
                 st.download_button(
-                    f"All ({len(sorted_results)})",
+                    f"All Results ({len(sorted_results)})",
                     full_df.to_csv(index=False),
                     "screening_results_all.csv",
                     "text/csv"
                 )
 
-            with export_col5:
+            with combo_col4:
                 if st.button("Clear Results", key="clear_screening"):
                     del st.session_state['screening_results']
                     st.rerun()
+
+            # Row 2: Individual fit levels
+            with st.expander("Individual Fit Level Exports"):
+                ind_col1, ind_col2, ind_col3 = st.columns(3)
+
+                with ind_col1:
+                    st.download_button(
+                        f"Strong Fit ({len(strong_list)})",
+                        pd.DataFrame(strong_list).to_csv(index=False) if strong_list else "",
+                        "screening_strong_fit.csv",
+                        "text/csv",
+                        disabled=len(strong_list) == 0
+                    )
+
+                with ind_col2:
+                    st.download_button(
+                        f"Good Fit ({len(good_list)})",
+                        pd.DataFrame(good_list).to_csv(index=False) if good_list else "",
+                        "screening_good_fit.csv",
+                        "text/csv",
+                        disabled=len(good_list) == 0
+                    )
+
+                with ind_col3:
+                    st.download_button(
+                        f"Partial Fit ({len(partial_list)})",
+                        pd.DataFrame(partial_list).to_csv(index=False) if partial_list else "",
+                        "screening_partial_fit.csv",
+                        "text/csv",
+                        disabled=len(partial_list) == 0
+                    )
 
 # ========== TAB 6: Database ==========
 with tab_database:
@@ -7325,24 +7283,26 @@ with tab_database:
                 st.success("Connected to Supabase")
 
                 # Pipeline stats - only load on demand
-                with st.expander("Pipeline Overview", expanded=False):
+                with st.expander("Database Overview", expanded=False):
                     if st.button("Load Stats", key="db_load_stats"):
                         try:
+                            import datetime as dt
                             total = db_client.count('profiles')
-                            enriched = db_client.count('profiles', {'enriched_at': 'not.is.null'})
-                            screened = db_client.count('profiles', {'screening_score': 'not.is.null'})
-                            st.session_state['db_pipeline_stats'] = {'total': total, 'enriched': enriched, 'screened': screened, 'scraped': total, 'contacted': 0, 'stale_profiles': 0}
+                            # Fresh = enriched within last 6 months
+                            six_months_ago = (dt.datetime.utcnow() - dt.timedelta(days=180)).isoformat()
+                            fresh = db_client.count('profiles', {'enriched_at': f'gte.{six_months_ago}'})
+                            stale = total - fresh
+                            has_email = db_client.count('profiles', {'email': 'not.is.null'})
+                            st.session_state['db_pipeline_stats'] = {'total': total, 'fresh': fresh, 'stale': stale, 'has_email': has_email}
                         except Exception as e:
                             st.warning(f"Could not load stats: {e}")
                     stats = st.session_state.get('db_pipeline_stats', {})
                     if stats:
-                        stat_cols = st.columns(6)
-                        stat_cols[0].metric("Total", stats.get('total', 0))
-                        stat_cols[1].metric("Scraped", stats.get('scraped', 0))
-                        stat_cols[2].metric("Enriched", stats.get('enriched', 0))
-                        stat_cols[3].metric("Screened", stats.get('screened', 0))
-                        stat_cols[4].metric("Contacted", stats.get('contacted', 0))
-                        stat_cols[5].metric("Stale (>6mo)", stats.get('stale_profiles', 0))
+                        stat_cols = st.columns(4)
+                        stat_cols[0].metric("Total Enriched", stats.get('total', 0))
+                        stat_cols[1].metric("Fresh (<6mo)", stats.get('fresh', 0))
+                        stat_cols[2].metric("Stale (>6mo)", stats.get('stale', 0))
+                        stat_cols[3].metric("Has Email", stats.get('has_email', 0))
 
                 st.divider()
 
@@ -7388,16 +7348,20 @@ with tab_database:
                     with fcol8:
                         f_schools = st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
 
-                    # Row 5: Date range & Email & Search button
+                    # Row 5: Freshness, Email & Search button
                     fcol9, fcol10, fcol11, fcol12 = st.columns([1, 1, 1, 1])
                     with fcol9:
-                        f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
+                        f_freshness = st.selectbox(
+                            "Freshness",
+                            ["All", "Fresh (<6mo)", "Stale (>6mo)"],
+                            key="db_f_freshness"
+                        )
                     with fcol10:
-                        f_date_before = st.date_input("Enriched Before", value=None, key="db_f_date_before")
-                    with fcol11:
                         f_has_email = st.checkbox("Has Email", key="db_f_has_email")
+                    with fcol11:
+                        f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
                     with fcol12:
-                        search_clicked = st.form_submit_button("🔍 Search", type="primary", use_container_width=True)
+                        search_clicked = st.form_submit_button("Search", type="primary", use_container_width=True)
 
                 # Build filters dict
                 current_filters = {
@@ -7405,11 +7369,11 @@ with tab_database:
                     'current_company': f_current_company, 'past_companies': f_past_companies,
                     'location': f_location, 'skills': f_skills, 'schools': f_schools,
                     'date_after': str(f_date_after) if f_date_after else None,
-                    'date_before': str(f_date_before) if f_date_before else None,
+                    'freshness': f_freshness,
                     'has_email': f_has_email
                 }
                 has_column_filters = any([f_name, f_current_title, f_past_titles, f_current_company, f_past_companies,
-                                          f_location, f_skills, f_schools, f_date_after, f_date_before, f_has_email])
+                                          f_location, f_skills, f_schools, f_date_after, f_freshness != "All", f_has_email])
 
                 # Store search state
                 if search_clicked:
@@ -7426,7 +7390,7 @@ with tab_database:
                     ft = st.session_state.get('db_fulltext', '')
 
                     has_column_filters = any(af.get(k) for k in ['name', 'current_title', 'past_titles', 'current_company', 'past_companies',
-                                                   'location', 'skills', 'schools', 'date_after', 'date_before', 'has_email'])
+                                                   'location', 'skills', 'schools', 'date_after', 'has_email']) or af.get('freshness', 'All') != 'All'
 
                     if ft and ft.strip():
                         # Full-text search first
@@ -7629,6 +7593,23 @@ with tab_database:
 
                         df = df[mask]
 
+                    # Apply freshness filter (always, not just with full-text search)
+                    af = st.session_state.get('db_applied_filters', {})
+                    freshness = af.get('freshness', 'All')
+                    if freshness != 'All' and 'enriched_at' in df.columns:
+                        import datetime as dt
+                        six_months_ago = dt.datetime.utcnow() - dt.timedelta(days=180)
+                        df['enriched_at_dt'] = pd.to_datetime(df['enriched_at'], errors='coerce', utc=True)
+                        if freshness == 'Fresh (<6mo)':
+                            df = df[df['enriched_at_dt'] >= six_months_ago.replace(tzinfo=dt.timezone.utc)]
+                        elif freshness == 'Stale (>6mo)':
+                            df = df[df['enriched_at_dt'] < six_months_ago.replace(tzinfo=dt.timezone.utc)]
+                        df = df.drop(columns=['enriched_at_dt'], errors='ignore')
+
+                    # Apply has_email filter (when not already applied via full-text combo)
+                    if af.get('has_email') and 'email' in df.columns:
+                        df = df[df['email'].fillna('').astype(bool)]
+
                     filtered_df = df
 
                     # Display limit to prevent browser freeze
@@ -7644,10 +7625,20 @@ with tab_database:
                     show_all_db_cols = st.checkbox("Show all columns", value=False, key="db_show_all_cols")
 
                     # Limit display to prevent browser freeze (full data still available for actions)
-                    display_df = filtered_df.head(DISPLAY_LIMIT)
+                    display_df = filtered_df.head(DISPLAY_LIMIT).copy()
+
+                    # Add Freshness column for display
+                    if 'enriched_at' in display_df.columns:
+                        import datetime as dt
+                        six_months_ago = dt.datetime.utcnow() - dt.timedelta(days=180)
+                        display_df['enriched_at_dt'] = pd.to_datetime(display_df['enriched_at'], errors='coerce', utc=True)
+                        display_df['freshness'] = display_df['enriched_at_dt'].apply(
+                            lambda x: 'Fresh' if pd.notna(x) and x >= six_months_ago.replace(tzinfo=dt.timezone.utc) else 'Stale'
+                        )
+                        display_df = display_df.drop(columns=['enriched_at_dt'], errors='ignore')
 
                     if show_all_db_cols:
-                        all_cols = ['name', 'current_title', 'current_company', 'all_employers', 'all_titles', 'all_schools', 'skills', 'past_positions', 'headline', 'location', 'summary', 'connections_count', 'email', 'enriched_at', 'linkedin_url']
+                        all_cols = ['name', 'current_title', 'current_company', 'freshness', 'all_employers', 'all_titles', 'all_schools', 'skills', 'past_positions', 'headline', 'location', 'summary', 'connections_count', 'email', 'enriched_at', 'linkedin_url']
                         available_cols = [c for c in all_cols if c in display_df.columns]
                         st.dataframe(
                             display_df[available_cols] if available_cols else display_df,
@@ -7656,11 +7647,12 @@ with tab_database:
                             column_config={
                                 "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                                 "enriched_at": st.column_config.DatetimeColumn("Enriched", format="YYYY-MM-DD"),
+                                "freshness": st.column_config.TextColumn("Freshness"),
                             }
                         )
                         st.caption(f"{len(available_cols)} columns")
                     else:
-                        preview_cols = ['name', 'current_title', 'current_company', 'location', 'linkedin_url']
+                        preview_cols = ['name', 'current_title', 'current_company', 'freshness', 'location', 'linkedin_url']
                         available_cols = [c for c in preview_cols if c in display_df.columns]
 
                         st.dataframe(
@@ -7673,6 +7665,7 @@ with tab_database:
                                 "current_company": st.column_config.TextColumn("Company"),
                                 "current_title": st.column_config.TextColumn("Title"),
                                 "location": st.column_config.TextColumn("Location"),
+                                "freshness": st.column_config.TextColumn("Freshness"),
                             }
                         )
 

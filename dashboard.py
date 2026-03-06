@@ -5170,23 +5170,39 @@ with tab_filter:
 
         st.success(f"**{len(view_df)}** candidates")
 
-        # Display columns (without category columns)
-        # Prefer 'name' over 'first_name'/'last_name' for DB-loaded profiles
-        display_cols = ['name', 'current_title', 'current_company', 'location', 'education', 'linkedin_url']
-        # Fallback for PhantomBuster data with separate name columns
-        if 'name' not in view_df.columns or view_df['name'].isna().all():
-            display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'education', 'public_url']
-        available_cols = [c for c in display_cols if c in view_df.columns]
+        # Toggle to show all columns
+        show_all_cols_filter = st.checkbox("Show all columns", value=False, key="filter_show_all_cols")
 
-        if available_cols:
+        if show_all_cols_filter:
+            # Show all columns
             st.dataframe(
-                view_df[available_cols],
+                view_df,
                 width="stretch",
                 hide_index=True,
                 column_config={
+                    "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                     "public_url": st.column_config.LinkColumn("LinkedIn"),
                 }
             )
+            st.caption(f"{len(view_df.columns)} columns")
+        else:
+            # Display columns (without category columns)
+            # Prefer 'name' over 'first_name'/'last_name' for DB-loaded profiles
+            display_cols = ['name', 'current_title', 'current_company', 'location', 'education', 'linkedin_url']
+            # Fallback for PhantomBuster data with separate name columns
+            if 'name' not in view_df.columns or view_df['name'].isna().all():
+                display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'education', 'public_url']
+            available_cols = [c for c in display_cols if c in view_df.columns]
+
+            if available_cols:
+                st.dataframe(
+                    view_df[available_cols],
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "public_url": st.column_config.LinkColumn("LinkedIn"),
+                    }
+                )
 
         # Download and Send to Enrich buttons
         col1, col2, col3 = st.columns([1, 1, 2])

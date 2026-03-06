@@ -3792,24 +3792,24 @@ with st.sidebar:
                     break
 
         if _has_raw:
-            if st.button("⚡ Strip Raw Data (saves memory)", use_container_width=True, type="primary"):
+            if st.button("⚡ Strip Raw Data (saves memory)", width="stretch", type="primary"):
                 cleanup_memory()  # Use centralized cleanup
                 st.success("Memory optimized!")
                 st.rerun()
 
-        if st.button("🗑️ Clear Debug Data", use_container_width=True):
+        if st.button("🗑️ Clear Debug Data", width="stretch"):
             _debug_keys = ['_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols', '_debug_valid_urls']
             for k in _debug_keys:
                 if k in st.session_state:
                     del st.session_state[k]
             st.rerun()
 
-        if st.button("🗑️ Clear Filtered Data", use_container_width=True):
+        if st.button("🗑️ Clear Filtered Data", width="stretch"):
             if 'filtered_out' in st.session_state:
                 del st.session_state['filtered_out']
             st.rerun()
 
-        if st.button("🔄 Clear All & Reboot", type="secondary", use_container_width=True):
+        if st.button("🔄 Clear All & Reboot", type="secondary", width="stretch"):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             # Also clear caches
@@ -3990,7 +3990,7 @@ with tab_upload:
                 # Show all columns from the source
                 st.dataframe(
                     page_df,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
@@ -4006,14 +4006,14 @@ with tab_upload:
                 if available_cols:
                     st.dataframe(
                         page_df[available_cols],
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                         column_config={
                             "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                         }
                     )
                 else:
-                    st.dataframe(page_df.head(10), use_container_width=True, hide_index=True)
+                    st.dataframe(page_df.head(10), width="stretch", hide_index=True)
 
             # Pagination controls
             col_prev, col_info, col_next = st.columns([1, 2, 1])
@@ -4142,7 +4142,7 @@ with tab_upload:
                     col_load, col_add = st.columns([1, 1])
 
                     with col_load:
-                        if st.button("Load Results", type="primary", key="pb_load_btn", use_container_width=True, help="Replace current results"):
+                        if st.button("Load Results", type="primary", key="pb_load_btn", width="stretch", help="Replace current results"):
                             if selected_search:
                                 with st.spinner("Loading results..."):
                                     filename = selected_search['csv_name']
@@ -4163,7 +4163,7 @@ with tab_upload:
                                         st.error("No results found. File may have been deleted from PhantomBuster.")
 
                     with col_add:
-                        if st.button("+ Add to Results", key="pb_add_btn", use_container_width=True, help="Add to current results"):
+                        if st.button("+ Add to Results", key="pb_add_btn", width="stretch", help="Add to current results"):
                             if selected_search:
                                 with st.spinner("Adding results..."):
                                     filename = selected_search['csv_name']
@@ -4696,14 +4696,14 @@ with tab_filter:
             # Row 1: All + first 5 categories
             row1_cols = st.columns(6)
             with row1_cols[0]:
-                if st.button("All", key="exc_all", use_container_width=True):
+                if st.button("All", key="exc_all", width="stretch"):
                     st.session_state['exclude_title_presets'] = ALL_EXCLUDE_TITLES
                     st.rerun()
 
             category_items = list(EXCLUDE_CATEGORIES.items())
             for i, (cat_name, cat_keywords) in enumerate(category_items[:5]):
                 with row1_cols[i + 1]:
-                    if st.button(cat_name, key=f"exc_{cat_name}", use_container_width=True):
+                    if st.button(cat_name, key=f"exc_{cat_name}", width="stretch"):
                         current = st.session_state.get('exclude_title_presets', [])
                         if all(kw in current for kw in cat_keywords):
                             st.session_state['exclude_title_presets'] = [k for k in current if k not in cat_keywords]
@@ -4715,7 +4715,7 @@ with tab_filter:
             row2_cols = st.columns(len(category_items) - 5 + 1)
             for i, (cat_name, cat_keywords) in enumerate(category_items[5:]):
                 with row2_cols[i]:
-                    if st.button(cat_name, key=f"exc_{cat_name}", use_container_width=True):
+                    if st.button(cat_name, key=f"exc_{cat_name}", width="stretch"):
                         current = st.session_state.get('exclude_title_presets', [])
                         if all(kw in current for kw in cat_keywords):
                             st.session_state['exclude_title_presets'] = [k for k in current if k not in cat_keywords]
@@ -4723,7 +4723,7 @@ with tab_filter:
                             st.session_state['exclude_title_presets'] = list(set(current + cat_keywords))
                         st.rerun()
             with row2_cols[-1]:
-                if st.button("Clear", key="exc_clear", use_container_width=True):
+                if st.button("Clear", key="exc_clear", width="stretch"):
                     st.session_state['exclude_title_presets'] = []
                     st.rerun()
 
@@ -4958,8 +4958,11 @@ with tab_filter:
                                     target_companies.extend(tc_df[col].dropna().tolist())
                             target_list = [str(c).lower().strip() for c in target_companies if c]
                             if target_list:
-                                priority_df['is_target_company'] = priority_df['current_company'].apply(lambda x: matches_list(x, target_list))
-                                priority_loaded.append(f"Target: {len(target_list)} companies, {priority_df['is_target_company'].sum()} matches")
+                                if 'current_company' in priority_df.columns:
+                                    priority_df['is_target_company'] = priority_df['current_company'].apply(lambda x: matches_list(x, target_list))
+                                    priority_loaded.append(f"Target: {len(target_list)} companies, {priority_df['is_target_company'].sum()} matches")
+                                else:
+                                    st.warning("Cannot match target companies: 'current_company' column not found in data")
 
                     # Tech alerts / Layoffs
                     if load_tech_alerts and filter_sheets.get('tech_alerts'):
@@ -4971,8 +4974,11 @@ with tab_filter:
                                     tech_alerts.extend(ta_df[col].dropna().tolist())
                             alerts_list = [str(c).lower().strip() for c in tech_alerts if c]
                             if alerts_list:
-                                priority_df['is_layoff_company'] = priority_df['current_company'].apply(lambda x: matches_list(x, alerts_list))
-                                priority_loaded.append(f"Layoffs: {len(alerts_list)} companies, {priority_df['is_layoff_company'].sum()} matches")
+                                if 'current_company' in priority_df.columns:
+                                    priority_df['is_layoff_company'] = priority_df['current_company'].apply(lambda x: matches_list(x, alerts_list))
+                                    priority_loaded.append(f"Layoffs: {len(alerts_list)} companies, {priority_df['is_layoff_company'].sum()} matches")
+                                else:
+                                    st.warning("Cannot match layoff companies: 'current_company' column not found in data")
 
                     # Client Wanted Companies
                     if load_client_wanted and filter_sheets.get('client_wanted_companies'):
@@ -4984,8 +4990,11 @@ with tab_filter:
                             client_list = [str(c).lower().strip() for c in client_wanted if c]
                             client_list = list(set(client_list))
                             if client_list:
-                                priority_df['is_client_wanted'] = priority_df['current_company'].apply(lambda x: matches_list(x, client_list))
-                                priority_loaded.append(f"Client Wanted: {len(client_list)} companies, {priority_df['is_client_wanted'].sum()} matches")
+                                if 'current_company' in priority_df.columns:
+                                    priority_df['is_client_wanted'] = priority_df['current_company'].apply(lambda x: matches_list(x, client_list))
+                                    priority_loaded.append(f"Client Wanted: {len(client_list)} companies, {priority_df['is_client_wanted'].sum()} matches")
+                                else:
+                                    st.warning("Cannot match client wanted companies: 'current_company' column not found in data")
 
                     # Save with priority columns
                     st.session_state['passed_candidates_df'] = priority_df
@@ -5087,7 +5096,7 @@ with tab_filter:
 
                         st.dataframe(
                             view_df[available] if available else view_df,
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                             column_config={
                                 "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
@@ -5172,7 +5181,7 @@ with tab_filter:
         if available_cols:
             st.dataframe(
                 view_df[available_cols],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "public_url": st.column_config.LinkColumn("LinkedIn"),
@@ -5191,8 +5200,10 @@ with tab_filter:
             )
         with col2:
             if st.button(f"📤 Send {len(view_df)} to Enrich", type="primary", key="send_to_enrich"):
-                st.session_state['results_df'] = view_df.copy()
-                st.session_state['passed_candidates_df'] = view_df.copy()
+                # MEMORY: Single copy shared by both (they're always used together)
+                enrich_df = view_df.copy()
+                st.session_state['results_df'] = enrich_df
+                st.session_state['passed_candidates_df'] = enrich_df
                 st.success(f"✓ {len(view_df)} profiles ready for enrichment. Go to **3. Enrich** tab.")
                 save_session_state()
 
@@ -5354,7 +5365,7 @@ with tab_enrich:
                 available_cols = [c for c in all_cols if c in enriched_df.columns]
                 st.dataframe(
                     enriched_df[available_cols].head(20) if available_cols else enriched_df.head(20),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
@@ -5369,7 +5380,7 @@ with tab_enrich:
                 if available_cols:
                     st.dataframe(
                         enriched_df[available_cols].head(20),
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                         column_config={
                             "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
@@ -6340,7 +6351,7 @@ with tab_filter2:
             show_all_cols = st.checkbox("Show all columns", value=False, key="filter2_show_all_cols")
 
         if show_all_cols:
-            st.dataframe(display_df.head(100), use_container_width=True, hide_index=True,
+            st.dataframe(display_df.head(100), width="stretch", hide_index=True,
                         column_config={
                             "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                             "public_url": st.column_config.LinkColumn("LinkedIn")
@@ -6352,7 +6363,7 @@ with tab_filter2:
             else:
                 display_cols = ['first_name', 'last_name', 'current_title', 'current_company', 'location', 'linkedin_url', 'public_url']
             available_cols = [c for c in display_cols if c in display_df.columns]
-            st.dataframe(display_df[available_cols].head(100), use_container_width=True, hide_index=True,
+            st.dataframe(display_df[available_cols].head(100), width="stretch", hide_index=True,
                         column_config={
                             "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                             "public_url": st.column_config.LinkColumn("LinkedIn")
@@ -7064,7 +7075,7 @@ with tab_screening:
 
                 st.dataframe(
                     df_display,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "score": st.column_config.NumberColumn("Score", format="%d/10"),
@@ -7090,7 +7101,7 @@ with tab_screening:
 
                 st.dataframe(
                     df_display,
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     column_config={
                         "Score": st.column_config.NumberColumn("Score", format="%d/10", width="small"),
@@ -7184,7 +7195,7 @@ with tab_screening:
                         if 'current_company' in enriched_preview.columns:
                             preview_cols.insert(2, 'current_company')
                         available_cols = [c for c in preview_cols if c in enriched_preview.columns]
-                        st.dataframe(enriched_preview[available_cols], use_container_width=True, hide_index=True)
+                        st.dataframe(enriched_preview[available_cols], width="stretch", hide_index=True)
             else:
                 st.caption("SalesQL not configured. Add 'salesql_api_key' to secrets.")
 
@@ -7361,7 +7372,7 @@ with tab_database:
                     with fcol11:
                         f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
                     with fcol12:
-                        search_clicked = st.form_submit_button("Search", type="primary", use_container_width=True)
+                        search_clicked = st.form_submit_button("Search", type="primary", width="stretch")
 
                 # Build filters dict
                 current_filters = {
@@ -7642,7 +7653,7 @@ with tab_database:
                         available_cols = [c for c in all_cols if c in display_df.columns]
                         st.dataframe(
                             display_df[available_cols] if available_cols else display_df,
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                             column_config={
                                 "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
@@ -7657,7 +7668,7 @@ with tab_database:
 
                         st.dataframe(
                             display_df[available_cols] if available_cols else display_df,
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                             column_config={
                                 "name": st.column_config.TextColumn("Name"),
@@ -7931,7 +7942,7 @@ with tab_usage:
                                 font=dict(color='#e2e8f0'),
                             )
 
-                            st.plotly_chart(fig_line, use_container_width=True)
+                            st.plotly_chart(fig_line, width="stretch")
 
                             # Cost chart (OpenAI)
                             if df_daily['openai'].sum() > 0:
@@ -7944,7 +7955,7 @@ with tab_usage:
                                 )
                                 fig_cost.update_traces(fill='tozeroy', line_color='#34d399')
                                 fig_cost.update_layout(height=250, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#e2e8f0'))
-                                st.plotly_chart(fig_cost, use_container_width=True)
+                                st.plotly_chart(fig_cost, width="stretch")
 
                         else:
                             st.info("No usage data available for the selected period")
@@ -7968,7 +7979,7 @@ with tab_usage:
                                 color_discrete_sequence=['#34d399', '#615fff', '#38bdf8', '#a78bfa']
                             )
                             fig_pie.update_layout(height=300, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color='#e2e8f0'))
-                            st.plotly_chart(fig_pie, use_container_width=True)
+                            st.plotly_chart(fig_pie, width="stretch")
                         else:
                             st.info("No cost data to display")
 
@@ -8020,7 +8031,7 @@ with tab_usage:
 
                         st.dataframe(
                             logs_df[available_cols],
-                            use_container_width=True,
+                            width="stretch",
                             hide_index=True,
                             column_config={
                                 "created_at": st.column_config.DatetimeColumn("Time", format="YYYY-MM-DD HH:mm"),

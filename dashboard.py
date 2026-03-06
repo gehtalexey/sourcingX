@@ -4781,17 +4781,6 @@ with tab_filter:
                     if has_company_duration:
                         max_company_months = st.number_input("Max months at company", min_value=0, max_value=240, value=0, help="0 = no limit", key="max_company_months")
 
-        # Priority Lists section (visually distinct)
-        st.divider()
-        st.markdown("##### 📊 Priority Lists (Optional)")
-        st.caption("Load company/university lists to categorize candidates after filtering")
-        prio_col1, prio_col2, prio_col3 = st.columns(3)
-        with prio_col1:
-            load_target_companies = st.checkbox("Target Companies", value=False, key="load_target_companies")
-        with prio_col2:
-            load_tech_alerts = st.checkbox("Tech Alerts / Layoffs", value=False, key="load_tech_alerts")
-        with prio_col3:
-            load_client_wanted = st.checkbox("Client Wanted", value=False, key="load_client_wanted")
         st.divider()
 
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
@@ -4914,96 +4903,7 @@ with tab_filter:
                 cleanup_memory()  # Aggressive memory cleanup
                 save_session_state()  # Save for restore
 
-            # Load priority lists if selected
-            priority_loaded = []
-            if load_target_companies or load_tech_alerts or load_client_wanted:
-                with st.spinner("Loading priority lists..."):
-                    priority_df = filtered_df.copy()
-                    sheet_url = filter_sheets.get('url', '')
-
-                    # Helper function for matching
-                    def normalize_company(name):
-                        if pd.isna(name) or not str(name).strip():
-                            return ''
-                        name = str(name).lower().strip()
-                        for suffix in [' ltd', ' inc', ' corp', ' llc', ' limited', ' israel', ' il', ' technologies', ' tech', ' software', ' solutions', ' group']:
-                            if name.endswith(suffix):
-                                name = name[:-len(suffix)].strip()
-                        return name
-
-                    def matches_list(company, company_list):
-                        if pd.isna(company) or not str(company).strip():
-                            return False
-                        company_norm = normalize_company(company)
-                        if not company_norm:
-                            return False
-                        for c in company_list:
-                            c_norm = normalize_company(c)
-                            if not c_norm:
-                                continue
-                            if company_norm == c_norm:
-                                return True
-                            if len(c_norm) >= 4 and len(company_norm) >= 4:
-                                if company_norm.startswith(c_norm) or c_norm.startswith(company_norm):
-                                    return True
-                        return False
-
-                    # Target companies
-                    if load_target_companies and filter_sheets.get('target_companies'):
-                        tc_df = load_sheet_as_df(sheet_url, filter_sheets['target_companies'])
-                        if tc_df is not None and len(tc_df.columns) > 0:
-                            target_companies = []
-                            for col in tc_df.columns:
-                                if 'company' in col.lower() or 'name' in col.lower():
-                                    target_companies.extend(tc_df[col].dropna().tolist())
-                            target_list = [str(c).lower().strip() for c in target_companies if c]
-                            if target_list:
-                                if 'current_company' in priority_df.columns:
-                                    priority_df['is_target_company'] = priority_df['current_company'].apply(lambda x: matches_list(x, target_list))
-                                    priority_loaded.append(f"Target: {len(target_list)} companies, {priority_df['is_target_company'].sum()} matches")
-                                else:
-                                    st.warning("Cannot match target companies: 'current_company' column not found in data")
-
-                    # Tech alerts / Layoffs
-                    if load_tech_alerts and filter_sheets.get('tech_alerts'):
-                        ta_df = load_sheet_as_df(sheet_url, filter_sheets['tech_alerts'])
-                        if ta_df is not None and len(ta_df.columns) > 0:
-                            tech_alerts = []
-                            for col in ta_df.columns:
-                                if 'company' in col.lower() or 'name' in col.lower():
-                                    tech_alerts.extend(ta_df[col].dropna().tolist())
-                            alerts_list = [str(c).lower().strip() for c in tech_alerts if c]
-                            if alerts_list:
-                                if 'current_company' in priority_df.columns:
-                                    priority_df['is_layoff_company'] = priority_df['current_company'].apply(lambda x: matches_list(x, alerts_list))
-                                    priority_loaded.append(f"Layoffs: {len(alerts_list)} companies, {priority_df['is_layoff_company'].sum()} matches")
-                                else:
-                                    st.warning("Cannot match layoff companies: 'current_company' column not found in data")
-
-                    # Client Wanted Companies
-                    if load_client_wanted and filter_sheets.get('client_wanted_companies'):
-                        cw_df = load_sheet_as_df(sheet_url, filter_sheets['client_wanted_companies'])
-                        if cw_df is not None and len(cw_df.columns) > 0:
-                            client_wanted = []
-                            for col in cw_df.columns:
-                                client_wanted.extend(cw_df[col].dropna().tolist())
-                            client_list = [str(c).lower().strip() for c in client_wanted if c]
-                            client_list = list(set(client_list))
-                            if client_list:
-                                if 'current_company' in priority_df.columns:
-                                    priority_df['is_client_wanted'] = priority_df['current_company'].apply(lambda x: matches_list(x, client_list))
-                                    priority_loaded.append(f"Client Wanted: {len(client_list)} companies, {priority_df['is_client_wanted'].sum()} matches")
-                                else:
-                                    st.warning("Cannot match client wanted companies: 'current_company' column not found in data")
-
-                    # Save with priority columns
-                    st.session_state['passed_candidates_df'] = priority_df
-                    st.session_state['results_df'] = priority_df
-
-            if priority_loaded:
-                st.success(f"Filtering complete! {stats['final']} remaining. Priorities: {' | '.join(priority_loaded)}")
-            else:
-                st.success(f"Filtering complete! {stats['final']} candidates remaining")
+            st.success(f"Filtering complete! {stats['final']} candidates remaining")
             st.rerun()
 
 
@@ -5106,7 +5006,12 @@ with tab_filter:
             elif not skipped_filters:
                 st.info("No candidates were filtered out.")
 
-    # Show priority category filters if data has priority columns
+    # Priority Lists Section (Step 2 - after filtering)
+    st.divider()
+    st.markdown("##### 📊 Priority Lists")
+    st.caption("Categorize filtered candidates by company lists from Google Sheet")
+
+    # Get passed candidates
     if 'passed_candidates_df' in st.session_state and st.session_state.get('passed_candidates_df') is not None and not st.session_state['passed_candidates_df'].empty:
         passed_df = st.session_state['passed_candidates_df']
     elif 'results_df' in st.session_state and st.session_state.get('results_df') is not None and not st.session_state['results_df'].empty:
@@ -5114,6 +5019,112 @@ with tab_filter:
     else:
         passed_df = pd.DataFrame()
 
+    if passed_df is not None and len(passed_df) > 0:
+        prio_col1, prio_col2, prio_col3, prio_col4 = st.columns([1, 1, 1, 1])
+        with prio_col1:
+            load_target_companies = st.checkbox("Target Companies", value=False, key="load_target_companies")
+        with prio_col2:
+            load_tech_alerts = st.checkbox("Tech Alerts / Layoffs", value=False, key="load_tech_alerts")
+        with prio_col3:
+            load_client_wanted = st.checkbox("Client Wanted", value=False, key="load_client_wanted")
+        with prio_col4:
+            apply_priority = st.button("Apply Priority Lists", type="secondary", key="apply_priority_lists")
+
+        if apply_priority and (load_target_companies or load_tech_alerts or load_client_wanted):
+            with st.spinner("Loading priority lists..."):
+                priority_df = passed_df.copy()
+                sheet_url = filter_sheets.get('url', '')
+                priority_loaded = []
+
+                # Helper function for matching
+                def normalize_company(name):
+                    if pd.isna(name) or not str(name).strip():
+                        return ''
+                    name = str(name).lower().strip()
+                    for suffix in [' ltd', ' inc', ' corp', ' llc', ' limited', ' israel', ' il', ' technologies', ' tech', ' software', ' solutions', ' group']:
+                        if name.endswith(suffix):
+                            name = name[:-len(suffix)].strip()
+                    return name
+
+                def matches_list(company, company_list):
+                    if pd.isna(company) or not str(company).strip():
+                        return False
+                    company_norm = normalize_company(company)
+                    if not company_norm:
+                        return False
+                    for c in company_list:
+                        c_norm = normalize_company(c)
+                        if not c_norm:
+                            continue
+                        if company_norm == c_norm:
+                            return True
+                        if len(c_norm) >= 4 and len(company_norm) >= 4:
+                            if company_norm.startswith(c_norm) or c_norm.startswith(company_norm):
+                                return True
+                    return False
+
+                # Target companies
+                if load_target_companies and filter_sheets.get('target_companies'):
+                    tc_df = load_sheet_as_df(sheet_url, filter_sheets['target_companies'])
+                    if tc_df is not None and len(tc_df.columns) > 0:
+                        target_companies = []
+                        for col in tc_df.columns:
+                            if 'company' in col.lower() or 'name' in col.lower():
+                                target_companies.extend(tc_df[col].dropna().tolist())
+                        target_list = [str(c).lower().strip() for c in target_companies if c]
+                        if target_list:
+                            if 'current_company' in priority_df.columns:
+                                priority_df['is_target_company'] = priority_df['current_company'].apply(lambda x: matches_list(x, target_list))
+                                priority_loaded.append(f"Target: {len(target_list)} companies, {priority_df['is_target_company'].sum()} matches")
+                            else:
+                                st.warning("Cannot match target companies: 'current_company' column not found in data")
+
+                # Tech alerts / Layoffs
+                if load_tech_alerts and filter_sheets.get('tech_alerts'):
+                    ta_df = load_sheet_as_df(sheet_url, filter_sheets['tech_alerts'])
+                    if ta_df is not None and len(ta_df.columns) > 0:
+                        tech_alerts = []
+                        for col in ta_df.columns:
+                            if 'company' in col.lower() or 'name' in col.lower():
+                                tech_alerts.extend(ta_df[col].dropna().tolist())
+                        alerts_list = [str(c).lower().strip() for c in tech_alerts if c]
+                        if alerts_list:
+                            if 'current_company' in priority_df.columns:
+                                priority_df['is_layoff_company'] = priority_df['current_company'].apply(lambda x: matches_list(x, alerts_list))
+                                priority_loaded.append(f"Layoffs: {len(alerts_list)} companies, {priority_df['is_layoff_company'].sum()} matches")
+                            else:
+                                st.warning("Cannot match layoff companies: 'current_company' column not found in data")
+
+                # Client Wanted Companies
+                if load_client_wanted and filter_sheets.get('client_wanted_companies'):
+                    cw_df = load_sheet_as_df(sheet_url, filter_sheets['client_wanted_companies'])
+                    if cw_df is not None and len(cw_df.columns) > 0:
+                        client_wanted = []
+                        for col in cw_df.columns:
+                            if 'company' in col.lower() or 'name' in col.lower():
+                                client_wanted.extend(cw_df[col].dropna().tolist())
+                        # Fallback: if no matching columns found, try all columns
+                        if not client_wanted:
+                            for col in cw_df.columns:
+                                client_wanted.extend(cw_df[col].dropna().tolist())
+                        client_list = [str(c).lower().strip() for c in client_wanted if c]
+                        client_list = list(set(client_list))
+                        if client_list:
+                            if 'current_company' in priority_df.columns:
+                                priority_df['is_client_wanted'] = priority_df['current_company'].apply(lambda x: matches_list(x, client_list))
+                                priority_loaded.append(f"Client Wanted: {len(client_list)} companies, {priority_df['is_client_wanted'].sum()} matches")
+                            else:
+                                st.warning("Cannot match client wanted companies: 'current_company' column not found in data")
+
+                # Save with priority columns
+                st.session_state['passed_candidates_df'] = priority_df
+                st.session_state['results_df'] = priority_df
+
+                if priority_loaded:
+                    st.success(f"Priority lists applied: {' | '.join(priority_loaded)}")
+                st.rerun()
+
+    # Show priority category filters if data has priority columns
     has_any_priority = passed_df is not None and len(passed_df) > 0 and (
         'is_target_company' in passed_df.columns or
         'is_layoff_company' in passed_df.columns or

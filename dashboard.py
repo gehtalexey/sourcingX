@@ -11,7 +11,7 @@ import re
 import requests
 import os
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from openai import OpenAI
 import anthropic
 import gspread
@@ -91,6 +91,13 @@ try:
 except ImportError:
     HAS_AUTHENTICATOR = False
 
+# Cookie manager for session persistence
+try:
+    import extra_streamlit_components as stx
+    HAS_COOKIE_MANAGER = True
+except ImportError:
+    HAS_COOKIE_MANAGER = False
+
 
 def _start_keep_alive():
     """Ping the app's own URL every 10 minutes to prevent Streamlit Cloud from sleeping."""
@@ -156,11 +163,26 @@ st.set_page_config(
 # Authentication check (only when auth is configured)
 auth_config = get_auth_config()
 authenticator = None
-if auth_config and HAS_AUTHENTICATOR:
-    # Debug: Show authenticator version
-    if hasattr(stauth, '__version__'):
-        print(f"[Auth Debug] streamlit-authenticator version: {stauth.__version__}")
+cookie_manager = None
 
+if auth_config and HAS_AUTHENTICATOR:
+    # Initialize cookie manager for session persistence
+    if HAS_COOKIE_MANAGER:
+        cookie_manager = stx.CookieManager(key="auth_cookie_manager")
+
+    # Check for existing auth cookie BEFORE showing login form
+    auth_token = None
+    if cookie_manager:
+        auth_token = cookie_manager.get(auth_config['cookie']['name'])
+
+    # If we have a valid auth token, restore session
+    if auth_token and auth_token in auth_config['credentials']['usernames']:
+        st.session_state['authentication_status'] = True
+        st.session_state['username'] = auth_token
+        user_data = auth_config['credentials']['usernames'][auth_token]
+        st.session_state['name'] = f"{user_data.get('first_name', '')} {user_data.get('last_name', '')}".strip() or auth_token
+
+    # Create authenticator (still needed for login form and password verification)
     authenticator = stauth.Authenticate(
         auth_config['credentials'],
         auth_config['cookie']['name'],
@@ -168,37 +190,38 @@ if auth_config and HAS_AUTHENTICATOR:
         auth_config['cookie']['expiry_days']
     )
 
-    # Check if cookie exists before login
-    print(f"[Auth Debug] Session state before login: authentication_status={st.session_state.get('authentication_status')}, name={st.session_state.get('name')}")
-
-    authenticator.login(location='main')
-
-    # Debug: Check session state after login attempt
-    print(f"[Auth Debug] Session state after login: authentication_status={st.session_state.get('authentication_status')}, name={st.session_state.get('name')}")
+    # Only show login form if not already authenticated
+    if st.session_state.get('authentication_status') is not True:
+        authenticator.login(location='main')
 
     if st.session_state.get('authentication_status') is False:
         st.error('Username/password is incorrect')
-        # Debug info
-        with st.expander("Debug Info", expanded=False):
-            st.write(f"Auth status: {st.session_state.get('authentication_status')}")
-            st.write(f"Cookie name: {auth_config['cookie']['name']}")
-            st.write(f"Cookie expiry: {auth_config['cookie']['expiry_days']} days")
         st.stop()
     elif st.session_state.get('authentication_status') is None:
         st.warning('Please enter your username and password')
-        # Debug info
-        with st.expander("Debug Info", expanded=False):
-            st.write(f"Auth status: {st.session_state.get('authentication_status')}")
-            st.write(f"Cookie name: {auth_config['cookie']['name']}")
-            st.write(f"Cookie expiry: {auth_config['cookie']['expiry_days']} days")
-            if hasattr(stauth, '__version__'):
-                st.write(f"Authenticator version: {stauth.__version__}")
         st.stop()
     else:
-        # User is logged in - add logout button to sidebar
+        # User is logged in - save cookie for persistence
+        if cookie_manager and st.session_state.get('username'):
+            current_cookie = cookie_manager.get(auth_config['cookie']['name'])
+            if current_cookie != st.session_state.get('username'):
+                cookie_manager.set(
+                    auth_config['cookie']['name'],
+                    st.session_state.get('username'),
+                    expires_at=datetime.now() + timedelta(days=auth_config['cookie']['expiry_days'])
+                )
+
+        # Add logout button to sidebar
         with st.sidebar:
             st.write(f"Welcome, **{st.session_state.get('name', 'User')}**")
-            authenticator.logout("Logout", "sidebar")
+            if st.button("Logout", key="logout_btn"):
+                # Clear cookie on logout
+                if cookie_manager:
+                    cookie_manager.delete(auth_config['cookie']['name'])
+                st.session_state['authentication_status'] = None
+                st.session_state['username'] = None
+                st.session_state['name'] = None
+                st.rerun()
 
 # Dark theme UI styling (StockPeers-inspired)
 st.markdown("""

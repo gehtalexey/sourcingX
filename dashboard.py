@@ -157,19 +157,42 @@ st.set_page_config(
 auth_config = get_auth_config()
 authenticator = None
 if auth_config and HAS_AUTHENTICATOR:
+    # Debug: Show authenticator version
+    if hasattr(stauth, '__version__'):
+        print(f"[Auth Debug] streamlit-authenticator version: {stauth.__version__}")
+
     authenticator = stauth.Authenticate(
         auth_config['credentials'],
         auth_config['cookie']['name'],
         auth_config['cookie']['key'],
         auth_config['cookie']['expiry_days']
     )
+
+    # Check if cookie exists before login
+    print(f"[Auth Debug] Session state before login: authentication_status={st.session_state.get('authentication_status')}, name={st.session_state.get('name')}")
+
     authenticator.login(location='main')
+
+    # Debug: Check session state after login attempt
+    print(f"[Auth Debug] Session state after login: authentication_status={st.session_state.get('authentication_status')}, name={st.session_state.get('name')}")
 
     if st.session_state.get('authentication_status') is False:
         st.error('Username/password is incorrect')
+        # Debug info
+        with st.expander("Debug Info", expanded=False):
+            st.write(f"Auth status: {st.session_state.get('authentication_status')}")
+            st.write(f"Cookie name: {auth_config['cookie']['name']}")
+            st.write(f"Cookie expiry: {auth_config['cookie']['expiry_days']} days")
         st.stop()
     elif st.session_state.get('authentication_status') is None:
         st.warning('Please enter your username and password')
+        # Debug info
+        with st.expander("Debug Info", expanded=False):
+            st.write(f"Auth status: {st.session_state.get('authentication_status')}")
+            st.write(f"Cookie name: {auth_config['cookie']['name']}")
+            st.write(f"Cookie expiry: {auth_config['cookie']['expiry_days']} days")
+            if hasattr(stauth, '__version__'):
+                st.write(f"Authenticator version: {stauth.__version__}")
         st.stop()
     else:
         # User is logged in - add logout button to sidebar

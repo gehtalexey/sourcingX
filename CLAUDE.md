@@ -181,6 +181,15 @@ Only reject titles the JD EXPLICITLY lists. "Team Lead" is NOT overqualified unl
 ### Duplicate functions
 `normalize_crustdata_profile()` exists in both `normalizers.py` (canonical) and `dashboard.py` (inline copy). The canonical version in `normalizers.py` is the source of truth.
 
+### URL matching & "already enriched" counts
+**READ `.claude/skills/url-flow/SKILL.md` FIRST** when debugging URL issues.
+
+- **Problem**: Crustdata returns different URLs than input (e.g., `yderman` for `yoav-derman-365736152`)
+- **Dual storage**: DB stores both `linkedin_url` (Crustdata canonical) and `original_url` (input URL)
+- **Matching cascade**: 5-tier matching in `enrich_batch()` — username → base → reversed → hyphen-free → name-based
+- **Debug**: Check debug expander in Enrich tab, search DB by name, verify `original_url` is set
+- **Fix pattern**: Update `original_url` in DB if profile was saved without it
+
 ## Skills (Claude Code)
 
 | Skill | Path | Purpose |
@@ -192,6 +201,14 @@ Only reject titles the JD EXPLICITLY lists. "Team Lead" is NOT overqualified unl
 | `/phantom-pre-filter` | `.claude/skills/phantom-pre-filter/SKILL.md` | Pre-filter raw PhantomBuster CSV before enrichment |
 | (email-personal-note) | `skills/email-personal-note/SKILL.md` | Generate personal notes for follow-up emails |
 | (email-subject-line) | `skills/email-subject-line/SKILL.md` | Generate email subject lines with angle variation |
+
+### Reference Skills (Auto-Consult)
+
+These skills are NOT user-invocable. Claude should automatically read them when working on related issues:
+
+| Skill | Path | When to Consult |
+|-------|------|-----------------|
+| url-flow | `.claude/skills/url-flow/SKILL.md` | **URL matching bugs**, "already enriched" count wrong, profiles not deduping, enrichment URL mismatches, `original_url` issues |
 
 ## Prompt Templates (prompts.py)
 

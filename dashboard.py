@@ -2601,6 +2601,19 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
                                 item['_original_url'] = name_url_map[f"{cd_last} {cd_first}"]
                                 matched = True
 
+                        # Try partial name matching (handles middle names)
+                        # e.g., "Tsaela Harel Pinto" should match "tsaela pinto"
+                        if not matched and cd_name:
+                            cd_name_parts = set(cd_name.split())
+                            for map_name, map_url in name_url_map.items():
+                                map_parts = set(map_name.split())
+                                # Input name parts should be subset of Crustdata name
+                                # e.g., {"tsaela", "pinto"} subset of {"tsaela", "harel", "pinto"}
+                                if map_parts and map_parts.issubset(cd_name_parts):
+                                    item['_original_url'] = map_url
+                                    matched = True
+                                    break
+
                     if not matched:
                         result_url = item.get('linkedin_flagship_url') or item.get('linkedin_url', '')
                         unmatched.append(extract_username(result_url) or 'NO_USERNAME')

@@ -5636,7 +5636,8 @@ with tab_enrich:
                         return [], set(), set()
                     url_list = get_recently_enriched_urls(db_client, months=months)
                     url_set = set(normalize_linkedin_url(u) for u in url_list if u)
-                    # Extract exact usernames (no fuzzy matching - consistent with load function)
+                    # Extract usernames AND base usernames for better matching
+                    # Crustdata often returns different username format than input
                     username_set = set()
                     for u in url_list:
                         norm = normalize_linkedin_url(u)
@@ -5644,6 +5645,28 @@ with tab_enrich:
                             username = norm.split('/in/')[-1].rstrip('/')
                             if username:
                                 username_set.add(username)
+                                # Add base username (without alphanumeric suffix)
+                                # LinkedIn suffixes can be: -123, -abc123, 14b8a717b (no hyphen)
+                                # Try to extract name part
+                                import re
+                                # Pattern: name followed by alphanumeric ID (with or without hyphen)
+                                # e.g., "john-doe-abc123" -> "john-doe"
+                                # e.g., "johndoe14b8a717b" -> "johndoe"
+                                match = re.match(r'^([a-z-]+?)(?:-?[a-z0-9]{6,})$', username, re.IGNORECASE)
+                                if match:
+                                    base = match.group(1).rstrip('-')
+                                    if base and base != username:
+                                        username_set.add(base)
+                                # Also try simple hyphen split for shorter suffixes
+                                if '-' in username:
+                                    parts = username.rsplit('-', 1)
+                                    if len(parts[1]) >= 3:  # Suffix at least 3 chars
+                                        username_set.add(parts[0])
+                                # Also add hyphen-free version for matching
+                                # e.g., "john-doe" -> "johndoe"
+                                no_hyphen = username.replace('-', '')
+                                if no_hyphen and no_hyphen != username:
+                                    username_set.add(no_hyphen)
                     return url_list, url_set, username_set
 
                 recently_enriched = set()
@@ -5667,7 +5690,8 @@ with tab_enrich:
                     except Exception as e:
                         db_check_error = str(e)
 
-                # Filter URLs into categories (exact matching only - consistent with load function)
+                # Filter URLs into categories (fuzzy username matching to handle Crustdata URL variations)
+                import re
                 new_urls = []
                 skipped_urls = []
                 unavailable_urls = []  # Not found in Crustdata
@@ -5675,13 +5699,40 @@ with tab_enrich:
                     normalized = normalize_linkedin_url(url) if HAS_DATABASE else url
                     username = normalized.split('/in/')[-1].rstrip('/') if normalized and '/in/' in normalized else None
 
+                    # Generate username variations for matching
+                    username_variants = set()
+                    if username:
+                        username_variants.add(username)
+                        # Extract base username (without alphanumeric suffix)
+                        # LinkedIn suffixes: -123, -abc123, 14b8a717b
+                        base = None
+                        match = re.match(r'^([a-z-]+?)(?:-?[a-z0-9]{6,})$', username, re.IGNORECASE)
+                        if match:
+                            base = match.group(1).rstrip('-')
+                            if base:
+                                username_variants.add(base)
+                                # CRITICAL: Also add base without hyphens (matches Crustdata clean URLs)
+                                # e.g., "gabi-davar" -> "gabidavar" (matches DB's gabidavar)
+                                username_variants.add(base.replace('-', ''))
+                        # Also try simple hyphen split for shorter suffixes
+                        if '-' in username:
+                            parts = username.rsplit('-', 1)
+                            if len(parts[1]) >= 3:  # Suffix at least 3 chars
+                                username_variants.add(parts[0])
+                                # Also add this base without hyphens
+                                username_variants.add(parts[0].replace('-', ''))
+                        # Hyphen-free version of full username
+                        no_hyphen = username.replace('-', '')
+                        if no_hyphen:
+                            username_variants.add(no_hyphen)
+
                     # Check if marked as not_found first (exact match only)
                     if normalized in not_found_urls_db:
                         unavailable_urls.append(url)
-                    # Then check if recently enriched (exact URL or username match)
+                    # Then check if recently enriched (URL match or any username variant match)
                     elif normalized in recently_enriched:
                         skipped_urls.append(url)
-                    elif username and username in recently_enriched_usernames:
+                    elif username_variants & recently_enriched_usernames:  # Set intersection
                         skipped_urls.append(url)
                     else:
                         new_urls.append(url)
@@ -5697,6 +5748,34 @@ with tab_enrich:
 
                 if status_parts:
                     st.info(" | ".join(status_parts))
+
+                # Debug: show why URLs are marked as "to enrich"
+                if new_urls:
+                    with st.expander(f"Debug: {len(new_urls)} URLs marked 'to enrich'", expanded=False):
+                        st.write(f"**DB has {len(recently_enriched_usernames)} usernames**")
+                        st.write(f"**Sample DB usernames:** {list(recently_enriched_usernames)[:10]}")
+                        st.write("---")
+                        st.write(f"**Sample 'to enrich' URLs and their variants:**")
+                        for url in new_urls[:5]:
+                            normalized = normalize_linkedin_url(url)
+                            username = normalized.split('/in/')[-1].rstrip('/') if normalized and '/in/' in normalized else None
+                            variants = set()
+                            if username:
+                                variants.add(username)
+                                # Same logic as matching
+                                match = re.match(r'^([a-z-]+?)(?:-?[a-z0-9]{6,})$', username, re.IGNORECASE)
+                                if match:
+                                    base = match.group(1).rstrip('-')
+                                    variants.add(base)
+                                    variants.add(base.replace('-', ''))  # base-no-hyphen
+                                if '-' in username:
+                                    parts = username.rsplit('-', 1)
+                                    if len(parts[1]) >= 3:
+                                        variants.add(parts[0])
+                                        variants.add(parts[0].replace('-', ''))  # base-no-hyphen
+                                variants.add(username.replace('-', ''))
+                            in_db = variants & recently_enriched_usernames
+                            st.write(f"- `{username}` → variants: `{variants}` | in DB: `{in_db}`")
                     # Show next step with correct count (only enriched profiles can be filtered/screened)
                     if skipped_urls:
                         st.success(f"**{len(skipped_urls)}** profiles ready for Filter+ and AI Screen")

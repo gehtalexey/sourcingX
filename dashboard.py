@@ -5848,6 +5848,40 @@ with tab_enrich:
                             # Save enriched data - DataFrame is the single source of truth
                             # raw_data is saved to DB during enrichment, will be fetched from DB when screening
                             new_enriched_df = flatten_for_csv(successful)
+
+                            # Preserve email, name, linkedin_url from original CSV
+                            # Build lookup from original CSV data
+                            original_df = st.session_state.get('original_results_df')
+                            if original_df is not None and not original_df.empty and 'linkedin_url' in new_enriched_df.columns:
+                                preserve_lookup = {}
+                                orig_url_col = 'linkedin_url' if 'linkedin_url' in original_df.columns else None
+                                if orig_url_col:
+                                    for _, row in original_df.iterrows():
+                                        url = row.get(orig_url_col)
+                                        if url:
+                                            norm_url = normalize_linkedin_url(url)
+                                            preserve_lookup[norm_url] = {
+                                                'email': row.get('email') if pd.notna(row.get('email')) else None,
+                                                'name': row.get('name') if pd.notna(row.get('name')) else None,
+                                                'original_linkedin_url': url,  # Keep original URL format
+                                            }
+
+                                # Apply preserved fields to enriched data
+                                if preserve_lookup:
+                                    if 'email' not in new_enriched_df.columns:
+                                        new_enriched_df['email'] = ''
+                                    for idx, row in new_enriched_df.iterrows():
+                                        url = row.get('linkedin_url')
+                                        norm_url = normalize_linkedin_url(url) if url else None
+                                        if norm_url and norm_url in preserve_lookup:
+                                            preserved = preserve_lookup[norm_url]
+                                            # Keep email from original if enriched doesn't have it
+                                            if preserved.get('email') and not row.get('email'):
+                                                new_enriched_df.at[idx, 'email'] = preserved['email']
+                                            # Keep name from original if enriched is empty
+                                            if preserved.get('name') and not row.get('name'):
+                                                new_enriched_df.at[idx, 'name'] = preserved['name']
+
                             # Simple merge with existing enriched_df (e.g. from DB-loaded profiles)
                             existing_enriched = st.session_state.get('enriched_df')
 

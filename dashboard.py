@@ -58,6 +58,8 @@ try:
         get_setting, save_setting,
         get_search_history, save_search_history_entry, delete_search_history_entry,
         match_profiles_by_urls_rpc,
+        save_failed_enrichments_batch, get_not_found_urls,
+        update_profile_email,
         ENRICHMENT_REFRESH_MONTHS,
     )
     import prompts
@@ -448,9 +450,16 @@ def get_profiles_list() -> list:
 
 
 def get_profile_count() -> int:
-    """Get current profile count without loading full data."""
-    df = get_profiles_df()
-    return len(df)
+    """Get current LOADED profile count (filtered if applied, otherwise original)."""
+    # Use passed_candidates_df (filtered) if available, otherwise results_df (original)
+    passed_df = st.session_state.get('passed_candidates_df')
+    if passed_df is not None and isinstance(passed_df, pd.DataFrame) and not passed_df.empty:
+        return len(passed_df)
+    if 'results_df' in st.session_state and st.session_state['results_df'] is not None:
+        df = st.session_state['results_df']
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return len(df)
+    return 0
 
 
 def _get_session_file():
@@ -548,9 +557,8 @@ def _build_session_data():
     # MEMORY OPTIMIZATION: Only save essential keys, avoid redundant copies
     # - Don't save 'results' (list) when we have 'results_df' (DataFrame) - they're the same data
     # - Don't save 'enriched_results' when we have 'enriched_df'
-    # - Don't save 'passed_candidates_df' - can be reconstructed from enriched_df
     keys_to_save = [
-        'results_df', 'enriched_df', 'original_results_df',  # Only save DataFrames, not list duplicates
+        'results_df', 'enriched_df', 'original_results_df', 'passed_candidates_df',  # Save filtered data too
         'screening_results',  # Essential - screening is expensive
         'filter_stats', 'f2_filter_stats', 'last_load_count', 'last_load_file',
         'user_sheet_url',
@@ -896,13 +904,17 @@ def enrich_profiles_with_salesql(profiles_df: pd.DataFrame, api_key: str, progre
     if 'salesql_email_type' not in df.columns:
         df['salesql_email_type'] = ''
 
-    # Count profiles that need enrichment
+    # Count profiles that need enrichment (skip those with any email)
     needs_enrichment = []
     for idx, row in df.iterrows():
         linkedin_url = row.get(url_col)
         if not linkedin_url or pd.isna(linkedin_url):
             continue
+        # Skip if has SalesQL email
         if row.get('salesql_email') and not pd.isna(row.get('salesql_email')) and row.get('salesql_email') != '':
+            continue
+        # Skip if has DB email
+        if row.get('email') and not pd.isna(row.get('email')) and row.get('email') != '':
             continue
         needs_enrichment.append(idx)
 
@@ -2501,41 +2513,65 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
             data = response.json()
             result = data if isinstance(data, list) else [data]
 
-            # Inject original_url into each result by matching username
-            # Use linkedin_flagship_url (canonical) for matching, not linkedin_url (encoded)
+            # Inject original_url into each result by matching
+            # Priority: 1) linkedin_profile_url (original input), 2) username matching, 3) index matching
             unmatched = []
-            for item in result:
+            unmatched_indices = []  # Track indices for fallback index matching
+            for idx, item in enumerate(result):
                 if isinstance(item, dict) and 'error' not in item:
-                    result_url = item.get('linkedin_flagship_url') or item.get('linkedin_url', '')
-                    result_username = extract_username(result_url)
                     matched = False
-                    if result_username:
-                        # Try exact match first
-                        if result_username in original_url_map:
-                            item['_original_url'] = original_url_map[result_username]
+
+                    # First: Check if Crustdata returned the original input URL
+                    input_url = item.get('linkedin_profile_url')
+                    if input_url:
+                        input_username = extract_username(input_url)
+                        if input_username and input_username in original_url_map:
+                            item['_original_url'] = original_url_map[input_username]
                             matched = True
-                        else:
-                            # Try base username (without suffix) - handles input URLs with ID suffixes
-                            base = get_base_username(result_username)
+                        elif input_username:
+                            # Try base username match on input URL
+                            base = get_base_username(input_username)
                             if base in original_url_map:
                                 item['_original_url'] = original_url_map[base]
                                 matched = True
+
+                    # Fallback: Match using the canonical result URL
+                    if not matched:
+                        result_url = item.get('linkedin_flagship_url') or item.get('linkedin_url', '')
+                        result_username = extract_username(result_url)
+                        if result_username:
+                            # Try exact match first
+                            if result_username in original_url_map:
+                                item['_original_url'] = original_url_map[result_username]
+                                matched = True
                             else:
-                                # Try hyphen-free matching (handles o-neill vs oneill)
-                                normalized = get_normalized_name(result_username)
-                                if normalized and normalized in normalized_url_map:
-                                    item['_original_url'] = normalized_url_map[normalized]
+                                # Try base username (without suffix)
+                                base = get_base_username(result_username)
+                                if base in original_url_map:
+                                    item['_original_url'] = original_url_map[base]
                                     matched = True
                                 else:
-                                    # Also try matching result username against base versions in the map
-                                    for map_key, map_url in original_url_map.items():
-                                        if get_base_username(map_key) == result_username:
-                                            item['_original_url'] = map_url
-                                            matched = True
-                                            break
+                                    # Try hyphen-free matching
+                                    normalized = get_normalized_name(result_username)
+                                    if normalized and normalized in normalized_url_map:
+                                        item['_original_url'] = normalized_url_map[normalized]
+                                        matched = True
+                                    else:
+                                        # Try matching result username against base versions in map
+                                        for map_key, map_url in original_url_map.items():
+                                            if get_base_username(map_key) == result_username:
+                                                item['_original_url'] = map_url
+                                                matched = True
+                                                break
 
                     if not matched:
-                        unmatched.append(result_username or 'NO_USERNAME')
+                        result_url = item.get('linkedin_flagship_url') or item.get('linkedin_url', '')
+                        unmatched.append(extract_username(result_url) or 'NO_USERNAME')
+                        unmatched_indices.append(idx)
+
+            # NOTE: Index-based fallback was removed - it caused data corruption
+            # when Crustdata returned results in different order than input.
+            # Unmatched profiles will have no original_url, which is safer than wrong data.
 
             # Debug: show matching stats
             matched_count = sum(1 for item in result if isinstance(item, dict) and item.get('_original_url'))
@@ -3741,6 +3777,9 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
             result['current_title'] = profile.get('current_title', '') or profile.get('headline', '') or profile.get('title', '') or ''
             result['current_company'] = profile.get('current_company', '') or profile.get('companyName', '') or profile.get('company', '') or ''
             result['linkedin_url'] = profile.get('linkedin_url', '') or profile.get('public_url', '') or profile.get('defaultProfileUrl', '') or ''
+            # Include email fields for export
+            result['email'] = profile.get('email', '') or profile.get('salesql_email', '') or ''
+            result['salesql_email'] = profile.get('salesql_email', '') or ''
             result['index'] = index
         except Exception as e:
             import traceback
@@ -3752,6 +3791,8 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                 "current_title": "",
                 "current_company": "",
                 "linkedin_url": "",
+                "email": profile.get('email', '') or profile.get('salesql_email', '') or '',
+                "salesql_email": profile.get('salesql_email', '') or '',
                 "index": index
             }
 
@@ -3793,6 +3834,8 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                     "current_title": "",
                     "current_company": "",
                     "linkedin_url": "",
+                    "email": "",
+                    "salesql_email": "",
                     "index": idx
                 }
                 results.append(error_result)
@@ -5052,6 +5095,56 @@ with tab_filter:
             elif not skipped_filters:
                 st.info("No candidates were filtered out.")
 
+    # Passed Candidates Preview (after filtering)
+    if 'filter_stats' in st.session_state:
+        passed_preview_df = st.session_state.get('passed_candidates_df')
+        if passed_preview_df is not None and not passed_preview_df.empty:
+            with st.expander(f"View Passed Candidates ({len(passed_preview_df)})", expanded=True):
+                # Determine display columns - include priority columns if they exist
+                preview_cols = ['name', 'current_title', 'current_company']
+                # Add priority columns if present
+                for prio_col in ['is_target_company', 'is_layoff_company', 'is_client_wanted']:
+                    if prio_col in passed_preview_df.columns:
+                        preview_cols.append(prio_col)
+                preview_cols.append('linkedin_url')
+                # Handle PhantomBuster column names
+                if 'name' not in passed_preview_df.columns and 'firstName' in passed_preview_df.columns:
+                    display_df = passed_preview_df.copy()
+                    display_df['name'] = (display_df.get('firstName', '').fillna('') + ' ' + display_df.get('lastName', '').fillna('')).str.strip()
+                else:
+                    display_df = passed_preview_df
+
+                # Map alternative column names
+                col_mapping = {
+                    'current_title': ['title', 'jobTitle', 'job_title', 'headline'],
+                    'current_company': ['company', 'companyName', 'company_name'],
+                    'linkedin_url': ['linkedinUrl', 'publicUrl', 'public_url', 'profileUrl', 'profile_url']
+                }
+                for target, alternatives in col_mapping.items():
+                    if target not in display_df.columns:
+                        for alt in alternatives:
+                            if alt in display_df.columns:
+                                display_df[target] = display_df[alt]
+                                break
+
+                available_cols = [c for c in preview_cols if c in display_df.columns]
+                if not available_cols:
+                    available_cols = list(display_df.columns)[:4]
+
+                st.dataframe(
+                    display_df[available_cols].head(100),
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                        "is_target_company": st.column_config.CheckboxColumn("Target", default=False),
+                        "is_layoff_company": st.column_config.CheckboxColumn("Layoff", default=False),
+                        "is_client_wanted": st.column_config.CheckboxColumn("Client", default=False),
+                    }
+                )
+                if len(passed_preview_df) > 100:
+                    st.caption(f"Showing first 100 of {len(passed_preview_df)} passed candidates")
+
     # Priority Lists Section (Step 2 - after filtering)
     st.divider()
     st.markdown("##### 📊 Priority Lists")
@@ -5304,7 +5397,13 @@ with tab_filter:
         current_df = get_profiles_df()
         if not current_df.empty:
             current_count = len(current_df)
-            already_enriched = (current_df['salesql_email'].notna() & (current_df['salesql_email'] != '')).sum() if 'salesql_email' in current_df.columns else 0
+            # Check both email fields (DB email and SalesQL email)
+            email_mask = pd.Series([False] * len(current_df), index=current_df.index)
+            if 'salesql_email' in current_df.columns:
+                email_mask |= (current_df['salesql_email'].notna() & (current_df['salesql_email'] != ''))
+            if 'email' in current_df.columns:
+                email_mask |= (current_df['email'].notna() & (current_df['email'] != ''))
+            already_enriched = email_mask.sum()
             not_enriched = current_count - already_enriched
             st.caption(f"{current_count} profiles | {already_enriched} already have emails | {not_enriched} remaining")
 
@@ -5333,7 +5432,24 @@ with tab_filter:
                         progress_callback=update_progress,
                         limit=enrich_count
                     )
+                    # Save emails to database for persistence
+                    if HAS_DATABASE:
+                        db_client = _get_db_client()
+                        if db_client:
+                            saved_count = 0
+                            for _, row in enriched_df.iterrows():
+                                email = row.get('salesql_email')
+                                url = row.get('linkedin_url')
+                                if email and url and str(email).strip():
+                                    try:
+                                        update_profile_email(db_client, url, email, source='salesql')
+                                        saved_count += 1
+                                    except Exception:
+                                        pass
+                            if saved_count > 0:
+                                st.caption(f"💾 Saved {saved_count} emails to database")
                     st.session_state['results_df'] = enriched_df
+                    save_session_state()  # Persist emails to session file
                     new_emails = enriched_df['salesql_email'].notna().sum() if 'salesql_email' in enriched_df.columns else 0
                     st.success(f"Done! {new_emails} profiles now have emails.")
                     st.rerun()
@@ -5378,7 +5494,7 @@ with tab_enrich:
 
         # Show data source indicator
         if using_filtered:
-            st.caption(f"Using filtered data ({len(results_df) if results_df is not None else 0} profiles from Filter+ tab)")
+            st.caption(f"Using filtered data ({len(results_df) if results_df is not None else 0} profiles)")
         else:
             st.caption(f"Using all loaded data ({len(results_df) if results_df is not None else 0} profiles)")
 
@@ -5386,11 +5502,12 @@ with tab_enrich:
         is_enriched = enriched_df is not None and not enriched_df.empty
 
         if is_enriched:
-            st.success(f"**{len(enriched_df)}** profiles enriched! Proceed to Filter+ or AI Screen tab.")
+            # Message shown after enrichment status below
+            pass
 
             # Show URL matching debug info (persisted from last enrichment)
             if '_enrich_debug' in st.session_state or '_enrich_match_debug' in st.session_state:
-                with st.expander("Debug: Last Enrichment URL Matching", expanded=True):
+                with st.expander("Debug: Last Enrichment URL Matching", expanded=False):
                     enrich_debug = st.session_state.get('_enrich_debug', {})
                     match_debug = st.session_state.get('_enrich_match_debug', {})
 
@@ -5414,6 +5531,21 @@ with tab_enrich:
                         st.write("**Result samples:**")
                         for sample in match_debug.get('result_samples', []):
                             st.write(f"  - flagship: {sample.get('flagship')}, matched: {sample.get('matched')}")
+
+            # Show error debug info (from last enrichment with failures)
+            if '_error_debug' in st.session_state:
+                error_debug = st.session_state['_error_debug']
+                with st.expander("Debug: Failed Enrichments", expanded=False):
+                    st.write(f"**Errors:** {error_debug.get('count', 0)}")
+                    st.write(f"**Error keys:** {error_debug.get('sample_keys', 'N/A')}")
+                    st.write(f"**Sample error:** {error_debug.get('sample_error', 'N/A')}")
+                    st.write(f"**URLs extracted from messages:** {len(error_debug.get('extracted_urls', []))}")
+                    if error_debug.get('extracted_urls'):
+                        st.write(f"  Samples: {error_debug.get('extracted_urls', [])[:5]}")
+                    st.write(f"**Failed URLs to save:** {error_debug.get('failed_urls_count', 0)}")
+                    st.write(f"**Saved to DB as not_found:** {error_debug.get('db_saved', 0)}")
+                    if error_debug.get('db_errors'):
+                        st.error(f"**DB save errors:** {error_debug.get('db_errors')}")
 
             # Show enriched data preview
             st.markdown("### Enriched Profiles Preview")
@@ -5496,109 +5628,83 @@ with tab_enrich:
                     return None
 
                 # Check for recently enriched profiles in database (within ENRICHMENT_REFRESH_MONTHS)
-                # Cached to avoid fetching 50K+ URLs on every tab load
-                @st.cache_data(ttl=300, max_entries=3, show_spinner=False)
-                def _get_cached_enriched_urls(_months):
-                    """Fetch recently enriched URLs from DB (cached 5 min)."""
+                # Fetch recently enriched URLs from DB (no caching - fast enough and avoids stale data issues)
+                def _get_enriched_urls_fresh(months):
+                    """Fetch recently enriched URLs from DB."""
                     db_client = _get_db_client()
                     if not db_client:
                         return [], set(), set()
-                    url_list = get_recently_enriched_urls(db_client, months=_months)
+                    url_list = get_recently_enriched_urls(db_client, months=months)
                     url_set = set(normalize_linkedin_url(u) for u in url_list if u)
+                    # Extract exact usernames (no fuzzy matching - consistent with load function)
                     username_set = set()
                     for u in url_list:
-                        base = get_base_username_from_url(u)
-                        if base:
-                            username_set.add(base)
-                            reversed_name = get_reversed_username(base)
-                            if reversed_name:
-                                username_set.add(reversed_name)
+                        norm = normalize_linkedin_url(u)
+                        if norm and '/in/' in norm:
+                            username = norm.split('/in/')[-1].rstrip('/')
+                            if username:
+                                username_set.add(username)
                     return url_list, url_set, username_set
 
                 recently_enriched = set()
                 recently_enriched_usernames = set()
                 recently_enriched_list = []
+                not_found_urls_db = set()  # URLs marked as not_found in Crustdata
+                not_found_usernames = set()
                 db_check_error = None
                 refresh_months = 3  # Default fallback
                 if HAS_DATABASE:
                     try:
                         refresh_months = ENRICHMENT_REFRESH_MONTHS
-                        recently_enriched_list, recently_enriched, recently_enriched_usernames = _get_cached_enriched_urls(refresh_months)
+                        recently_enriched_list, recently_enriched, recently_enriched_usernames = _get_enriched_urls_fresh(refresh_months)
+
+                        # Also get URLs marked as not_found (Crustdata doesn't have them)
+                        try:
+                            not_found_list = get_not_found_urls(_get_db_client(), months=refresh_months)
+                            not_found_urls_db = set(normalize_linkedin_url(u) for u in not_found_list if u)
+                        except Exception as e:
+                            st.warning(f"Could not fetch not_found URLs: {e}")
                     except Exception as e:
                         db_check_error = str(e)
 
-                # Filter out recently enriched URLs (older ones can be re-enriched)
+                # Filter URLs into categories (exact matching only - consistent with load function)
                 new_urls = []
                 skipped_urls = []
+                unavailable_urls = []  # Not found in Crustdata
                 for url in urls:
                     normalized = normalize_linkedin_url(url) if HAS_DATABASE else url
-                    # Try exact URL match first
-                    if normalized in recently_enriched:
+                    username = normalized.split('/in/')[-1].rstrip('/') if normalized and '/in/' in normalized else None
+
+                    # Check if marked as not_found first (exact match only)
+                    if normalized in not_found_urls_db:
+                        unavailable_urls.append(url)
+                    # Then check if recently enriched (exact URL or username match)
+                    elif normalized in recently_enriched:
+                        skipped_urls.append(url)
+                    elif username and username in recently_enriched_usernames:
                         skipped_urls.append(url)
                     else:
-                        # Try base username match (handles ID suffix differences)
-                        base_username = get_base_username_from_url(url) if HAS_DATABASE else None
-                        if base_username and base_username in recently_enriched_usernames:
-                            skipped_urls.append(url)
-                        else:
-                            # Try reversed name order (first-last vs last-first)
-                            reversed_username = get_reversed_username(base_username) if base_username else None
-                            if reversed_username and reversed_username in recently_enriched_usernames:
-                                skipped_urls.append(url)
-                            else:
-                                new_urls.append(url)
+                        new_urls.append(url)
 
-                # Debug info
-                with st.expander("Debug: Enrichment check", expanded=False):
-                    st.write(f"URLs in loaded data: {len(urls)}")
-                    st.write(f"Recently enriched list (raw): {len(recently_enriched_list)}")
-                    st.write(f"Recently enriched set (normalized): {len(recently_enriched)}")
-                    st.write(f"Recently enriched usernames (base): {len(recently_enriched_usernames)}")
-
-                    # Debug: show sample base usernames from DB and loaded
-                    db_usernames_sample = list(recently_enriched_usernames)[:5]
-                    loaded_usernames_sample = [get_base_username_from_url(u) for u in urls[:5]]
-                    st.write(f"Sample DB base usernames: {db_usernames_sample}")
-                    st.write(f"Sample loaded base usernames: {loaded_usernames_sample}")
-                    st.write(f"New or stale (need enrichment): {len(new_urls)}")
-                    st.write(f"Skipped (fresh in DB): {len(skipped_urls)}")
-                    if db_check_error:
-                        st.error(f"DB check error: {db_check_error}")
-
-                    # Show normalized comparison
-                    loaded_normalized = [normalize_linkedin_url(u) for u in urls[:5]]
-                    st.write("Sample loaded URLs (normalized):", loaded_normalized)
-
-                    # Show raw DB URLs (before normalization) to see original_urls
-                    if recently_enriched_list:
-                        # Find URLs with ID suffix (likely original_urls)
-                        urls_with_suffix = [u for u in recently_enriched_list[:50] if u and '-' in u.split('/in/')[-1] and any(c.isdigit() for c in u.split('-')[-1])]
-                        st.write(f"Sample DB URLs with ID suffix (original_urls): {urls_with_suffix[:5]}")
-                        st.write("Sample DB URLs (normalized):", list(recently_enriched)[:5])
-
-                        # Check for near-matches (same username, different format)
-                        loaded_usernames = set()
-                        for u in urls[:100]:
-                            norm = normalize_linkedin_url(u)
-                            if norm and '/in/' in norm:
-                                username = norm.split('/in/')[-1].rstrip('/')
-                                loaded_usernames.add(username)
-
-                        db_usernames = set()
-                        for u in list(recently_enriched)[:1000]:
-                            if u and '/in/' in u:
-                                username = u.split('/in/')[-1].rstrip('/')
-                                db_usernames.add(username)
-
-                        overlap = loaded_usernames & db_usernames
-                        st.write(f"Username overlap (first 100 loaded vs DB): {len(overlap)} matches")
-                        if overlap:
-                            st.write("Sample matching usernames:", list(overlap)[:5])
-
-                # Show stats - skip recently enriched by default
+                # Show stats - skip recently enriched and unavailable by default
+                status_parts = []
+                if new_urls:
+                    status_parts.append(f"**{len(new_urls)}** to enrich")
                 if skipped_urls:
-                    st.info(f"**{len(new_urls)}** profiles to enrich | **{len(skipped_urls)}** skipped (enriched < {refresh_months} months ago)")
-                    urls_for_enrichment = new_urls
+                    status_parts.append(f"**{len(skipped_urls)}** already enriched")
+                if unavailable_urls:
+                    status_parts.append(f"**{len(unavailable_urls)}** unavailable (not in Crustdata)")
+
+                if status_parts:
+                    st.info(" | ".join(status_parts))
+                    # Show next step with correct count (only enriched profiles can be filtered/screened)
+                    if skipped_urls:
+                        st.success(f"**{len(skipped_urls)}** profiles ready for Filter+ and AI Screen")
+                        # Store for Filter+ tab to use
+                        st.session_state['_enriched_loaded_urls'] = set(normalize_linkedin_url(u) for u in skipped_urls if u)
+                urls_for_enrichment = new_urls
+
+                if skipped_urls:
 
                     # Option to load enriched profiles from DB for this list
                     if HAS_DATABASE and len(skipped_urls) > 0:
@@ -5620,23 +5726,12 @@ with tab_enrich:
 
                                         if matched_profiles:
                                             db_loaded_df = profiles_to_dataframe(matched_profiles)
-                                            # Merge with existing enriched_df if it exists (e.g. from fresh enrichment)
-                                            existing_enriched = st.session_state.get('enriched_df')
-                                            if existing_enriched is not None and not existing_enriched.empty:
-                                                # Combine and deduplicate by linkedin_url
-                                                combined = pd.concat([existing_enriched, db_loaded_df], ignore_index=True)
-                                                url_col = 'linkedin_url' if 'linkedin_url' in combined.columns else None
-                                                if url_col:
-                                                    combined = combined.drop_duplicates(subset=[url_col], keep='first')
-                                                enriched_df = combined
-                                                merge_msg = f"Combined: **{len(existing_enriched)}** existing + **{len(db_loaded_df)}** from DB = **{len(enriched_df)}** total"
-                                            else:
-                                                enriched_df = db_loaded_df
-                                                merge_msg = f"Loaded **{len(matched_profiles)}** enriched profiles for screening!"
+                                            # Replace existing data (don't merge - we want exact matches for this URL list)
+                                            enriched_df = db_loaded_df
+                                            merge_msg = f"Loaded **{len(matched_profiles)}** enriched profiles for screening!"
                                             # MEMORY FIX: Only store the DataFrame, not the list (saves ~50MB per 1000 profiles)
                                             st.session_state['enriched_df'] = enriched_df
-                                            # Clear pre-enrichment filter results so Screen tab shows all enriched profiles
-                                            st.session_state.pop('passed_candidates_df', None)
+                                            # Keep passed_candidates_df - needed for Enrich tab URL counting
                                             if 'enriched_results' in st.session_state:
                                                 del st.session_state['enriched_results']
                                             save_session_state()
@@ -5653,11 +5748,18 @@ with tab_enrich:
                             urls_for_enrichment = urls
                             st.warning(f"Will re-enrich all {len(urls)} profiles including {len(skipped_urls)} recently enriched")
                 else:
-                    st.info(f"**{len(urls)}** profiles ready for enrichment (none found in DB < {refresh_months} months)")
-                    urls_for_enrichment = urls
+                    if unavailable_urls:
+                        st.info(f"**{len(new_urls)}** profiles to enrich | **{len(unavailable_urls)}** unavailable (not in Crustdata)")
+                    else:
+                        st.info(f"**{len(urls)}** profiles ready for enrichment (none found in DB)")
 
                 if not urls_for_enrichment:
-                    st.warning(f"All profiles were enriched within the last {refresh_months} months.")
+                    if unavailable_urls and not skipped_urls:
+                        st.warning(f"No profiles to enrich. {len(unavailable_urls)} profiles are unavailable in Crustdata.")
+                    elif unavailable_urls:
+                        st.warning(f"No new profiles to enrich. {len(skipped_urls)} already enriched, {len(unavailable_urls)} unavailable in Crustdata.")
+                    else:
+                        st.warning(f"All profiles were enriched within the last {refresh_months} months.")
                 else:
                     col1, col2 = st.columns(2)
                     with col1:
@@ -5746,8 +5848,9 @@ with tab_enrich:
                             # Save enriched data - DataFrame is the single source of truth
                             # raw_data is saved to DB during enrichment, will be fetched from DB when screening
                             new_enriched_df = flatten_for_csv(successful)
-                            # Merge with existing enriched_df if it exists (e.g. from DB-loaded profiles)
+                            # Simple merge with existing enriched_df (e.g. from DB-loaded profiles)
                             existing_enriched = st.session_state.get('enriched_df')
+
                             if existing_enriched is not None and not existing_enriched.empty:
                                 combined = pd.concat([existing_enriched, new_enriched_df], ignore_index=True)
                                 url_col = 'linkedin_url' if 'linkedin_url' in combined.columns else None
@@ -5757,8 +5860,7 @@ with tab_enrich:
                             else:
                                 enriched_df = new_enriched_df
                             st.session_state['enriched_df'] = enriched_df
-                            # Clear pre-enrichment filter results so Screen tab shows all enriched profiles
-                            st.session_state.pop('passed_candidates_df', None)
+                            # Keep passed_candidates_df - needed for Enrich tab URL counting
                             # MEMORY FIX: Don't store list version (enriched_results) - saves ~50MB per 1000 profiles
                             if 'enriched_results' in st.session_state:
                                 del st.session_state['enriched_results']
@@ -5781,6 +5883,18 @@ with tab_enrich:
                                             matched = sum(1 for p in successful if p.get('_original_url'))
                                             st.write(f"**Matching:** {matched}/{len(successful)} profiles matched to original URLs")
 
+                                        # Build email lookup from original CSV data (before enrichment)
+                                        original_emails = {}
+                                        original_df = st.session_state.get('original_results_df')
+                                        if original_df is not None and not original_df.empty:
+                                            url_col = 'linkedin_url' if 'linkedin_url' in original_df.columns else None
+                                            if url_col and 'email' in original_df.columns:
+                                                for _, row in original_df.iterrows():
+                                                    url = row.get(url_col)
+                                                    email = row.get('email')
+                                                    if url and email and str(email).strip() and str(email).lower() != 'nan':
+                                                        original_emails[normalize_linkedin_url(url)] = str(email).strip()
+
                                         for profile in successful:
                                             # Use linkedin_flagship_url (canonical) as primary, not encoded linkedin_url
                                             linkedin_url = profile.get('linkedin_flagship_url') or profile.get('linkedin_url')
@@ -5789,13 +5903,76 @@ with tab_enrich:
                                             if linkedin_url:
                                                 update_profile_enrichment(db_client, linkedin_url, profile, original_url=original_url)
                                                 db_saved += 1
+
+                                                # Save email from original CSV if present
+                                                norm_url = normalize_linkedin_url(linkedin_url)
+                                                norm_orig = normalize_linkedin_url(original_url) if original_url else None
+                                                csv_email = original_emails.get(norm_url) or (original_emails.get(norm_orig) if norm_orig else None)
+                                                if csv_email:
+                                                    try:
+                                                        update_profile_email(db_client, linkedin_url, csv_email, source='csv')
+                                                    except Exception:
+                                                        pass  # Silently continue
+
+                                        # Save failed enrichments so they don't keep showing as "to enrich"
+                                        if errors:
+                                            # Store debug info in session state (survives rerun)
+                                            error_debug = {
+                                                'count': len(errors),
+                                                'sample_keys': list(errors[0].keys()) if errors and isinstance(errors[0], dict) else 'not a dict',
+                                                'sample_error': str(errors[0])[:500] if errors else None,
+                                                'extracted_urls': []
+                                            }
+
+                                            failed_urls = []
+                                            import re
+                                            for err in errors:
+                                                err_url = None
+                                                err_msg = ''
+
+                                                if isinstance(err, dict):
+                                                    # Extract URL - try multiple possible keys
+                                                    err_url = (err.get('_original_url') or
+                                                              err.get('linkedin_url') or
+                                                              err.get('linkedin_profile_url') or
+                                                              err.get('url'))
+                                                    err_msg = err.get('error', '') or err.get('message', '') or str(err)
+                                                elif isinstance(err, str):
+                                                    # Error is a plain string - extract URL from it
+                                                    err_msg = err
+                                                else:
+                                                    continue
+
+                                                # Try to extract URL from error message if not found
+                                                if not err_url and 'linkedin.com/in/' in err_msg:
+                                                    match = re.search(r'(https?://[^\s]+linkedin\.com/in/[^\s\.]+)', err_msg)
+                                                    if match:
+                                                        err_url = match.group(1)
+                                                        error_debug['extracted_urls'].append(err_url)
+
+                                                if err_url:
+                                                    failed_urls.append({
+                                                        'url': err_url,
+                                                        'error': err_msg[:500] if err_msg else 'Unknown error'
+                                                    })
+
+                                            error_debug['failed_urls_count'] = len(failed_urls)
+                                            db_failed = 0
+                                            db_errors = []
+                                            if failed_urls:
+                                                failed_stats = save_failed_enrichments_batch(db_client, failed_urls)
+                                                db_failed = failed_stats.get('saved', 0)
+                                                db_errors = failed_stats.get('error_messages', [])
+                                            error_debug['db_saved'] = db_failed
+                                            error_debug['db_errors'] = db_errors[:5]  # First 5 errors
+                                            st.session_state['_error_debug'] = error_debug
                                 except Exception as e:
                                     st.warning(f"Database save failed: {e}")
 
                             # Store message to show after rerun
                             db_msg = f" (DB: {db_saved} saved)" if db_saved > 0 else ""
 
-                            # Clear the enriched URLs cache so counts update
+                            # Clear any cached data so counts update
                             st.cache_data.clear()
 
                             if len(enriched_df) == 0:
@@ -5830,6 +6007,37 @@ with tab_filter2:
     if not is_enriched:
         st.info("Enrich profiles first (tab 3) to use advanced filtering.")
     else:
+        # Filter enriched_df to only profiles matching loaded data
+        # Use URLs computed by Enrich tab (stored in session state)
+        enriched_loaded_urls = st.session_state.get('_enriched_loaded_urls')
+
+        if enriched_loaded_urls and 'linkedin_url' in enriched_df.columns:
+            # Get DB linkedin_urls that correspond to the loaded URLs
+            # (handles cases where Crustdata returned different URL than input)
+            matching_db_urls = set(enriched_loaded_urls)  # Start with direct matches
+
+            if HAS_DATABASE:
+                try:
+                    db_client = _get_db_client()
+                    if db_client:
+                        db_profiles = db_client.select('profiles', 'linkedin_url,original_url', limit=15000)
+                        for p in db_profiles:
+                            orig = p.get('original_url')
+                            linkedin = p.get('linkedin_url')
+                            if orig and linkedin:
+                                norm_orig = normalize_linkedin_url(orig)
+                                norm_linkedin = normalize_linkedin_url(linkedin)
+                                # If original_url matches a loaded URL, include the linkedin_url
+                                if norm_orig in enriched_loaded_urls and norm_linkedin:
+                                    matching_db_urls.add(norm_linkedin)
+                except Exception:
+                    pass
+
+            # Filter enriched_df
+            enriched_df = enriched_df[enriched_df['linkedin_url'].apply(
+                lambda u: normalize_linkedin_url(u) in matching_db_urls if u else False
+            )].copy()
+
         st.success(f"**{len(enriched_df)}** enriched profiles ready for filtering")
 
         # Show available enriched columns and sample data for debugging
@@ -6458,7 +6666,13 @@ with tab_filter2:
             email_df = st.session_state.get('passed_candidates_df', display_df)
             if email_df is not None and not email_df.empty:
                 current_count = len(email_df)
-                already_enriched = (email_df['salesql_email'].notna() & (email_df['salesql_email'] != '')).sum() if 'salesql_email' in email_df.columns else 0
+                # Check both email fields (DB email and SalesQL email)
+                email_mask = pd.Series([False] * len(email_df), index=email_df.index)
+                if 'salesql_email' in email_df.columns:
+                    email_mask |= (email_df['salesql_email'].notna() & (email_df['salesql_email'] != ''))
+                if 'email' in email_df.columns:
+                    email_mask |= (email_df['email'].notna() & (email_df['email'] != ''))
+                already_enriched = email_mask.sum()
                 not_enriched = current_count - already_enriched
                 st.caption(f"{current_count} profiles | {already_enriched} already have emails | {not_enriched} remaining")
 
@@ -6482,7 +6696,24 @@ with tab_filter2:
                             status_text.text(f"Enriching {current}/{total}...")
 
                         enriched_df = enrich_profiles_with_salesql(email_df, salesql_key, progress_callback=update_progress, limit=enrich_count)
+                        # Save emails to database for persistence
+                        if HAS_DATABASE:
+                            db_client = _get_db_client()
+                            if db_client:
+                                saved_count = 0
+                                for _, row in enriched_df.iterrows():
+                                    email = row.get('salesql_email')
+                                    url = row.get('linkedin_url')
+                                    if email and url and str(email).strip():
+                                        try:
+                                            update_profile_email(db_client, url, email, source='salesql')
+                                            saved_count += 1
+                                        except Exception:
+                                            pass
+                                if saved_count > 0:
+                                    st.caption(f"💾 Saved {saved_count} emails to database")
                         st.session_state['passed_candidates_df'] = enriched_df
+                        save_session_state()  # Persist emails to session file
                         new_emails = enriched_df['salesql_email'].notna().sum() if 'salesql_email' in enriched_df.columns else 0
                         st.success(f"Done! {new_emails} profiles now have emails.")
                         st.rerun()
@@ -7163,11 +7394,11 @@ with tab_screening:
                     display_data.append({
                         'Score': r.get('score', 0),
                         'Fit': r.get('fit', ''),
-                        'Name': r.get('name', ''),
+                        'Name': r.get('name', '') or '',
                         'LinkedIn': r.get('linkedin_url', ''),
-                        'Title': r.get('current_title', '')[:40],
-                        'Company': r.get('current_company', '')[:30],
-                        'Summary': r.get('summary', '')[:100]
+                        'Title': str(r.get('current_title', '') or '')[:40],
+                        'Company': str(r.get('current_company', '') or '')[:30],
+                        'Summary': str(r.get('summary', '') or '')[:100]
                     })
 
                 df_display = pd.DataFrame(display_data)
@@ -7192,6 +7423,7 @@ with tab_screening:
             salesql_key = load_salesql_key()
             if salesql_key:
                 screening_df = pd.DataFrame(sorted_results)
+                # Note: Email data is already merged from enriched_df into screening_results above
 
                 # Choose which candidates to enrich
                 candidate_source = st.radio(
@@ -7211,7 +7443,16 @@ with tab_screening:
                     enrich_df = screening_df.copy()
 
                 current_count = len(enrich_df)
-                already_enriched = (enrich_df['salesql_email'].notna() & (enrich_df['salesql_email'] != '')).sum() if 'salesql_email' in enrich_df.columns else 0
+                # Check both email fields (DB email and SalesQL email)
+                has_salesql = (enrich_df['salesql_email'].notna() & (enrich_df['salesql_email'] != '')).sum() if 'salesql_email' in enrich_df.columns else 0
+                has_db_email = (enrich_df['email'].notna() & (enrich_df['email'] != '')).sum() if 'email' in enrich_df.columns else 0
+                # Count profiles with ANY email (union, not sum)
+                email_mask = pd.Series([False] * len(enrich_df), index=enrich_df.index)
+                if 'salesql_email' in enrich_df.columns:
+                    email_mask |= (enrich_df['salesql_email'].notna() & (enrich_df['salesql_email'] != ''))
+                if 'email' in enrich_df.columns:
+                    email_mask |= (enrich_df['email'].notna() & (enrich_df['email'] != ''))
+                already_enriched = email_mask.sum()
                 not_enriched = current_count - already_enriched
                 st.caption(f"{current_count} profiles | {already_enriched} already have emails | {not_enriched} remaining")
 
@@ -7236,6 +7477,23 @@ with tab_screening:
 
                         enriched_df = enrich_profiles_with_salesql(enrich_df, salesql_key, progress_callback=update_progress, limit=enrich_count)
 
+                        # Save emails to database for persistence
+                        if HAS_DATABASE:
+                            db_client = _get_db_client()
+                            if db_client:
+                                saved_count = 0
+                                for _, row in enriched_df.iterrows():
+                                    email = row.get('salesql_email')
+                                    url = row.get('linkedin_url')
+                                    if email and url and str(email).strip():
+                                        try:
+                                            update_profile_email(db_client, url, email, source='salesql')
+                                            saved_count += 1
+                                        except Exception as e:
+                                            pass  # Silently continue on individual failures
+                                if saved_count > 0:
+                                    st.caption(f"💾 Saved {saved_count} emails to database")
+
                         # Merge enriched emails back into full screening results
                         screening_df_updated = screening_df.copy()
                         if 'salesql_email' not in screening_df_updated.columns:
@@ -7251,6 +7509,7 @@ with tab_screening:
                                     screening_df_updated.loc[mask, 'salesql_email_type'] = row.get('salesql_email_type', '')
 
                         st.session_state['screening_results'] = screening_df_updated.to_dict('records')
+                        save_session_state()  # Persist emails to session file
                         new_emails = (enriched_df['salesql_email'].notna() & (enriched_df['salesql_email'] != '')).sum() if 'salesql_email' in enriched_df.columns else 0
                         st.success(f"Done! Found {new_emails} emails.")
                         st.rerun()

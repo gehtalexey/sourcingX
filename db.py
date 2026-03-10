@@ -282,6 +282,8 @@ def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_r
         'skills': skills if skills else None,
         'status': 'enriched',
         'enriched_at': datetime.utcnow().isoformat(),
+        'enrichment_status': 'enriched',  # Track successful enrichment
+        'enrichment_attempted_at': datetime.utcnow().isoformat(),
     }
 
     # Remove None values
@@ -318,6 +320,108 @@ def save_enriched_profiles_batch(client: SupabaseClient, profiles: list[tuple[st
 def update_profile_enrichment(client: SupabaseClient, linkedin_url: str, crustdata_response: dict, original_url: str = None) -> dict:
     """Alias for save_enriched_profile (backwards compatibility)."""
     return save_enriched_profile(client, linkedin_url, crustdata_response, original_url=original_url)
+
+
+def save_failed_enrichment(client: SupabaseClient, linkedin_url: str, error_message: str = None, original_url: str = None) -> dict:
+    """Save a profile that failed enrichment (Crustdata has no data).
+
+    This prevents the profile from showing as "to enrich" forever.
+
+    Args:
+        client: SupabaseClient instance
+        linkedin_url: The LinkedIn URL
+        error_message: Optional error message from Crustdata
+        original_url: The original input URL (for matching)
+
+    Returns:
+        The saved profile record or success indicator
+    """
+    linkedin_url = normalize_linkedin_url(linkedin_url)
+    if not linkedin_url:
+        return None
+
+    original_url = normalize_linkedin_url(original_url) if original_url else None
+    now = datetime.utcnow().isoformat()
+
+    try:
+        # Use upsert to handle both new and existing profiles
+        # Must include status='enriched' to satisfy CHECK constraint on insert
+        data = {
+            'linkedin_url': linkedin_url,
+            'status': 'enriched',  # Required for CHECK constraint
+            'enrichment_status': 'not_found',
+            'enrichment_attempted_at': now,
+        }
+        if original_url:
+            data['original_url'] = original_url
+
+        result = client.upsert('profiles', data, on_conflict='linkedin_url')
+        if result:
+            return result[0] if isinstance(result, list) else result
+        else:
+            return {'linkedin_url': linkedin_url, 'enrichment_status': 'not_found', '_saved': True}
+    except Exception as e:
+        return {'_error': f'{linkedin_url[:50]}: {str(e)[:100]}'}
+
+
+def save_failed_enrichments_batch(client: SupabaseClient, failed_urls: list[dict]) -> dict:
+    """Save multiple failed enrichments in a batch.
+
+    Args:
+        client: SupabaseClient instance
+        failed_urls: List of dicts with 'url' and optional 'error' keys
+
+    Returns:
+        Stats dict with 'saved', 'errors' counts, and 'error_messages' list
+    """
+    stats = {'saved': 0, 'errors': 0, 'error_messages': []}
+
+    for item in failed_urls:
+        url = item.get('url') or item.get('linkedin_url')
+        error = item.get('error')
+        original = item.get('original_url')
+
+        try:
+            result = save_failed_enrichment(client, url, error_message=error, original_url=original)
+            if result and '_error' not in result:
+                stats['saved'] += 1
+            elif result and '_error' in result:
+                stats['errors'] += 1
+                stats['error_messages'].append(result['_error'][:150])
+            else:
+                stats['errors'] += 1
+                stats['error_messages'].append(f"No result for {url[:50]}")
+        except Exception as e:
+            stats['errors'] += 1
+            stats['error_messages'].append(f"{url[:30]}: {str(e)[:100]}")
+
+    return stats
+
+
+def get_not_found_urls(client: SupabaseClient, months: int = 3) -> list[str]:
+    """Get URLs that were marked as not_found in Crustdata within the last N months.
+
+    Args:
+        client: SupabaseClient instance
+        months: Only return URLs attempted within this many months
+
+    Returns:
+        List of LinkedIn URLs that Crustdata doesn't have data for
+    """
+    cutoff = datetime.utcnow() - timedelta(days=months * 30)
+
+    try:
+        result = client.select('profiles',
+            columns='linkedin_url',
+            filters={
+                'enrichment_status': 'eq.not_found',
+                'enrichment_attempted_at': f'gte.{cutoff.isoformat()}'
+            }
+        )
+        return [r['linkedin_url'] for r in result if r.get('linkedin_url')]
+    except Exception as e:
+        print(f"[DB] Error getting not_found URLs: {e}")
+        return []
 
 
 def update_profile_screening(client: SupabaseClient, linkedin_url: str, score: int, fit_level: str,
@@ -477,9 +581,8 @@ def match_profiles_by_urls_rpc(
 ) -> list:
     """Match profiles via server-side RPC function.
 
-    Uses PostgreSQL function to match input URLs against profiles table with
-    fuzzy matching (handles ID suffixes, name reversals, hyphen variations).
-    Much more efficient than loading all profiles and matching in Python.
+    Uses PostgreSQL function to match input URLs against profiles table.
+    Post-filters to only return profiles that exactly match input URLs.
 
     Args:
         client: SupabaseClient instance
@@ -492,6 +595,26 @@ def match_profiles_by_urls_rpc(
     """
     if not urls:
         return []
+
+    # Build set of normalized input URLs for exact matching post-filter
+    from normalizers import normalize_linkedin_url
+    input_urls_normalized = set()
+    input_usernames = set()
+    input_url_to_username = {}  # Track mapping for "one profile per input URL"
+    for u in urls:
+        if u:
+            norm = normalize_linkedin_url(u)
+            if norm:
+                input_urls_normalized.add(norm)
+                # Also extract username for matching
+                if '/in/' in norm:
+                    username = norm.split('/in/')[-1].rstrip('/')
+                    input_usernames.add(username)
+                    input_url_to_username[norm] = username
+
+    # Track which input URLs have been matched (to return only one profile per input URL)
+    matched_input_urls = set()
+    matched_input_usernames = set()
 
     # Calculate enriched_after timestamp if specified
     enriched_after = None
@@ -513,21 +636,84 @@ def match_profiles_by_urls_rpc(
                 "enriched_after": enriched_after
             }
 
+            # Use exact matching (safer - no name reversal or hyphen removal)
+            # Falls back to fuzzy matching if exact function doesn't exist
             response = requests.post(
-                f"{client.url}/rest/v1/rpc/match_profiles_by_urls",
+                f"{client.url}/rest/v1/rpc/match_profiles_by_urls_exact",
                 headers=client.headers,
                 json=payload,
                 timeout=60  # Longer timeout for large batches
             )
+            # If exact function doesn't exist, fall back to original
+            if response.status_code == 404:
+                response = requests.post(
+                    f"{client.url}/rest/v1/rpc/match_profiles_by_urls",
+                    headers=client.headers,
+                    json=payload,
+                    timeout=60
+                )
             response.raise_for_status()
             batch_results = response.json()
 
-            # Deduplicate by linkedin_url
+            # Deduplicate and filter to exact matches only
             for profile in batch_results:
                 url = profile.get('linkedin_url')
+                original = profile.get('original_url')
                 if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    all_results.append(profile)
+                    # Post-filter: only keep if linkedin_url or original_url exactly matches input
+                    url_norm = normalize_linkedin_url(url)
+                    url_username = url_norm.split('/in/')[-1].rstrip('/') if url_norm and '/in/' in url_norm else None
+
+                    # Validate original_url - only use if base username matches linkedin_url
+                    # (ignore corrupted original_url that points to different person)
+                    original_norm = None
+                    original_username = None
+                    if original:
+                        orig_norm_temp = normalize_linkedin_url(original)
+                        if orig_norm_temp and '/in/' in orig_norm_temp:
+                            orig_username_temp = orig_norm_temp.split('/in/')[-1].rstrip('/')
+                            # Get base usernames (strip ID suffix)
+                            def get_base(u):
+                                if '-' in u:
+                                    parts = u.rsplit('-', 1)
+                                    if parts[-1].isdigit() or (len(parts[-1]) >= 5 and sum(c.isdigit() for c in parts[-1]) >= len(parts[-1]) * 0.5):
+                                        return parts[0]
+                                return u
+                            url_base = get_base(url_username) if url_username else None
+                            orig_base = get_base(orig_username_temp)
+                            # Only use original_url if base names match
+                            if url_base and orig_base and (url_base == orig_base or url_base.replace('-','') == orig_base.replace('-','')):
+                                original_norm = orig_norm_temp
+                                original_username = orig_username_temp
+
+                    # Find which input URL(s) this profile matches
+                    matching_input_url = None
+                    matching_input_username = None
+
+                    # Check exact URL match (only using validated original_url)
+                    if url_norm in input_urls_normalized:
+                        matching_input_url = url_norm
+                    elif original_norm and original_norm in input_urls_normalized:
+                        matching_input_url = original_norm
+
+                    # Check username match (for cases where URL format differs)
+                    if not matching_input_url:
+                        if url_username in input_usernames:
+                            matching_input_username = url_username
+                        elif original_username and original_username in input_usernames:
+                            matching_input_username = original_username
+
+                    # Only add if we found a match AND that input hasn't been matched yet
+                    if matching_input_url:
+                        if matching_input_url not in matched_input_urls:
+                            matched_input_urls.add(matching_input_url)
+                            seen_urls.add(url)
+                            all_results.append(profile)
+                    elif matching_input_username:
+                        if matching_input_username not in matched_input_usernames:
+                            matched_input_usernames.add(matching_input_username)
+                            seen_urls.add(url)
+                            all_results.append(profile)
 
         except requests.exceptions.HTTPError as e:
             print(f"[DB] match_profiles_by_urls RPC error (batch {i//batch_size + 1}): {e}")
@@ -1162,22 +1348,12 @@ def get_all_linkedin_urls(client: SupabaseClient) -> list:
 def get_recently_enriched_urls(client: SupabaseClient, months: int = 6) -> list:
     """Get LinkedIn URLs enriched within the last N months.
     Returns both linkedin_url and original_url for better matching.
-    Uses pagination to bypass Supabase 1000 row limit."""
+    Uses select() auto-pagination to handle large result sets."""
     cutoff_date = (datetime.utcnow() - timedelta(days=months * 30)).isoformat()
 
-    # Paginate to get all results (Supabase has 1000 row server limit)
-    all_results = []
-    offset = 0
-    page_size = 1000
-    while True:
-        filters = {'enriched_at': f'gte.{cutoff_date}', 'offset': str(offset)}
-        result = client.select('profiles', 'linkedin_url,original_url', filters, limit=page_size)
-        if not result:
-            break
-        all_results.extend(result)
-        if len(result) < page_size:
-            break
-        offset += page_size
+    # select() handles pagination internally - just set a high limit
+    filters = {'enriched_at': f'gte.{cutoff_date}'}
+    all_results = client.select('profiles', 'linkedin_url,original_url', filters, limit=50000)
 
     urls = []
     for p in all_results:

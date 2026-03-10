@@ -254,6 +254,14 @@ def profiles_to_display_df(profiles: list) -> 'pd.DataFrame':
     rows = [profile_to_display_row(p) for p in profiles]
     df = pd.DataFrame(rows)
 
+    # Sync DB email to salesql_email (so SalesQL enrichment sees existing emails)
+    if 'email' in df.columns:
+        if 'salesql_email' not in df.columns:
+            df['salesql_email'] = ''
+        # Copy DB email to salesql_email where salesql_email is empty
+        mask = (df['salesql_email'].isna() | (df['salesql_email'] == '')) & df['email'].notna() & (df['email'] != '')
+        df.loc[mask, 'salesql_email'] = df.loc[mask, 'email']
+
     # Column order for display
     priority_cols = [
         'name', 'current_title', 'current_company', 'location',

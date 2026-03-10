@@ -2466,8 +2466,19 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
         base = get_base_username(username)
         return base.replace('-', '') if base else None
 
+    def extract_name_from_username(username):
+        """Extract probable name from username (e.g., 'yoav-derman-12345' -> 'yoav derman')."""
+        base = get_base_username(username)
+        if base:
+            # Replace hyphens with spaces and normalize
+            name = base.replace('-', ' ').strip().lower()
+            # Remove common suffixes that aren't names
+            return name if len(name) > 2 else None
+        return None
+
     original_url_map = {}
     normalized_url_map = {}  # Hyphen-free versions for fuzzy matching
+    name_url_map = {}  # Name-based mapping for last resort
     failed_extracts = []
     for url in urls:
         username = extract_username(url)
@@ -2486,6 +2497,10 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
             normalized = get_normalized_name(username)
             if normalized:
                 normalized_url_map[normalized] = url
+            # Also map probable name for name-based matching (last resort)
+            probable_name = extract_name_from_username(username)
+            if probable_name and probable_name not in name_url_map:
+                name_url_map[probable_name] = url
         else:
             failed_extracts.append(url[:80] if len(str(url)) > 80 else url)
 
@@ -2563,6 +2578,28 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
                                                 item['_original_url'] = map_url
                                                 matched = True
                                                 break
+
+                    # Last resort: name-based matching using Crustdata's returned name
+                    if not matched:
+                        # Get name from Crustdata response
+                        cd_name = item.get('name', '').lower().strip()
+                        cd_first = item.get('first_name', '').lower().strip()
+                        cd_last = item.get('last_name', '').lower().strip()
+
+                        # Try full name
+                        if cd_name and cd_name in name_url_map:
+                            item['_original_url'] = name_url_map[cd_name]
+                            matched = True
+                        # Try "first last" format
+                        elif cd_first and cd_last:
+                            full_name = f"{cd_first} {cd_last}"
+                            if full_name in name_url_map:
+                                item['_original_url'] = name_url_map[full_name]
+                                matched = True
+                            # Try "last first" format (reversed)
+                            elif f"{cd_last} {cd_first}" in name_url_map:
+                                item['_original_url'] = name_url_map[f"{cd_last} {cd_first}"]
+                                matched = True
 
                     if not matched:
                         result_url = item.get('linkedin_flagship_url') or item.get('linkedin_url', '')

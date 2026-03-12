@@ -56,32 +56,46 @@ def update_phantombuster_with_skip_list(
         agent_data = fetch_response.json()
         current_argument = agent_data.get('argument', '{}')
 
-        # Parse current argument
+        # Parse current argument - CRITICAL: preserve existing config including LinkedIn cookie
         try:
             if isinstance(current_argument, str):
                 arg_dict = json.loads(current_argument)
             else:
                 arg_dict = current_argument
-        except:
-            arg_dict = {}
+
+            # Ensure arg_dict is a dict
+            if not isinstance(arg_dict, dict):
+                arg_dict = {}
+        except json.JSONDecodeError as e:
+            # If parsing fails, abort - don't wipe the config and lose the LinkedIn cookie
+            return {'error': f"Failed to parse agent config: {str(e)}. Session cookie may be at risk."}
+
+        # CRITICAL: Verify LinkedIn session cookie exists before modifying config
+        # PhantomBuster stores it as 'sessionCookie' or 'linkedInCookie'
+        session_cookie = arg_dict.get('sessionCookie') or arg_dict.get('linkedInCookie')
+        if not session_cookie:
+            return {
+                'error': 'No LinkedIn session cookie found in agent config. '
+                         'Please re-authenticate in PhantomBuster before launching.',
+                'requires_reauth': True
+            }
 
         # Generate timestamped filename if not provided
         if csv_name is None:
             timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
             csv_name = f'search_{timestamp}'
 
-        # Standard updates (same as existing function)
+        # Standard updates - only modify search parameters, preserve everything else
         arg_dict['salesNavigatorSearchUrl'] = search_url
         arg_dict['search'] = search_url
         arg_dict['numberOfProfiles'] = num_profiles
         arg_dict['numberOfResultsPerSearch'] = num_profiles
         arg_dict['csvName'] = csv_name
 
-        # Add skip list for deduplication
         # NOTE: Skip list disabled - causes "Argument too big" error from PB API
-        # The list gets too large. Use post-scrape filtering instead.
+        # The list gets too large. Use post-scrape filtering instead (pb_dedup.py filter_new_profiles).
         skipped_count = 0
-        arg_dict['removeDuplicates'] = True
+        # Don't add custom parameters - PhantomBuster may reject/reset config if it sees unknown params
 
         # Update the agent
         update_response = requests.post(

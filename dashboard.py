@@ -4608,7 +4608,31 @@ with tab_upload:
                         st.error("Could not load results.")
 
         elif current_status == 'error':
-            st.error(f"Error: {st.session_state['pb_launch_error']}")
+            error_msg = st.session_state['pb_launch_error'] or 'Unknown error'
+            st.error(f"Error: {error_msg}")
+
+            # Show detailed warning for session cookie issues
+            if 'session cookie' in error_msg.lower() or 're-authenticate' in error_msg.lower():
+                st.warning("""
+**LinkedIn Session Expired or Invalid**
+
+This can happen when:
+1. Your LinkedIn session cookie expired
+2. A previous launch attempt corrupted the session
+3. LinkedIn invalidated your session for security reasons
+
+**⚠️ Important:** When LinkedIn invalidates a session, it affects **ALL phantoms** using that account - not just this one.
+
+**How to fix:**
+1. Log into [Sales Navigator](https://www.linkedin.com/sales/) in your browser
+2. Open PhantomBuster and go to your phantom's settings
+3. Click "Connect to LinkedIn" or "LinkedIn Session"
+4. Re-authenticate with a fresh session cookie
+5. Save the phantom and try again
+
+**Note:** You may need to update ALL your phantoms if they share the same LinkedIn account.
+                """)
+
             if st.button("Reset", key="pb_reset_btn"):
                 st.session_state['pb_launch_status'] = 'idle'
                 st.session_state['pb_launch_error'] = None

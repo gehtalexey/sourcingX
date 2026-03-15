@@ -5594,6 +5594,16 @@ with tab_enrich:
         else:
             st.info(msg)
 
+    # Show load debug info if available
+    if '_load_debug' in st.session_state:
+        load_debug = st.session_state.pop('_load_debug')
+        with st.expander("Debug: Profile Loading Details", expanded=True):
+            st.write(f"**DB profiles fetched:** {load_debug.get('db_profiles', 'N/A')}")
+            st.write(f"**Lookup dictionary keys:** {load_debug.get('lookup_keys', 'N/A')}")
+            st.write(f"**Input URLs to match:** {load_debug.get('input_urls', 'N/A')}")
+            st.write(f"**Successfully matched:** {load_debug.get('matched', 'N/A')}")
+            st.write(f"**Gap (unmatched):** {load_debug.get('gap', 'N/A')}")
+
     if not HAS_DATABASE:
         st.error("Supabase is not connected. Enrichment is disabled because results won't be saved. Check your supabase_url and supabase_key in secrets.")
     elif not has_crust_key:
@@ -6037,10 +6047,19 @@ with tab_enrich:
                                                 del st.session_state['enriched_results']
                                             save_session_state()
                                             # Store message to show after rerun
+                                            # Store debug info
+                                            st.session_state['_load_debug'] = {
+                                                'db_profiles': len(all_profiles),
+                                                'lookup_keys': len(profile_by_username),
+                                                'input_urls': len(skipped_urls),
+                                                'matched': len(matched_profiles),
+                                                'gap': len(skipped_urls) - len(matched_profiles)
+                                            }
                                             st.session_state['enrichment_message'] = f"success:Loaded {len(matched_profiles)} enriched profiles (matched {len(skipped_urls)} input URLs)"
                                             st.rerun()
                                         else:
                                             st.warning(f"No matching profiles found for {len(skipped_urls)} URLs. Try re-enriching them.")
+                                            st.write(f"Debug: DB returned {len(all_profiles)} profiles, lookup has {len(profile_by_username)} keys")
                                 except Exception as e:
                                     st.error(f"Error loading profiles: {e}")
 

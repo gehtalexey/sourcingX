@@ -6528,12 +6528,12 @@ with tab_filter2:
                                 mask = ~df['_target_company']
                                 removed['Non-Target Companies'] = mask.sum()
                                 df = df[df['_target_company']]
-                                df = df.drop(columns=['_target_company'])
+                                df = df.drop(columns=['_target_company'], errors='ignore')
                                 st.info(f"Target Companies: {len(target_companies)} loaded, kept {len(df)} profiles with target company experience")
                             else:
                                 # Prioritize - move target company profiles to top
                                 df = pd.concat([df[df['_target_company']], df[~df['_target_company']]])
-                                df = df.drop(columns=['_target_company'])
+                                df = df.drop(columns=['_target_company'], errors='ignore')
                                 st.info(f"Target Companies: {len(target_companies)} loaded, {len(target_company_matches)} matches moved to top")
 
                 # Target universities filter
@@ -6596,10 +6596,10 @@ with tab_filter2:
                                 # MEMORY FIX: Store only count, not full records
                                 removed['Non-Target Universities'] = mask.sum()
                                 df = df[df['_target_uni']]
-                                df = df.drop(columns=['_target_uni'])
+                                df = df.drop(columns=['_target_uni'], errors='ignore')
                             else:
                                 df = pd.concat([df[df['_target_uni']], df[~df['_target_uni']]])
-                                df = df.drop(columns=['_target_uni'])
+                                df = df.drop(columns=['_target_uni'], errors='ignore')
 
                 # Client Wanted Companies filter
                 if client_wanted_mode != "Off" and has_sheets and filter_sheets.get('client_wanted_companies'):
@@ -6671,12 +6671,12 @@ with tab_filter2:
                                 mask = ~df['_client_wanted']
                                 removed['Non-Client Wanted Companies'] = mask.sum()
                                 df = df[df['_client_wanted']]
-                                df = df.drop(columns=['_client_wanted'])
+                                df = df.drop(columns=['_client_wanted'], errors='ignore')
                                 st.info(f"Client Wanted ({scope_label}): {len(client_wanted_companies)} loaded, kept {len(df)} profiles")
                             else:
                                 # Prioritize - move client wanted profiles to top
                                 df = pd.concat([df[df['_client_wanted']], df[~df['_client_wanted']]])
-                                df = df.drop(columns=['_client_wanted'])
+                                df = df.drop(columns=['_client_wanted'], errors='ignore')
                                 st.info(f"Client Wanted ({scope_label}): {len(client_wanted_companies)} loaded, {len(client_wanted_matches)} matches moved to top")
 
                 # Include keywords filter (job titles only, word boundary matching)

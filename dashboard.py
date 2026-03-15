@@ -5971,20 +5971,60 @@ with tab_enrich:
                     # Option to load enriched profiles from DB for this list
                     if HAS_DATABASE and len(skipped_urls) > 0:
                         if st.button(f"Load {len(skipped_urls)} enriched profiles for screening", type="primary", key="load_enriched_for_list"):
-                            with st.spinner("Loading profiles from database (server-side matching)..."):
+                            with st.spinner("Loading profiles from database..."):
                                 try:
                                     db_client = _get_db_client()
                                     if not db_client:
                                         st.error("Database connection failed")
                                     else:
-                                        # Use server-side URL matching (scales to 100k+ profiles)
-                                        # Matching logic runs in PostgreSQL, only matching profiles are returned
-                                        matched_profiles = match_profiles_by_urls_rpc(
-                                            db_client,
-                                            list(skipped_urls),
-                                            enriched_after_months=refresh_months,
-                                            batch_size=500
-                                        )
+                                        # Fetch all recently enriched profiles and match client-side
+                                        # This ensures same matching logic as "already enriched" check
+                                        cutoff = (datetime.utcnow() - timedelta(days=refresh_months * 30)).isoformat()
+                                        all_profiles = db_client.select('profiles', '*',
+                                            filters={'enriched_at': f'gte.{cutoff}'}, limit=50000)
+
+                                        # Build lookup by username (same logic as recently_enriched_usernames)
+                                        profile_by_username = {}
+                                        for p in all_profiles:
+                                            url = p.get('linkedin_url') or ''
+                                            orig = p.get('original_url') or ''
+                                            for u in [url, orig]:
+                                                if u and '/in/' in u:
+                                                    username = u.split('/in/')[-1].rstrip('/').lower()
+                                                    if username and username not in profile_by_username:
+                                                        profile_by_username[username] = p
+                                                    # Also add no-hyphen version
+                                                    no_hyphen = username.replace('-', '')
+                                                    if no_hyphen and no_hyphen not in profile_by_username:
+                                                        profile_by_username[no_hyphen] = p
+
+                                        # Match skipped_urls to profiles using same logic as "already enriched"
+                                        matched_profiles = []
+                                        matched_urls = set()
+                                        for url in skipped_urls:
+                                            norm = normalize_linkedin_url(url)
+                                            if not norm or '/in/' not in norm:
+                                                continue
+                                            username = norm.split('/in/')[-1].rstrip('/').lower()
+                                            username_no_hyphen = username.replace('-', '')
+
+                                            # Try exact match first
+                                            profile = profile_by_username.get(username) or profile_by_username.get(username_no_hyphen)
+
+                                            # Try prefix matching (same as "already enriched" check)
+                                            if not profile:
+                                                for db_user, p in profile_by_username.items():
+                                                    db_no_hyphen = db_user.replace('-', '')
+                                                    if len(db_no_hyphen) >= 5:
+                                                        if username_no_hyphen.startswith(db_no_hyphen) or db_no_hyphen.startswith(username_no_hyphen):
+                                                            profile = p
+                                                            break
+
+                                            if profile:
+                                                p_url = profile.get('linkedin_url', '')
+                                                if p_url not in matched_urls:
+                                                    matched_urls.add(p_url)
+                                                    matched_profiles.append(profile)
 
                                         if matched_profiles:
                                             db_loaded_df = profiles_to_dataframe(matched_profiles)

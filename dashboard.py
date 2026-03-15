@@ -5914,6 +5914,7 @@ with tab_enrich:
 
                         # Query DB by name to check if profiles exist with different URLs
                         db_name_check = {}
+                        db_exact_check = {}  # Check exact URL match with enriched_at status
                         if HAS_DATABASE:
                             try:
                                 db_client = _get_db_client()
@@ -5921,13 +5922,26 @@ with tab_enrich:
                                     for url in new_urls[:5]:
                                         username = url.split('/in/')[-1].rstrip('/').split('?')[0] if '/in/' in str(url) else None
                                         if username:
-                                            # Extract probable name from username
+                                            # First: check for exact URL match and show enriched_at status
+                                            exact_results = db_client.select('profiles', 'name,linkedin_url,enriched_at,enrichment_status',
+                                                filters={'linkedin_url': f'ilike.%/in/{username}'}, limit=1)
+                                            if not exact_results:
+                                                # Also check original_url
+                                                exact_results = db_client.select('profiles', 'name,linkedin_url,enriched_at,enrichment_status',
+                                                    filters={'original_url': f'ilike.%/in/{username}'}, limit=1)
+                                            if exact_results:
+                                                r = exact_results[0]
+                                                db_exact_check[username] = {
+                                                    'name': r.get('name'),
+                                                    'enriched_at': r.get('enriched_at', 'NULL')[:19] if r.get('enriched_at') else 'NULL',
+                                                    'status': r.get('enrichment_status', 'NULL')
+                                                }
+
+                                            # Also search by name for broader matches
                                             name_parts = username.replace('-', ' ').split()
-                                            # Remove numeric suffixes
                                             name_parts = [p for p in name_parts if not p.isdigit() and len(p) > 1]
                                             if name_parts:
-                                                search_name = name_parts[0]  # First name
-                                                # Search DB by name (case-insensitive)
+                                                search_name = name_parts[0]
                                                 results = db_client.select('profiles', 'name,linkedin_url,original_url',
                                                     filters={'name': f'ilike.%{search_name}%'}, limit=3)
                                                 if results:
@@ -5955,6 +5969,10 @@ with tab_enrich:
                                 variants.add(username.replace('-', ''))
                             in_db = variants & recently_enriched_usernames
                             st.write(f"- `{username}` → variants: `{variants}` | in DB: `{in_db}`")
+                            # Show exact URL match status (why not in recently_enriched?)
+                            if username in db_exact_check:
+                                info = db_exact_check[username]
+                                st.write(f"  **EXACT MATCH FOUND:** name={info['name']}, enriched_at={info['enriched_at']}, status={info['status']}")
                             # Show DB name matches if found
                             if username in db_name_check:
                                 st.write(f"  **DB matches by name:** {db_name_check[username]}")

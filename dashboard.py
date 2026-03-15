@@ -5845,6 +5845,53 @@ with tab_enrich:
                         else:
                             new_urls.append(url)
 
+                # Final check: query DB directly for "new_urls" that might exist with older enrichment dates
+                # (outside the refresh_months window but still valid)
+                if new_urls and HAS_DATABASE:
+                    try:
+                        db_client = _get_db_client()
+                        if db_client:
+                            # Build list of usernames to check
+                            urls_to_check = []
+                            for url in new_urls:
+                                normalized = normalize_linkedin_url(url)
+                                if normalized:
+                                    urls_to_check.append(normalized)
+
+                            # Query DB for these URLs (check both linkedin_url and original_url)
+                            if urls_to_check:
+                                # Check in batches to avoid query limits
+                                existing_in_db = set()
+                                for i in range(0, len(urls_to_check), 100):
+                                    batch = urls_to_check[i:i+100]
+                                    # Check linkedin_url
+                                    for url in batch:
+                                        username = url.split('/in/')[-1].rstrip('/') if '/in/' in url else None
+                                        if username:
+                                            results = db_client.select('profiles', 'linkedin_url,original_url',
+                                                filters={'linkedin_url': f'ilike.%{username}%'}, limit=1)
+                                            if results:
+                                                existing_in_db.add(url)
+                                                continue
+                                            # Also check original_url
+                                            results = db_client.select('profiles', 'linkedin_url,original_url',
+                                                filters={'original_url': f'ilike.%{username}%'}, limit=1)
+                                            if results:
+                                                existing_in_db.add(url)
+
+                                # Move found URLs from new_urls to skipped_urls
+                                if existing_in_db:
+                                    still_new = []
+                                    for url in new_urls:
+                                        normalized = normalize_linkedin_url(url)
+                                        if normalized in existing_in_db:
+                                            skipped_urls.append(url)
+                                        else:
+                                            still_new.append(url)
+                                    new_urls = still_new
+                    except Exception as e:
+                        pass  # Silently continue if DB check fails
+
                 # Show stats - skip recently enriched and unavailable by default
                 status_parts = []
                 if new_urls:

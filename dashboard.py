@@ -5993,7 +5993,7 @@ with tab_enrich:
                                         all_profiles = db_client.select('profiles', '*',
                                             filters={'enriched_at': f'gte.{cutoff}'}, limit=50000)
 
-                                        # Build lookup by username (same logic as recently_enriched_usernames)
+                                        # Build lookup by username (SAME variants as recently_enriched_usernames)
                                         profile_by_username = {}
                                         for p in all_profiles:
                                             url = p.get('linkedin_url') or ''
@@ -6001,12 +6001,34 @@ with tab_enrich:
                                             for u in [url, orig]:
                                                 if u and '/in/' in u:
                                                     username = u.split('/in/')[-1].rstrip('/').lower()
-                                                    if username and username not in profile_by_username:
-                                                        profile_by_username[username] = p
-                                                    # Also add no-hyphen version
+                                                    if not username:
+                                                        continue
+
+                                                    # Add all variants (same as _get_enriched_urls_fresh)
+                                                    variants = [username]
+
+                                                    # Base username without alphanumeric suffix
+                                                    match = re.match(r'^([a-z-]+?)(?:-?[a-z0-9]{6,})$', username, re.IGNORECASE)
+                                                    if match:
+                                                        base = match.group(1).rstrip('-')
+                                                        if base and base != username:
+                                                            variants.append(base)
+
+                                                    # First part before last hyphen (if suffix >= 3 chars)
+                                                    if '-' in username:
+                                                        parts = username.rsplit('-', 1)
+                                                        if len(parts[1]) >= 3:
+                                                            variants.append(parts[0])
+
+                                                    # Hyphen-free version
                                                     no_hyphen = username.replace('-', '')
-                                                    if no_hyphen and no_hyphen not in profile_by_username:
-                                                        profile_by_username[no_hyphen] = p
+                                                    if no_hyphen and no_hyphen != username:
+                                                        variants.append(no_hyphen)
+
+                                                    # Add all variants to lookup
+                                                    for v in variants:
+                                                        if v and v not in profile_by_username:
+                                                            profile_by_username[v] = p
 
                                         # Match skipped_urls to profiles using same logic as "already enriched"
                                         matched_profiles = []

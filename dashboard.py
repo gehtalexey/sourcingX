@@ -5864,6 +5864,30 @@ with tab_enrich:
                         st.write(f"**Sample DB usernames:** {list(recently_enriched_usernames)[:10]}")
                         st.write("---")
                         st.write(f"**Sample 'to enrich' URLs and their variants:**")
+
+                        # Query DB by name to check if profiles exist with different URLs
+                        db_name_check = {}
+                        if HAS_DATABASE:
+                            try:
+                                db_client = _get_db_client()
+                                if db_client:
+                                    for url in new_urls[:5]:
+                                        username = url.split('/in/')[-1].rstrip('/').split('?')[0] if '/in/' in str(url) else None
+                                        if username:
+                                            # Extract probable name from username
+                                            name_parts = username.replace('-', ' ').split()
+                                            # Remove numeric suffixes
+                                            name_parts = [p for p in name_parts if not p.isdigit() and len(p) > 1]
+                                            if name_parts:
+                                                search_name = name_parts[0]  # First name
+                                                # Search DB by name (case-insensitive)
+                                                results = db_client.select('profiles', 'name,linkedin_url,original_url',
+                                                    filters={'name': f'ilike.%{search_name}%'}, limit=3)
+                                                if results:
+                                                    db_name_check[username] = [(r.get('name'), r.get('linkedin_url', '')[-30:]) for r in results]
+                            except Exception as e:
+                                st.write(f"DB check error: {e}")
+
                         for url in new_urls[:5]:
                             normalized = normalize_linkedin_url(url)
                             username = normalized.split('/in/')[-1].rstrip('/') if normalized and '/in/' in normalized else None
@@ -5884,6 +5908,9 @@ with tab_enrich:
                                 variants.add(username.replace('-', ''))
                             in_db = variants & recently_enriched_usernames
                             st.write(f"- `{username}` → variants: `{variants}` | in DB: `{in_db}`")
+                            # Show DB name matches if found
+                            if username in db_name_check:
+                                st.write(f"  **DB matches by name:** {db_name_check[username]}")
                     # Show next step with correct count (only enriched profiles can be filtered/screened)
                     if skipped_urls:
                         st.success(f"**{len(skipped_urls)}** profiles ready for Filter+ and AI Screen")

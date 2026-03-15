@@ -5892,15 +5892,15 @@ with tab_enrich:
                                             db_loaded_df = profiles_to_dataframe(matched_profiles)
                                             # Replace existing data (don't merge - we want exact matches for this URL list)
                                             enriched_df = db_loaded_df
-                                            merge_msg = f"Loaded **{len(matched_profiles)}** enriched profiles for screening!"
                                             # MEMORY FIX: Only store the DataFrame, not the list (saves ~50MB per 1000 profiles)
                                             st.session_state['enriched_df'] = enriched_df
                                             # Keep passed_candidates_df - needed for Enrich tab URL counting
                                             if 'enriched_results' in st.session_state:
                                                 del st.session_state['enriched_results']
                                             save_session_state()
-                                            st.success(f"{merge_msg} (matched {len(skipped_urls)} input URLs)")
-                                            st.balloons()
+                                            # Store message to show after rerun
+                                            st.session_state['enrichment_message'] = f"success:Loaded {len(matched_profiles)} enriched profiles (matched {len(skipped_urls)} input URLs)"
+                                            st.rerun()
                                         else:
                                             st.warning(f"No matching profiles found for {len(skipped_urls)} URLs. Try re-enriching them.")
                                 except Exception as e:

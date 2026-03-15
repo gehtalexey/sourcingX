@@ -5820,7 +5820,30 @@ with tab_enrich:
                     elif username_variants & recently_enriched_usernames:  # Set intersection
                         skipped_urls.append(url)
                     else:
-                        new_urls.append(url)
+                        # Fallback: substring matching for cases where Crustdata returns shorter username
+                        # e.g., input "nadav-covalio-project-master" -> DB has "nadavcovalio"
+                        found_substring_match = False
+                        if username:
+                            input_no_hyphen = username.replace('-', '').lower()
+                            # Check if any DB username is contained in input (or vice versa)
+                            for db_user in recently_enriched_usernames:
+                                if not db_user:
+                                    continue
+                                db_no_hyphen = db_user.replace('-', '').lower()
+                                # DB username should be at least 5 chars to avoid false positives
+                                if len(db_no_hyphen) >= 5:
+                                    # Check if DB username is prefix of input (most common case)
+                                    if input_no_hyphen.startswith(db_no_hyphen):
+                                        found_substring_match = True
+                                        break
+                                    # Also check if input is prefix of DB (less common)
+                                    if len(input_no_hyphen) >= 5 and db_no_hyphen.startswith(input_no_hyphen):
+                                        found_substring_match = True
+                                        break
+                        if found_substring_match:
+                            skipped_urls.append(url)
+                        else:
+                            new_urls.append(url)
 
                 # Show stats - skip recently enriched and unavailable by default
                 status_parts = []

@@ -5603,6 +5603,8 @@ with tab_enrich:
             st.write(f"**Input URLs to match:** {load_debug.get('input_urls', 'N/A')}")
             st.write(f"**Successfully matched:** {load_debug.get('matched', 'N/A')}")
             st.write(f"**Gap (unmatched):** {load_debug.get('gap', 'N/A')}")
+            if load_debug.get('unmatched_samples'):
+                st.write(f"**Unmatched samples:** {load_debug.get('unmatched_samples')}")
 
     if not HAS_DATABASE:
         st.error("Supabase is not connected. Enrichment is disabled because results won't be saved. Check your supabase_url and supabase_key in secrets.")
@@ -6033,6 +6035,7 @@ with tab_enrich:
                                         # Match skipped_urls to profiles using same logic as "already enriched"
                                         matched_profiles = []
                                         matched_urls = set()
+                                        unmatched_usernames = []  # Track for debug
                                         for url in skipped_urls:
                                             norm = normalize_linkedin_url(url)
                                             if not norm or '/in/' not in norm:
@@ -6057,6 +6060,9 @@ with tab_enrich:
                                                 if p_url not in matched_urls:
                                                     matched_urls.add(p_url)
                                                     matched_profiles.append(profile)
+                                            else:
+                                                if len(unmatched_usernames) < 10:
+                                                    unmatched_usernames.append(username)
 
                                         if matched_profiles:
                                             db_loaded_df = profiles_to_dataframe(matched_profiles)
@@ -6075,7 +6081,8 @@ with tab_enrich:
                                                 'lookup_keys': len(profile_by_username),
                                                 'input_urls': len(skipped_urls),
                                                 'matched': len(matched_profiles),
-                                                'gap': len(skipped_urls) - len(matched_profiles)
+                                                'gap': len(skipped_urls) - len(matched_profiles),
+                                                'unmatched_samples': unmatched_usernames
                                             }
                                             st.session_state['enrichment_message'] = f"success:Loaded {len(matched_profiles)} enriched profiles (matched {len(skipped_urls)} input URLs)"
                                             st.rerun()

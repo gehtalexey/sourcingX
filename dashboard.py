@@ -2628,6 +2628,19 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
                                     matched = True
                                     break
 
+                        # Try first+last name matching against URL parts
+                        # e.g., Crustdata returns "Vered Litman" for input "vered-litman-somekh"
+                        if not matched and cd_first and cd_last:
+                            for map_key, map_url in original_url_map.items():
+                                # Extract name parts from URL (split by hyphen, filter numbers)
+                                url_parts = [p.lower() for p in map_key.replace('-', ' ').split()
+                                            if p and not p.isdigit() and len(p) > 1]
+                                # Check if first AND last name are in URL parts
+                                if cd_first in url_parts and cd_last in url_parts:
+                                    item['_original_url'] = map_url
+                                    matched = True
+                                    break
+
                     if not matched:
                         result_url = item.get('linkedin_flagship_url') or item.get('linkedin_url', '')
                         unmatched.append(extract_username(result_url) or 'NO_USERNAME')
@@ -6279,6 +6292,47 @@ with tab_enrich:
                                             error_debug['db_saved'] = db_failed
                                             error_debug['db_errors'] = db_errors[:5]  # First 5 errors
                                             st.session_state['_error_debug'] = error_debug
+
+                                        # Track unmatched input URLs - save them so they don't keep showing as "to enrich"
+                                        # These are URLs we sent to Crustdata but couldn't match back to a result
+                                        matched_original_urls = set()
+                                        for profile in successful:
+                                            orig = profile.get('_original_url')
+                                            if orig:
+                                                matched_original_urls.add(normalize_linkedin_url(orig))
+
+                                        # Find input URLs that weren't matched to any successful result
+                                        unmatched_inputs = []
+                                        for input_url in original_urls:
+                                            norm_input = normalize_linkedin_url(input_url)
+                                            if norm_input and norm_input not in matched_original_urls:
+                                                # Check if this URL was in an error
+                                                is_error = False
+                                                for err in errors:
+                                                    if isinstance(err, dict):
+                                                        err_url = err.get('_original_url') or err.get('linkedin_url')
+                                                        if err_url and normalize_linkedin_url(err_url) == norm_input:
+                                                            is_error = True
+                                                            break
+                                                if not is_error:
+                                                    unmatched_inputs.append(input_url)
+
+                                        # Save unmatched inputs as "enrichment attempted but unmatched"
+                                        if unmatched_inputs:
+                                            unmatched_saved = 0
+                                            for url in unmatched_inputs:
+                                                try:
+                                                    # Save with original_url set so it can be matched later
+                                                    norm = normalize_linkedin_url(url)
+                                                    if norm:
+                                                        save_failed_enrichment(db_client, norm,
+                                                            error_message='URL matching failed - profile may exist with different URL',
+                                                            original_url=norm)
+                                                        unmatched_saved += 1
+                                                except Exception:
+                                                    pass
+                                            if unmatched_saved > 0:
+                                                st.info(f"Tracked {unmatched_saved} unmatched URLs (won't show as 'to enrich' again)")
                                 except Exception as e:
                                     st.warning(f"Database save failed: {e}")
 

@@ -702,6 +702,20 @@ def match_profiles_by_urls_rpc(
                             matching_input_username = url_username
                         elif original_username and original_username in input_usernames:
                             matching_input_username = original_username
+                        else:
+                            # Fallback: prefix matching (same as "already enriched" check)
+                            # e.g., DB has "nadavcovalio", input has "nadavcovalioprojectmaster"
+                            db_no_hyphen = (url_username or '').replace('-', '').lower()
+                            if len(db_no_hyphen) >= 5:
+                                for input_user in input_usernames:
+                                    input_no_hyphen = input_user.replace('-', '').lower()
+                                    # Check if input starts with DB username or vice versa
+                                    if input_no_hyphen.startswith(db_no_hyphen):
+                                        matching_input_username = input_user
+                                        break
+                                    if len(input_no_hyphen) >= 5 and db_no_hyphen.startswith(input_no_hyphen):
+                                        matching_input_username = input_user
+                                        break
 
                     # Only add if we found a match AND that input hasn't been matched yet
                     if matching_input_url:

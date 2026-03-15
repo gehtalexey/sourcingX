@@ -2593,6 +2593,23 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
                                                 matched = True
                                                 break
 
+                                        # Try prefix matching for short input usernames
+                                        # e.g., input "hai-d" → result "hai-dvash-ba452871"
+                                        if not matched:
+                                            result_no_hyphen = result_username.replace('-', '').lower()
+                                            for map_key, map_url in original_url_map.items():
+                                                map_no_hyphen = map_key.replace('-', '').lower()
+                                                # If input is short and result starts with it
+                                                if len(map_no_hyphen) <= 8 and result_no_hyphen.startswith(map_no_hyphen):
+                                                    item['_original_url'] = map_url
+                                                    matched = True
+                                                    break
+                                                # Or if result is short and input starts with it
+                                                if len(result_no_hyphen) <= 8 and map_no_hyphen.startswith(result_no_hyphen):
+                                                    item['_original_url'] = map_url
+                                                    matched = True
+                                                    break
+
                     # Last resort: name-based matching using Crustdata's returned name
                     if not matched:
                         # Get name from Crustdata response

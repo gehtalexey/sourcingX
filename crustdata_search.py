@@ -123,6 +123,7 @@ def build_filters(
     experience_min: int = None,
     experience_max: int = None,
     skills: List[str] = None,
+    skills_and: bool = False,
     keywords: str = None,
     past_companies: str = None,
     school: str = None,
@@ -149,7 +150,8 @@ def build_filters(
         headcount: List of headcount ranges (in operator)
         experience_min: Minimum years of experience (>= operator)
         experience_max: Maximum years of experience (<= operator)
-        skills: List of skills (OR logic - any skill matches)
+        skills: List of skills
+        skills_and: If True, require ALL skills (AND). If False, require ANY skill (OR)
         keywords: Comma-separated keywords (OR across headline/summary/skills)
         past_companies: Comma-separated past company names (substring match)
         school: School/university name (substring match)
@@ -248,7 +250,7 @@ def build_filters(
             "value": experience_max + 1  # "<= 10" becomes "< 11"
         })
 
-    # Skills filter (OR logic - any skill matches)
+    # Skills filter (AND or OR based on skills_and flag)
     if skills and len(skills) > 0:
         skill_values = [s.strip() if isinstance(s, str) else str(s) for s in skills]
         skill_values = [s for s in skill_values if s]
@@ -263,10 +265,15 @@ def build_filters(
                 {"column": "skills", "type": "[.]", "value": s}
                 for s in skill_values
             ]
-            conditions.append({
-                "op": "or",
-                "conditions": skill_conditions
-            })
+            if skills_and:
+                # AND mode: add each skill as separate condition (all must match)
+                conditions.extend(skill_conditions)
+            else:
+                # OR mode: wrap in OR condition (any must match)
+                conditions.append({
+                    "op": "or",
+                    "conditions": skill_conditions
+                })
 
     # Keywords filter (OR across headline, summary, skills)
     if keywords and keywords.strip():

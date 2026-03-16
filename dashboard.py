@@ -4142,11 +4142,19 @@ with tab_search:
             with st.expander("Advanced Filters"):
                 adv_col1, adv_col2 = st.columns(2)
                 with adv_col1:
-                    search_skills = st.text_input(
-                        "Skills (any of, comma = OR)",
-                        key="crust_search_skills",
-                        placeholder="e.g., python, kubernetes, terraform"
-                    )
+                    skills_col1, skills_col2 = st.columns([3, 1])
+                    with skills_col1:
+                        search_skills = st.text_input(
+                            "Skills",
+                            key="crust_search_skills",
+                            placeholder="e.g., python, kubernetes, terraform"
+                        )
+                    with skills_col2:
+                        search_skills_and = st.checkbox(
+                            "AND",
+                            key="crust_search_skills_and",
+                            help="Check for AND (must have all), uncheck for OR (any of)"
+                        )
                     search_school = st.text_input(
                         "School/University",
                         key="crust_search_school",
@@ -4230,6 +4238,7 @@ with tab_search:
                     experience_min=search_exp_min if search_exp_min > 0 else None,
                     experience_max=search_exp_max if search_exp_max > 0 else None,
                     skills=skills_list,
+                    skills_and=search_skills_and,
                     keywords=search_keywords if search_keywords else None,
                     past_companies=search_past_companies if search_past_companies else None,
                     school=search_school if search_school else None,
@@ -4409,6 +4418,7 @@ with tab_search:
                                     experience_min=st.session_state.get('crust_search_exp_min', 0) or None,
                                     experience_max=st.session_state.get('crust_search_exp_max', 0) or None,
                                     skills=skills_list if skills_list else None,
+                                    skills_and=st.session_state.get('crust_search_skills_and', False),
                                     keywords=st.session_state.get('crust_search_keywords'),
                                     past_companies=st.session_state.get('crust_search_past_companies'),
                                     school=st.session_state.get('crust_search_school'),
@@ -6523,6 +6533,13 @@ with tab_enrich:
                                         st.session_state['enriched_df'] = db_loaded_df
                                         if 'enriched_results' in st.session_state:
                                             del st.session_state['enriched_results']
+                                        # Update _enriched_loaded_urls with actual profile URLs (for Filter+ tab)
+                                        loaded_urls = set()
+                                        for p in matched_profiles:
+                                            url = p.get('linkedin_url', '')
+                                            if url:
+                                                loaded_urls.add(normalize_linkedin_url(url))
+                                        st.session_state['_enriched_loaded_urls'] = loaded_urls
                                         save_session_state()
                                         st.session_state['_load_debug'] = {
                                             'input_urls': len(skipped_urls),

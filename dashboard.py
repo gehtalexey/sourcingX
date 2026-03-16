@@ -2231,6 +2231,10 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.rename(columns=rename_dict)
 
+    # Remove duplicate columns (keep first occurrence)
+    # This can happen when CSV has both 'fullName' and 'name' columns
+    df = df.loc[:, ~df.columns.duplicated(keep='first')]
+
     # Fallback: auto-detect LinkedIn URL column if not found
     if 'linkedin_url' not in df.columns:
         def is_regular_linkedin_url(url):
@@ -4297,6 +4301,9 @@ with tab_search:
                 if not current_company:
                     current_company = profile.get("company", "")
 
+                # Use flagship_profile_url (clean URL) not linkedin_profile_url (URN format)
+                linkedin_url = profile.get("flagship_profile_url") or profile.get("linkedin_flagship_url") or profile.get("linkedin_profile_url", "")
+
                 display_data.append({
                     "idx": i,
                     "Select": i in st.session_state.get('crustdata_search_selected', []),
@@ -4305,14 +4312,14 @@ with tab_search:
                     "Company": current_company,
                     "Location": profile.get("region", ""),
                     "Exp": f"{profile.get('years_of_experience_raw', '')}y" if profile.get('years_of_experience_raw') else "",
-                    "LinkedIn": profile.get("linkedin_profile_url") or profile.get("linkedin_flagship_url", ""),
+                    "LinkedIn": linkedin_url,
                 })
 
             display_df = pd.DataFrame(display_data)
 
             # Display with data_editor for selection
             edited_df = st.data_editor(
-                display_df[["Select", "Name", "Title", "Company", "Location", "Exp"]],
+                display_df[["Select", "Name", "Title", "Company", "Location", "Exp", "LinkedIn"]],
                 hide_index=True,
                 use_container_width=True,
                 column_config={
@@ -4322,8 +4329,9 @@ with tab_search:
                     "Company": st.column_config.TextColumn("Company", width="medium"),
                     "Location": st.column_config.TextColumn("Location", width="small"),
                     "Exp": st.column_config.TextColumn("Exp", width="small"),
+                    "LinkedIn": st.column_config.LinkColumn("LinkedIn", width="medium", display_text="View"),
                 },
-                disabled=["Name", "Title", "Company", "Location", "Exp"],
+                disabled=["Name", "Title", "Company", "Location", "Exp", "LinkedIn"],
                 key="crust_results_editor"
             )
 
@@ -6227,113 +6235,123 @@ with tab_enrich:
                                     username_set.add(no_hyphen)
                     return url_list, url_set, username_set
 
-                recently_enriched = set()
-                recently_enriched_usernames = set()
-                recently_enriched_list = []
                 not_found_urls_db = set()  # URLs marked as not_found in Crustdata
-                not_found_usernames = set()
                 db_check_error = None
                 refresh_months = 3  # Default fallback
+
+                # These will be populated by the unified matching logic
+                new_urls = []
+                skipped_urls = []
+                unavailable_urls = []
+                matched_profiles_cache = {}  # url -> profile (for Load from DB)
+
                 if HAS_DATABASE:
                     try:
                         refresh_months = ENRICHMENT_REFRESH_MONTHS
-                        recently_enriched_list, recently_enriched, recently_enriched_usernames = _get_enriched_urls_fresh(refresh_months)
+                        db_client = _get_db_client()
 
-                        # Also get URLs marked as not_found (Crustdata doesn't have them)
+                        # Get URLs marked as not_found
                         try:
-                            not_found_list = get_not_found_urls(_get_db_client(), months=refresh_months)
+                            not_found_list = get_not_found_urls(db_client, months=refresh_months)
                             not_found_urls_db = set(normalize_linkedin_url(u) for u in not_found_list if u)
                         except Exception as e:
                             st.warning(f"Could not fetch not_found URLs: {e}")
+
+                        # UNIFIED MATCHING: Fetch profiles and build lookup (same as Load from DB)
+                        cutoff = (datetime.utcnow() - timedelta(days=refresh_months * 30)).isoformat()
+                        all_profiles = db_client.select('profiles', '*',
+                            filters={'enriched_at': f'gte.{cutoff}'}, limit=50000)
+
+                        # Build profile lookup by username variants (SAME logic as Load from DB)
+                        import re
+                        profile_by_username = {}
+                        for p in all_profiles:
+                            url = p.get('linkedin_url') or ''
+                            orig = p.get('original_url') or ''
+                            for u in [url, orig]:
+                                if u and '/in/' in u:
+                                    username = u.split('/in/')[-1].rstrip('/').lower()
+                                    if not username:
+                                        continue
+
+                                    variants = [username]
+
+                                    # Base username without alphanumeric suffix
+                                    match = re.match(r'^([a-z-]+?)(?:-?[a-z0-9]{6,})$', username, re.IGNORECASE)
+                                    if match:
+                                        base = match.group(1).rstrip('-')
+                                        if base and base != username:
+                                            variants.append(base)
+                                            variants.append(base.replace('-', ''))
+
+                                    # First part before last hyphen
+                                    if '-' in username:
+                                        parts = username.rsplit('-', 1)
+                                        if len(parts[1]) >= 3:
+                                            variants.append(parts[0])
+                                            variants.append(parts[0].replace('-', ''))
+
+                                    # Hyphen-free version
+                                    no_hyphen = username.replace('-', '')
+                                    if no_hyphen and no_hyphen != username:
+                                        variants.append(no_hyphen)
+
+                                    # Add all variants to lookup
+                                    for v in variants:
+                                        if v:
+                                            if v not in profile_by_username:
+                                                profile_by_username[v] = []
+                                            if p not in profile_by_username[v]:
+                                                profile_by_username[v].append(p)
+
+                        # Now match each input URL using SAME logic as Load from DB
+                        for url in urls:
+                            normalized = normalize_linkedin_url(url)
+
+                            # Check not_found first
+                            if normalized in not_found_urls_db:
+                                unavailable_urls.append(url)
+                                continue
+
+                            if not normalized or '/in/' not in normalized:
+                                new_urls.append(url)
+                                continue
+
+                            username = normalized.split('/in/')[-1].rstrip('/').lower()
+                            username_no_hyphen = username.replace('-', '')
+
+                            # Try exact match first
+                            candidates = profile_by_username.get(username, []) or profile_by_username.get(username_no_hyphen, [])
+
+                            # Try prefix matching
+                            if not candidates:
+                                for db_user, profiles_list in profile_by_username.items():
+                                    db_no_hyphen = db_user.replace('-', '')
+                                    if len(db_no_hyphen) >= 5:
+                                        if username_no_hyphen.startswith(db_no_hyphen) or (len(username_no_hyphen) >= 5 and db_no_hyphen.startswith(username_no_hyphen)):
+                                            candidates = profiles_list
+                                            break
+
+                            if candidates:
+                                skipped_urls.append(url)
+                                matched_profiles_cache[url] = candidates[0]  # Store the matched profile
+                            else:
+                                new_urls.append(url)
+
                     except Exception as e:
                         db_check_error = str(e)
-
-                # Filter URLs into categories (fuzzy username matching to handle Crustdata URL variations)
-                import re
-                new_urls = []
-                skipped_urls = []
-                skipped_matched_usernames = {}  # Track which DB username matched each skipped URL
-                unavailable_urls = []  # Not found in Crustdata
-                for url in urls:
-                    normalized = normalize_linkedin_url(url) if HAS_DATABASE else url
-                    username = normalized.split('/in/')[-1].rstrip('/') if normalized and '/in/' in normalized else None
-
-                    # Generate username variations for matching
-                    username_variants = set()
-                    if username:
-                        username_variants.add(username)
-                        # Extract base username (without alphanumeric suffix)
-                        # LinkedIn suffixes: -123, -abc123, 14b8a717b
-                        base = None
-                        match = re.match(r'^([a-z-]+?)(?:-?[a-z0-9]{6,})$', username, re.IGNORECASE)
-                        if match:
-                            base = match.group(1).rstrip('-')
-                            if base:
-                                username_variants.add(base)
-                                # CRITICAL: Also add base without hyphens (matches Crustdata clean URLs)
-                                # e.g., "gabi-davar" -> "gabidavar" (matches DB's gabidavar)
-                                username_variants.add(base.replace('-', ''))
-                        # Also try simple hyphen split for shorter suffixes
-                        if '-' in username:
-                            parts = username.rsplit('-', 1)
-                            if len(parts[1]) >= 3:  # Suffix at least 3 chars
-                                username_variants.add(parts[0])
-                                # Also add this base without hyphens
-                                username_variants.add(parts[0].replace('-', ''))
-                        # Hyphen-free version of full username
-                        no_hyphen = username.replace('-', '')
-                        if no_hyphen:
-                            username_variants.add(no_hyphen)
-
-                    # Check if marked as not_found first (exact match only)
-                    if normalized in not_found_urls_db:
-                        unavailable_urls.append(url)
-                    # Then check if recently enriched (URL match or any username variant match)
-                    elif normalized in recently_enriched:
-                        skipped_urls.append(url)
-                        skipped_matched_usernames[url] = username  # Track matched username
-                    elif username_variants & recently_enriched_usernames:  # Set intersection
-                        skipped_urls.append(url)
-                        # Track which variant matched
-                        matched = username_variants & recently_enriched_usernames
-                        skipped_matched_usernames[url] = list(matched)[0] if matched else username
-                    else:
-                        # Fallback: substring matching for cases where Crustdata returns shorter username
-                        # e.g., input "nadav-covalio-project-master" -> DB has "nadavcovalio"
-                        found_substring_match = False
-                        matched_db_user = None
-                        if username:
-                            input_no_hyphen = username.replace('-', '').lower()
-                            # Check if any DB username is contained in input (or vice versa)
-                            for db_user in recently_enriched_usernames:
-                                if not db_user:
-                                    continue
-                                db_no_hyphen = db_user.replace('-', '').lower()
-                                # DB username should be at least 5 chars to avoid false positives
-                                if len(db_no_hyphen) >= 5:
-                                    # Check if DB username is prefix of input (most common case)
-                                    if input_no_hyphen.startswith(db_no_hyphen):
-                                        found_substring_match = True
-                                        matched_db_user = db_user
-                                        break
-                                    # Also check if input is prefix of DB (less common)
-                                    if len(input_no_hyphen) >= 5 and db_no_hyphen.startswith(input_no_hyphen):
-                                        found_substring_match = True
-                                        matched_db_user = db_user
-                                        break
-                        if found_substring_match:
-                            skipped_urls.append(url)
-                            skipped_matched_usernames[url] = matched_db_user  # Track the DB username that matched
-                        else:
-                            new_urls.append(url)
+                        # Fallback: all URLs are new
+                        new_urls = list(urls)
+                else:
+                    new_urls = list(urls)
 
                 # Deduplicate URLs (preserve order, keep first occurrence)
                 skipped_urls = list(dict.fromkeys(skipped_urls))
                 new_urls = list(dict.fromkeys(new_urls))
                 unavailable_urls = list(dict.fromkeys(unavailable_urls))
 
-                # Store matched usernames in session state for Load from DB
-                st.session_state['_skipped_matched_usernames'] = skipped_matched_usernames
+                # Store matched profiles in session state for Load from DB (guaranteed 0 gap)
+                st.session_state['_matched_profiles_cache'] = matched_profiles_cache
 
 
                 # Show stats - skip recently enriched and unavailable by default
@@ -6351,8 +6369,8 @@ with tab_enrich:
                 # Debug: show why URLs are marked as "to enrich"
                 if new_urls:
                     with st.expander(f"Debug: {len(new_urls)} URLs marked 'to enrich'", expanded=False):
-                        st.write(f"**DB has {len(recently_enriched_usernames)} usernames**")
-                        st.write(f"**Sample DB usernames:** {list(recently_enriched_usernames)[:10]}")
+                        st.write(f"**DB has {len(matched_profiles_cache)} matched profiles**")
+                        st.write(f"**Sample matched URLs:** {list(matched_profiles_cache.keys())[:10]}")
                         st.write("---")
                         st.write(f"**Sample 'to enrich' URLs and their variants:**")
 
@@ -6411,8 +6429,8 @@ with tab_enrich:
                                         variants.add(parts[0])
                                         variants.add(parts[0].replace('-', ''))  # base-no-hyphen
                                 variants.add(username.replace('-', ''))
-                            in_db = variants & recently_enriched_usernames
-                            st.write(f"- `{username}` → variants: `{variants}` | in DB: `{in_db}`")
+                            in_cache = url in matched_profiles_cache
+                            st.write(f"- `{username}` → variants: `{variants}` | matched: `{in_cache}`")
                             # Show exact URL match status (why not in recently_enriched?)
                             if username in db_exact_check:
                                 info = db_exact_check[username]
@@ -6432,138 +6450,37 @@ with tab_enrich:
                     # Option to load enriched profiles from DB for this list
                     if HAS_DATABASE and len(skipped_urls) > 0:
                         if st.button(f"Load {len(skipped_urls)} enriched profiles for screening", type="primary", key="load_enriched_for_list"):
-                            with st.spinner("Loading profiles from database..."):
+                            with st.spinner("Loading profiles..."):
                                 try:
-                                    db_client = _get_db_client()
-                                    if not db_client:
-                                        st.error("Database connection failed")
+                                    # Use cached profiles from detection (guaranteed 0 gap - same matching logic)
+                                    matched_profiles_cache = st.session_state.get('_matched_profiles_cache', {})
+
+                                    # Collect unique profiles (dedupe by linkedin_url)
+                                    matched_profiles = []
+                                    matched_urls = set()
+                                    for url in skipped_urls:
+                                        profile = matched_profiles_cache.get(url)
+                                        if profile:
+                                            p_url = profile.get('linkedin_url', '')
+                                            if p_url not in matched_urls:
+                                                matched_urls.add(p_url)
+                                                matched_profiles.append(profile)
+
+                                    if matched_profiles:
+                                        db_loaded_df = profiles_to_dataframe(matched_profiles)
+                                        st.session_state['enriched_df'] = db_loaded_df
+                                        if 'enriched_results' in st.session_state:
+                                            del st.session_state['enriched_results']
+                                        save_session_state()
+                                        st.session_state['_load_debug'] = {
+                                            'input_urls': len(skipped_urls),
+                                            'matched': len(matched_profiles),
+                                            'gap': 0
+                                        }
+                                        st.session_state['enrichment_message'] = f"success:Loaded {len(matched_profiles)} enriched profiles"
+                                        st.rerun()
                                     else:
-                                        # Fetch all recently enriched profiles and match client-side
-                                        # This ensures same matching logic as "already enriched" check
-                                        cutoff = (datetime.utcnow() - timedelta(days=refresh_months * 30)).isoformat()
-                                        all_profiles = db_client.select('profiles', '*',
-                                            filters={'enriched_at': f'gte.{cutoff}'}, limit=50000)
-
-                                        # Build lookup by username (SAME variants as recently_enriched_usernames)
-                                        # FIX: Store LIST of profiles per variant to handle collisions
-                                        profile_by_username = {}
-                                        for p in all_profiles:
-                                            url = p.get('linkedin_url') or ''
-                                            orig = p.get('original_url') or ''
-                                            for u in [url, orig]:
-                                                if u and '/in/' in u:
-                                                    username = u.split('/in/')[-1].rstrip('/').lower()
-                                                    if not username:
-                                                        continue
-
-                                                    # Add all variants (same as _get_enriched_urls_fresh)
-                                                    variants = [username]
-
-                                                    # Base username without alphanumeric suffix
-                                                    match = re.match(r'^([a-z-]+?)(?:-?[a-z0-9]{6,})$', username, re.IGNORECASE)
-                                                    if match:
-                                                        base = match.group(1).rstrip('-')
-                                                        if base and base != username:
-                                                            variants.append(base)
-                                                            # SYNC FIX: Also add base without hyphens
-                                                            variants.append(base.replace('-', ''))
-
-                                                    # First part before last hyphen (if suffix >= 3 chars)
-                                                    if '-' in username:
-                                                        parts = username.rsplit('-', 1)
-                                                        if len(parts[1]) >= 3:
-                                                            variants.append(parts[0])
-                                                            # SYNC FIX: Also add this base without hyphens
-                                                            variants.append(parts[0].replace('-', ''))
-
-                                                    # Hyphen-free version
-                                                    no_hyphen = username.replace('-', '')
-                                                    if no_hyphen and no_hyphen != username:
-                                                        variants.append(no_hyphen)
-
-                                                    # Add all variants to lookup (store LIST to handle collisions)
-                                                    for v in variants:
-                                                        if v:
-                                                            if v not in profile_by_username:
-                                                                profile_by_username[v] = []
-                                                            # Only add if this profile not already in list
-                                                            if p not in profile_by_username[v]:
-                                                                profile_by_username[v].append(p)
-
-                                        # Match skipped_urls to profiles using same logic as "already enriched"
-                                        matched_profiles = []
-                                        matched_urls = set()
-                                        unmatched_usernames = []  # Track for debug
-                                        # Get the matched usernames from detection phase
-                                        matched_usernames_map = st.session_state.get('_skipped_matched_usernames', {})
-
-                                        for url in skipped_urls:
-                                            norm = normalize_linkedin_url(url)
-                                            if not norm or '/in/' not in norm:
-                                                continue
-                                            username = norm.split('/in/')[-1].rstrip('/').lower()
-                                            username_no_hyphen = username.replace('-', '')
-
-                                            # PRIORITY 1: Use the matched username from detection phase
-                                            candidates = []
-                                            if url in matched_usernames_map:
-                                                matched_key = matched_usernames_map[url]
-                                                if matched_key:
-                                                    candidates = profile_by_username.get(matched_key.lower(), [])
-                                                    # Also try without hyphens
-                                                    if not candidates:
-                                                        candidates = profile_by_username.get(matched_key.lower().replace('-', ''), [])
-
-                                            # PRIORITY 2: Try exact match on input username
-                                            if not candidates:
-                                                candidates = profile_by_username.get(username, []) or profile_by_username.get(username_no_hyphen, [])
-
-                                            # PRIORITY 3: Try prefix matching (same as "already enriched" check)
-                                            if not candidates:
-                                                for db_user, profiles_list in profile_by_username.items():
-                                                    db_no_hyphen = db_user.replace('-', '')
-                                                    # SYNC FIX: Add same length check as "already enriched" (line 5882)
-                                                    if len(db_no_hyphen) >= 5:
-                                                        if username_no_hyphen.startswith(db_no_hyphen) or (len(username_no_hyphen) >= 5 and db_no_hyphen.startswith(username_no_hyphen)):
-                                                            candidates = profiles_list
-                                                            break
-
-                                            # Add all matching profiles
-                                            if candidates:
-                                                for profile in candidates:
-                                                    p_url = profile.get('linkedin_url', '')
-                                                    if p_url not in matched_urls:
-                                                        matched_urls.add(p_url)
-                                                        matched_profiles.append(profile)
-                                            else:
-                                                if len(unmatched_usernames) < 10:
-                                                    unmatched_usernames.append(username)
-
-                                        if matched_profiles:
-                                            db_loaded_df = profiles_to_dataframe(matched_profiles)
-                                            # Replace existing data (don't merge - we want exact matches for this URL list)
-                                            enriched_df = db_loaded_df
-                                            # MEMORY FIX: Only store the DataFrame, not the list (saves ~50MB per 1000 profiles)
-                                            st.session_state['enriched_df'] = enriched_df
-                                            # Keep passed_candidates_df - needed for Enrich tab URL counting
-                                            if 'enriched_results' in st.session_state:
-                                                del st.session_state['enriched_results']
-                                            save_session_state()
-                                            # Store message to show after rerun
-                                            # Store debug info
-                                            st.session_state['_load_debug'] = {
-                                                'db_profiles': len(all_profiles),
-                                                'lookup_keys': len(profile_by_username),
-                                                'input_urls': len(skipped_urls),
-                                                'matched': len(matched_profiles),
-                                                'gap': len(skipped_urls) - len(matched_profiles),
-                                                'unmatched_samples': unmatched_usernames
-                                            }
-                                            st.session_state['enrichment_message'] = f"success:Loaded {len(matched_profiles)} enriched profiles (matched {len(skipped_urls)} input URLs)"
-                                            st.rerun()
-                                        else:
-                                            st.warning(f"No matching profiles found for {len(skipped_urls)} URLs. Try re-enriching them.")
-                                            st.write(f"Debug: DB returned {len(all_profiles)} profiles, lookup has {len(profile_by_username)} keys")
+                                        st.warning("No cached profiles found. Please refresh the page and try again.")
                                 except Exception as e:
                                     st.error(f"Error loading profiles: {e}")
 
@@ -9337,6 +9254,224 @@ with tab_database:
                                 st.error("Request timed out. Try again.")
                             except Exception as e:
                                 st.error(f"Error: {e}")
+
+                # --- Import Enriched Profiles Section ---
+                st.divider()
+                st.markdown("#### Import Enriched Profiles")
+                st.caption("Upload fully enriched Crustdata profiles directly to database (data only, bypasses normal flow)")
+
+                import_file = st.file_uploader(
+                    "Upload Crustdata export",
+                    type=['csv', 'json'],
+                    key="db_import_file",
+                    help="CSV or JSON export from Crustdata with full profile data"
+                )
+
+                if import_file:
+                    # Parse the uploaded file
+                    try:
+                        if import_file.name.endswith('.json'):
+                            import_data = json.load(import_file)
+                            if isinstance(import_data, list):
+                                import_df = pd.DataFrame(import_data)
+                            else:
+                                import_df = pd.DataFrame([import_data])
+                        else:
+                            import_file.seek(0)
+                            import_df = pd.read_csv(import_file)
+
+                        # Validate Crustdata format
+                        url_candidates = ['linkedin_flagship_url', 'linkedin_url']
+                        # Core Crustdata columns (skills is optional - some profiles have none)
+                        enrichment_cols = ['first_name', 'last_name', 'headline', 'current_employers', 'past_employers', 'all_employers', 'all_titles']
+
+                        has_url = any(c in import_df.columns for c in url_candidates)
+                        enrichment_score = sum(1 for c in enrichment_cols if c in import_df.columns)
+
+                        # Detect URL column
+                        url_col = None
+                        for c in url_candidates:
+                            if c in import_df.columns:
+                                url_col = c
+                                break
+
+                        if not has_url:
+                            st.error("Invalid format: Missing LinkedIn URL column (linkedin_flagship_url or linkedin_url)")
+                        elif enrichment_score < 3:
+                            st.warning(f"This doesn't look like a Crustdata export. Found only {enrichment_score}/7 expected columns.")
+                            st.caption(f"Expected: {', '.join(enrichment_cols)}")
+                            st.caption(f"Found: {', '.join(import_df.columns[:15])}...")
+                        else:
+                            st.success(f"Loaded **{len(import_df)}** enriched profiles from {import_file.name}")
+                            st.caption(f"Detected {enrichment_score}/7 Crustdata fields")
+
+                            # Preview data
+                            with st.expander("Preview (first 5 rows)", expanded=True):
+                                preview_cols = []
+                                if url_col:
+                                    preview_cols.append(url_col)
+
+                                # Add key enrichment columns for preview
+                                for c in ['name', 'first_name', 'headline', 'all_employers', 'all_titles']:
+                                    if c in import_df.columns and c not in preview_cols:
+                                        preview_cols.append(c)
+
+                                st.dataframe(import_df[preview_cols].head(5), hide_index=True)
+
+                            # Check which profiles already exist in DB (batch check for speed)
+                            from db import get_enriched_urls
+                            csv_urls = import_df[url_col].dropna().tolist()
+                            normalized_urls = [normalize_linkedin_url(str(u)) for u in csv_urls if u]
+                            normalized_urls = [u for u in normalized_urls if u]  # Remove None
+
+                            with st.spinner("Checking for existing profiles..."):
+                                db_urls = get_enriched_urls(db_client)
+                                existing_urls = [u for u in normalized_urls if u in db_urls]
+                                new_urls = [u for u in normalized_urls if u not in db_urls]
+
+                            # Show summary
+                            if existing_urls:
+                                st.warning(f"**{len(existing_urls)}** profiles already in database (will be updated), **{len(new_urls)}** new")
+                                with st.expander(f"Show existing URLs ({len(existing_urls)})", expanded=False):
+                                    for url in existing_urls[:20]:
+                                        st.text(f"- {url}")
+                                    if len(existing_urls) > 20:
+                                        st.text(f"... and {len(existing_urls) - 20} more")
+                            else:
+                                st.info(f"All **{len(new_urls)}** profiles are new (not in database)")
+
+                            # Import button
+                            if st.button("Import to Database", key="db_import_btn", type="primary"):
+                                from datetime import datetime as dt
+
+                                def build_raw_data_from_row(row):
+                                    """Build raw_data dict from a Crustdata CSV row."""
+                                    raw = {}
+                                    for col in row.index:
+                                        val = row[col]
+                                        if pd.notna(val):
+                                            if isinstance(val, str) and (val.startswith('[') or val.startswith('{')):
+                                                try:
+                                                    val = json.loads(val.replace("'", '"'))
+                                                except:
+                                                    pass
+                                            raw[col] = val
+                                    return raw
+
+                                def prepare_profile_row(url, raw_data):
+                                    """Prepare a profile dict for batch upsert."""
+                                    cd = raw_data or {}
+
+                                    # Extract name
+                                    name = cd.get('name') or ''
+                                    if not name:
+                                        name = f"{cd.get('first_name', '')} {cd.get('last_name', '')}".strip()
+
+                                    # Extract title/company
+                                    current_title, current_company = None, None
+                                    current_employers = cd.get('current_employers') or []
+                                    if current_employers and isinstance(current_employers, list) and current_employers[0]:
+                                        emp = current_employers[0]
+                                        if isinstance(emp, dict):
+                                            current_title = emp.get('employee_title') or emp.get('title')
+                                            current_company = emp.get('employer_name') or emp.get('company_name')
+
+                                    if not current_title or not current_company:
+                                        headline = cd.get('headline', '')
+                                        if headline and ' at ' in headline:
+                                            parts = headline.split(' at ', 1)
+                                            current_title = current_title or parts[0].strip()
+                                            if len(parts) > 1:
+                                                current_company = current_company or parts[1].split('/')[0].strip()
+
+                                    # Extract arrays
+                                    all_employers = [str(x) for x in (cd.get('all_employers') or []) if x]
+                                    all_titles = [str(x) for x in (cd.get('all_titles') or []) if x]
+                                    all_schools = [str(x) for x in (cd.get('all_schools') or []) if x]
+                                    skills = [str(x) for x in (cd.get('skills') or []) if x]
+
+                                    now = dt.utcnow().isoformat()
+                                    data = {
+                                        'linkedin_url': url,
+                                        'raw_data': raw_data,
+                                        'name': name or None,
+                                        'location': cd.get('location') or None,
+                                        'current_title': current_title,
+                                        'current_company': current_company,
+                                        'all_employers': all_employers or None,
+                                        'all_titles': all_titles or None,
+                                        'all_schools': all_schools or None,
+                                        'skills': skills or None,
+                                        'status': 'enriched',
+                                        'enriched_at': now,
+                                        'enrichment_status': 'enriched',
+                                        'enrichment_attempted_at': now,
+                                    }
+                                    return {k: v for k, v in data.items() if v is not None}
+
+                                # Prepare all profiles for batch upsert
+                                status_text = st.empty()
+                                status_text.text("Preparing profiles...")
+
+                                rows_to_upsert = []
+                                import_errors = []
+
+                                for idx, row in import_df.iterrows():
+                                    url = row.get(url_col)
+                                    if pd.isna(url) or not url:
+                                        import_errors.append((idx, "No LinkedIn URL"))
+                                        continue
+
+                                    url = normalize_linkedin_url(str(url))
+                                    if not url:
+                                        import_errors.append((idx, "Invalid LinkedIn URL"))
+                                        continue
+
+                                    raw_data = build_raw_data_from_row(row)
+                                    rows_to_upsert.append(prepare_profile_row(url, raw_data))
+
+                                if not rows_to_upsert:
+                                    status_text.empty()
+                                    st.error(f"No valid profiles to import. {len(import_errors)} errors.")
+                                else:
+                                    # Batch upsert in chunks of 500
+                                    BATCH_SIZE = 500
+                                    progress_bar = st.progress(0)
+                                    total_batches = (len(rows_to_upsert) + BATCH_SIZE - 1) // BATCH_SIZE
+
+                                    for batch_num in range(total_batches):
+                                        start_idx = batch_num * BATCH_SIZE
+                                        end_idx = min(start_idx + BATCH_SIZE, len(rows_to_upsert))
+                                        batch = rows_to_upsert[start_idx:end_idx]
+
+                                        status_text.text(f"Uploading batch {batch_num + 1}/{total_batches} ({len(batch)} profiles)...")
+                                        try:
+                                            db_client.upsert_batch('profiles', batch, on_conflict='linkedin_url')
+                                        except Exception as e:
+                                            import_errors.append((f"Batch {batch_num + 1}", str(e)))
+
+                                        progress_bar.progress((batch_num + 1) / total_batches)
+
+                                    progress_bar.empty()
+                                    status_text.empty()
+
+                                    # Show results (use pre-computed counts from duplicate check)
+                                    if import_errors:
+                                        st.warning(f"Imported **{len(rows_to_upsert)}** profiles with **{len(import_errors)}** errors")
+                                        with st.expander(f"Errors ({len(import_errors)})", expanded=False):
+                                            for err in import_errors[:20]:
+                                                st.text(f"{err[0]}: {err[1]}")
+                                            if len(import_errors) > 20:
+                                                st.text(f"... and {len(import_errors) - 20} more")
+                                    else:
+                                        st.success(f"Imported **{len(new_urls)}** new, updated **{len(existing_urls)}** existing")
+
+                                    # Clear the file uploader state
+                                    st.session_state.pop('db_import_file', None)
+                                    st.rerun()
+
+                    except Exception as e:
+                        st.error(f"Error parsing file: {e}")
 
         except Exception as e:
             st.error(f"Database error: {e}")

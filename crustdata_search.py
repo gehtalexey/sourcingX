@@ -127,6 +127,7 @@ def build_filters(
     skill_groups: List[str] = None,
     keywords: str = None,
     past_companies: str = None,
+    past_titles: str = None,
     school: str = None,
     recently_changed_jobs: bool = None,
     has_verified_email: bool = None,
@@ -157,6 +158,7 @@ def build_filters(
                       E.g., ["aws, gcp", "docker, kubernetes"] means (AWS OR GCP) AND (Docker OR Kubernetes)
         keywords: Comma-separated keywords (OR across headline/summary/skills)
         past_companies: Comma-separated past company names (substring match)
+        past_titles: Comma-separated past job titles (substring match)
         school: School/university name (substring match)
         recently_changed_jobs: If True, filter for job changes in last 90 days
         has_verified_email: If True, filter for verified business email
@@ -350,6 +352,23 @@ def build_filters(
             conditions.append({
                 "op": "or",
                 "conditions": past_company_conditions
+            })
+
+    # Past titles filter
+    if past_titles and past_titles.strip():
+        title_list = [t.strip() for t in past_titles.split(',') if t.strip()]
+        if title_list:
+            # OR condition for past titles
+            past_title_conditions = []
+            for pt in title_list:
+                past_title_conditions.append({
+                    "column": "past_employers.title",
+                    "type": "[.]",
+                    "value": pt
+                })
+            conditions.append({
+                "op": "or",
+                "conditions": past_title_conditions
             })
 
     # School filter

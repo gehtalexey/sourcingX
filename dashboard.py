@@ -4179,17 +4179,27 @@ with tab_search:
 
                 adv_col1, adv_col2 = st.columns(2)
                 with adv_col1:
+                    search_past_titles = st.text_input(
+                        "Past Titles (comma = OR)",
+                        key="crust_search_past_titles",
+                        placeholder="e.g., devops, backend engineer"
+                    )
+                with adv_col2:
+                    search_past_companies = st.text_input(
+                        "Past Companies (comma = OR)",
+                        key="crust_search_past_companies",
+                        placeholder="e.g., Microsoft, Amazon"
+                    )
+
+                adv_col3, adv_col4 = st.columns(2)
+                with adv_col3:
                     search_school = st.text_input(
                         "School/University",
                         key="crust_search_school",
                         placeholder="e.g., Tel Aviv University, Stanford"
                     )
-                with adv_col2:
-                    search_past_companies = st.text_input(
-                        "Past Companies",
-                        key="crust_search_past_companies",
-                        placeholder="e.g., Microsoft, Amazon"
-                    )
+                with adv_col4:
+                    pass  # Spacer for alignment
 
                 adv_checkbox_col1, adv_checkbox_col2 = st.columns(2)
                 with adv_checkbox_col1:
@@ -4244,8 +4254,8 @@ with tab_search:
                 search_title, search_company, search_location,
                 search_seniority, search_headcount,
                 search_exp_min > 0, search_exp_max > 0,
-                search_keywords, skill_groups, search_past_companies,
-                search_school, search_recently_changed, search_has_email
+                search_keywords, skill_groups, search_past_titles,
+                search_past_companies, search_school, search_recently_changed, search_has_email
             ])
 
             if not has_filters:
@@ -4263,6 +4273,7 @@ with tab_search:
                     skill_groups=skill_groups if skill_groups else None,
                     keywords=search_keywords if search_keywords else None,
                     past_companies=search_past_companies if search_past_companies else None,
+                    past_titles=search_past_titles if search_past_titles else None,
                     school=search_school if search_school else None,
                     recently_changed_jobs=search_recently_changed if search_recently_changed else None,
                     has_verified_email=search_has_email if search_has_email else None,
@@ -4446,6 +4457,7 @@ with tab_search:
                                     skill_groups=load_more_skill_groups if load_more_skill_groups else None,
                                     keywords=st.session_state.get('crust_search_keywords'),
                                     past_companies=st.session_state.get('crust_search_past_companies'),
+                                    past_titles=st.session_state.get('crust_search_past_titles'),
                                     school=st.session_state.get('crust_search_school'),
                                     recently_changed_jobs=st.session_state.get('crust_search_recently_changed'),
                                     has_verified_email=st.session_state.get('crust_search_has_email'),
@@ -6451,7 +6463,17 @@ with tab_enrich:
                     status_parts.append(f"**{len(unavailable_urls)}** unavailable (not in Crustdata)")
 
                 if status_parts:
-                    st.info(" | ".join(status_parts))
+                    cols = st.columns([6, 1])
+                    with cols[0]:
+                        st.info(" | ".join(status_parts))
+                    with cols[1]:
+                        if st.button("Refresh", key="refresh_enrich_counts", help="Re-check database for enriched profiles"):
+                            # Clear detection cache
+                            for key in ['_detection_hash', '_skipped_urls', '_matched_profiles_cache', '_unique_profiles_count']:
+                                if key in st.session_state:
+                                    del st.session_state[key]
+                            st.cache_data.clear()
+                            st.rerun()
 
                 # Debug: show why URLs are marked as "to enrich"
                 if new_urls:
@@ -6889,6 +6911,11 @@ with tab_enrich:
 
                             # Clear any cached data so counts update
                             st.cache_data.clear()
+
+                            # Clear detection cache so "already enriched" counts refresh
+                            for key in ['_detection_hash', '_skipped_urls', '_matched_profiles_cache', '_unique_profiles_count']:
+                                if key in st.session_state:
+                                    del st.session_state[key]
 
                             if len(enriched_df) == 0:
                                 st.error("Enrichment returned empty DataFrame. Check if profiles have valid data.")
@@ -7700,18 +7727,21 @@ with tab_screening:
                 help="Quick: score + fit only | Detailed: adds summary with experience calc and justification"
             )
         with col_model:
-            model_options = ["gpt-4o-mini (fast)", "Claude Haiku (balanced)"]
+            model_options = ["gpt-4o-mini (fast)", "gpt-4o (best)", "Claude Haiku (balanced)"]
             ai_model_choice = st.radio(
                 "AI Model",
                 options=model_options,
                 index=0,
                 key="ai_model_choice",
-                help="gpt-4o-mini: ~$0.001/profile | Claude Haiku: ~$0.005/profile"
+                help="gpt-4o-mini: ~$0.001 | gpt-4o: ~$0.01 | Haiku: ~$0.005 per profile"
             )
         # Parse model choice into model name and provider
         if "Haiku" in ai_model_choice:
             ai_model = "claude-haiku-4-5-20251001"
             ai_provider = "anthropic"
+        elif "gpt-4o (best)" in ai_model_choice:
+            ai_model = "gpt-4o"
+            ai_provider = "openai"
         else:
             ai_model = "gpt-4o-mini"
             ai_provider = "openai"
@@ -7721,11 +7751,11 @@ with tab_screening:
             model_input_cost = 0.80   # Haiku: $0.80/1M input tokens
             model_output_cost = 4.00  # Haiku: $4.00/1M output tokens
         elif ai_model == "gpt-4o-mini":
-            model_input_cost = 0.15
-            model_output_cost = 0.60
-        else:
-            model_input_cost = 2.50
-            model_output_cost = 10.00
+            model_input_cost = 0.15   # gpt-4o-mini: $0.15/1M input tokens
+            model_output_cost = 0.60  # gpt-4o-mini: $0.60/1M output tokens
+        else:  # gpt-4o
+            model_input_cost = 2.50   # gpt-4o: $2.50/1M input tokens
+            model_output_cost = 10.00 # gpt-4o: $10.00/1M output tokens
         if screening_mode == "Quick (cheaper)":
             output_tokens = 20  # ~20 tokens for score + fit only
             st.caption("Quick mode: Returns score and fit level only")

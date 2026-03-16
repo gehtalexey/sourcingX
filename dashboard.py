@@ -4140,21 +4140,45 @@ with tab_search:
 
             # Advanced Filters (collapsed by default)
             with st.expander("Advanced Filters"):
+                # Skills groups section - each group is OR, groups combined with AND
+                st.caption("**Skills** (comma = OR within group, groups combined with AND)")
+
+                # Initialize skill groups in session state if not present
+                if 'crust_skill_groups_count' not in st.session_state:
+                    st.session_state['crust_skill_groups_count'] = 2
+
+                skill_groups = []
+                for i in range(st.session_state['crust_skill_groups_count']):
+                    sg_col1, sg_col2 = st.columns([6, 1])
+                    with sg_col1:
+                        group_val = st.text_input(
+                            f"Group {i+1} (any of)",
+                            key=f"crust_skill_group_{i}",
+                            placeholder="e.g., aws, gcp" if i == 0 else "e.g., docker, kubernetes",
+                            label_visibility="collapsed" if i > 0 else "visible"
+                        )
+                        if group_val and group_val.strip():
+                            skill_groups.append(group_val.strip())
+                    with sg_col2:
+                        if i == 0:
+                            st.write("")  # Spacing for label alignment
+
+                # Add/remove group buttons
+                sg_btn_col1, sg_btn_col2, sg_btn_col3 = st.columns([1, 1, 4])
+                with sg_btn_col1:
+                    if st.form_submit_button("+ Group", use_container_width=True):
+                        st.session_state['crust_skill_groups_count'] = min(5, st.session_state['crust_skill_groups_count'] + 1)
+                        st.rerun()
+                with sg_btn_col2:
+                    if st.session_state['crust_skill_groups_count'] > 1:
+                        if st.form_submit_button("- Group", use_container_width=True):
+                            st.session_state['crust_skill_groups_count'] = max(1, st.session_state['crust_skill_groups_count'] - 1)
+                            st.rerun()
+
+                st.divider()
+
                 adv_col1, adv_col2 = st.columns(2)
                 with adv_col1:
-                    skills_col1, skills_col2 = st.columns([3, 1])
-                    with skills_col1:
-                        search_skills = st.text_input(
-                            "Skills",
-                            key="crust_search_skills",
-                            placeholder="e.g., python, kubernetes, terraform"
-                        )
-                    with skills_col2:
-                        search_skills_and = st.checkbox(
-                            "AND",
-                            key="crust_search_skills_and",
-                            help="Check for AND (must have all), uncheck for OR (any of)"
-                        )
                     search_school = st.text_input(
                         "School/University",
                         key="crust_search_school",
@@ -4166,18 +4190,19 @@ with tab_search:
                         key="crust_search_past_companies",
                         placeholder="e.g., Microsoft, Amazon"
                     )
-                    adv_checkbox_col1, adv_checkbox_col2 = st.columns(2)
-                    with adv_checkbox_col1:
-                        search_recently_changed = st.checkbox(
-                            "Recently changed jobs",
-                            key="crust_search_recently_changed",
-                            help="Started new job in last 90 days"
-                        )
-                    with adv_checkbox_col2:
-                        search_has_email = st.checkbox(
-                            "Has verified email",
-                            key="crust_search_has_email"
-                        )
+
+                adv_checkbox_col1, adv_checkbox_col2 = st.columns(2)
+                with adv_checkbox_col1:
+                    search_recently_changed = st.checkbox(
+                        "Recently changed jobs",
+                        key="crust_search_recently_changed",
+                        help="Started new job in last 90 days"
+                    )
+                with adv_checkbox_col2:
+                    search_has_email = st.checkbox(
+                        "Has verified email",
+                        key="crust_search_has_email"
+                    )
 
             # Controls row
             ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
@@ -4219,7 +4244,7 @@ with tab_search:
                 search_title, search_company, search_location,
                 search_seniority, search_headcount,
                 search_exp_min > 0, search_exp_max > 0,
-                search_keywords, search_skills, search_past_companies,
+                search_keywords, skill_groups, search_past_companies,
                 search_school, search_recently_changed, search_has_email
             ])
 
@@ -4227,8 +4252,6 @@ with tab_search:
                 st.warning("Please provide at least one search filter.")
             else:
                 # Build filters
-                skills_list = [s.strip() for s in search_skills.split(',') if s.strip()] if search_skills else None
-
                 filters = build_search_filters(
                     title=search_title if search_title else None,
                     company=search_company if search_company else None,
@@ -4237,8 +4260,7 @@ with tab_search:
                     headcount=search_headcount if search_headcount else None,
                     experience_min=search_exp_min if search_exp_min > 0 else None,
                     experience_max=search_exp_max if search_exp_max > 0 else None,
-                    skills=skills_list,
-                    skills_and=search_skills_and,
+                    skill_groups=skill_groups if skill_groups else None,
                     keywords=search_keywords if search_keywords else None,
                     past_companies=search_past_companies if search_past_companies else None,
                     school=search_school if search_school else None,
@@ -4406,8 +4428,12 @@ with tab_search:
                     if st.button("Load More", use_container_width=True, key="crust_load_more"):
                         with st.spinner("Loading more results..."):
                             try:
-                                # Get current filters from form inputs (reconstruct)
-                                skills_list = [s.strip() for s in st.session_state.get('crust_search_skills', '').split(',') if s.strip()]
+                                # Reconstruct skill_groups from session state
+                                load_more_skill_groups = []
+                                for i in range(st.session_state.get('crust_skill_groups_count', 2)):
+                                    group_val = st.session_state.get(f'crust_skill_group_{i}', '')
+                                    if group_val and group_val.strip():
+                                        load_more_skill_groups.append(group_val.strip())
 
                                 filters = build_search_filters(
                                     title=st.session_state.get('crust_search_title'),
@@ -4417,8 +4443,7 @@ with tab_search:
                                     headcount=st.session_state.get('crust_search_headcount'),
                                     experience_min=st.session_state.get('crust_search_exp_min', 0) or None,
                                     experience_max=st.session_state.get('crust_search_exp_max', 0) or None,
-                                    skills=skills_list if skills_list else None,
-                                    skills_and=st.session_state.get('crust_search_skills_and', False),
+                                    skill_groups=load_more_skill_groups if load_more_skill_groups else None,
                                     keywords=st.session_state.get('crust_search_keywords'),
                                     past_companies=st.session_state.get('crust_search_past_companies'),
                                     school=st.session_state.get('crust_search_school'),
@@ -6897,37 +6922,7 @@ with tab_filter2:
     if not is_enriched:
         st.info("Enrich profiles first (tab 3) to use advanced filtering.")
     else:
-        # Filter enriched_df to only profiles matching loaded data
-        # Use URLs computed by Enrich tab (stored in session state)
-        enriched_loaded_urls = st.session_state.get('_enriched_loaded_urls')
-
-        if enriched_loaded_urls and 'linkedin_url' in enriched_df.columns:
-            # Get DB linkedin_urls that correspond to the loaded URLs
-            # (handles cases where Crustdata returned different URL than input)
-            matching_db_urls = set(enriched_loaded_urls)  # Start with direct matches
-
-            if HAS_DATABASE:
-                try:
-                    db_client = _get_db_client()
-                    if db_client:
-                        db_profiles = db_client.select('profiles', 'linkedin_url,original_url', limit=15000)
-                        for p in db_profiles:
-                            orig = p.get('original_url')
-                            linkedin = p.get('linkedin_url')
-                            if orig and linkedin:
-                                norm_orig = normalize_linkedin_url(orig)
-                                norm_linkedin = normalize_linkedin_url(linkedin)
-                                # If original_url matches a loaded URL, include the linkedin_url
-                                if norm_orig in enriched_loaded_urls and norm_linkedin:
-                                    matching_db_urls.add(norm_linkedin)
-                except Exception:
-                    pass
-
-            # Filter enriched_df
-            enriched_df = enriched_df[enriched_df['linkedin_url'].apply(
-                lambda u: normalize_linkedin_url(u) in matching_db_urls if u else False
-            )].copy()
-
+        # enriched_df already contains exactly the profiles loaded - no filtering needed
         st.success(f"**{len(enriched_df)}** enriched profiles ready for filtering")
 
         # Show available enriched columns and sample data for debugging

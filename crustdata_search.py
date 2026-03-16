@@ -124,6 +124,7 @@ def build_filters(
     experience_max: int = None,
     skills: List[str] = None,
     skills_and: bool = False,
+    skill_groups: List[str] = None,
     keywords: str = None,
     past_companies: str = None,
     school: str = None,
@@ -150,8 +151,10 @@ def build_filters(
         headcount: List of headcount ranges (in operator)
         experience_min: Minimum years of experience (>= operator)
         experience_max: Maximum years of experience (<= operator)
-        skills: List of skills
+        skills: List of skills (legacy, use skill_groups instead)
         skills_and: If True, require ALL skills (AND). If False, require ANY skill (OR)
+        skill_groups: List of comma-separated skill strings. Each group is OR, groups combined with AND.
+                      E.g., ["aws, gcp", "docker, kubernetes"] means (AWS OR GCP) AND (Docker OR Kubernetes)
         keywords: Comma-separated keywords (OR across headline/summary/skills)
         past_companies: Comma-separated past company names (substring match)
         school: School/university name (substring match)
@@ -250,8 +253,33 @@ def build_filters(
             "value": experience_max + 1  # "<= 10" becomes "< 11"
         })
 
-    # Skills filter (AND or OR based on skills_and flag)
-    if skills and len(skills) > 0:
+    # Skill groups filter (each group is OR, groups combined with AND)
+    # E.g., ["aws, gcp", "docker, kubernetes"] means (AWS OR GCP) AND (Docker OR Kubernetes)
+    if skill_groups and len(skill_groups) > 0:
+        for group in skill_groups:
+            if not group or not group.strip():
+                continue
+            group_skills = [s.strip() for s in group.split(',') if s.strip()]
+            if len(group_skills) == 1:
+                # Single skill in group - simple condition
+                conditions.append({
+                    "column": "skills",
+                    "type": "[.]",
+                    "value": group_skills[0]
+                })
+            elif len(group_skills) > 1:
+                # Multiple skills in group - OR condition
+                group_conditions = [
+                    {"column": "skills", "type": "[.]", "value": s}
+                    for s in group_skills
+                ]
+                conditions.append({
+                    "op": "or",
+                    "conditions": group_conditions
+                })
+
+    # Legacy skills filter (AND or OR based on skills_and flag) - for backwards compatibility
+    elif skills and len(skills) > 0:
         skill_values = [s.strip() if isinstance(s, str) else str(s) for s in skills]
         skill_values = [s for s in skill_values if s]
         if len(skill_values) == 1:

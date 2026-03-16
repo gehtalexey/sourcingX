@@ -92,6 +92,20 @@ try:
 except ImportError:
     HAS_USAGE_TRACKER = False
 
+# Crustdata people search module
+try:
+    from crustdata_search import (
+        search_people_db,
+        build_filters as build_search_filters,
+        normalize_search_results_to_df,
+        check_credits as check_crustdata_credits,
+        SENIORITY_LEVELS,
+        HEADCOUNT_RANGES,
+    )
+    HAS_CRUSTDATA_SEARCH = True
+except ImportError:
+    HAS_CRUSTDATA_SEARCH = False
+
 # Plotly for charts
 try:
     import plotly.express as px
@@ -4011,9 +4025,416 @@ _profile_count = get_profile_count()
 st.info(f"📊 **{_profile_count}** profiles loaded" if _profile_count else "No profiles loaded — start from the Load tab")
 
 # Create tabs
-tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_database, tab_usage = st.tabs([
-    "1. Load", "2. Filter", "3. Enrich", "4. Filter+", "5. AI Screen", "6. Database", "7. Usage"
+tab_search, tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_database, tab_usage = st.tabs([
+    "0. Search", "1. Load", "2. Filter", "3. Enrich", "4. Filter+", "5. AI Screen", "6. Database", "7. Usage"
 ])
+
+# ========== TAB 0: Search (Crustdata People DB) ==========
+with tab_search:
+    st.markdown("### Crustdata People Database")
+
+    # Check if module is available
+    if not HAS_CRUSTDATA_SEARCH:
+        st.warning("Crustdata search module not available. Check crustdata_search.py import.")
+    elif not has_crust_key:
+        st.warning("Crustdata API key not configured. Add your API key to config.json.")
+    else:
+        # Show credits in header
+        credits_col1, credits_col2 = st.columns([3, 1])
+        with credits_col1:
+            st.caption("Search 100M+ professional profiles directly from Crustdata's database")
+        with credits_col2:
+            # Cache credits check to avoid repeated API calls
+            @st.cache_data(ttl=300)  # 5 minute cache
+            def _get_crustdata_credits():
+                try:
+                    return check_crustdata_credits()
+                except Exception as e:
+                    return {"remaining": "?", "error": str(e)}
+
+            credits_info = _get_crustdata_credits()
+            if "error" not in credits_info:
+                st.metric("Credits", f"{credits_info.get('remaining', '?'):,}")
+            else:
+                st.caption(f"Credits: unavailable")
+
+        st.divider()
+
+        # ===== Filter Form =====
+        with st.form("crustdata_search_form"):
+            st.markdown("##### Basic Filters")
+
+            # Row 1: Title, Company, Location
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                search_title = st.text_input(
+                    "Title/Role",
+                    key="crust_search_title",
+                    placeholder="e.g., Backend Engineer, Data Scientist"
+                )
+            with col2:
+                search_company = st.text_input(
+                    "Company",
+                    key="crust_search_company",
+                    placeholder="e.g., Google, Meta, Wiz"
+                )
+            with col3:
+                search_location = st.text_input(
+                    "Location",
+                    key="crust_search_location",
+                    placeholder="e.g., Israel, San Francisco"
+                )
+
+            # Row 2: Seniority, Company Size
+            col4, col5 = st.columns(2)
+            with col4:
+                search_seniority = st.multiselect(
+                    "Seniority",
+                    options=SENIORITY_LEVELS,
+                    default=[],
+                    key="crust_search_seniority"
+                )
+            with col5:
+                search_headcount = st.multiselect(
+                    "Company Size",
+                    options=HEADCOUNT_RANGES,
+                    default=[],
+                    key="crust_search_headcount"
+                )
+
+            # Row 3: Experience range, Keywords
+            col6, col7, col8 = st.columns([1, 1, 2])
+            with col6:
+                search_exp_min = st.number_input(
+                    "Min Experience (years)",
+                    min_value=0,
+                    max_value=50,
+                    value=0,
+                    key="crust_search_exp_min"
+                )
+            with col7:
+                search_exp_max = st.number_input(
+                    "Max Experience (years)",
+                    min_value=0,
+                    max_value=50,
+                    value=0,
+                    key="crust_search_exp_max",
+                    help="0 = no limit"
+                )
+            with col8:
+                search_keywords = st.text_input(
+                    "Keywords (searches headline/summary/skills)",
+                    key="crust_search_keywords",
+                    placeholder="e.g., kubernetes, microservices, golang"
+                )
+
+            # Advanced Filters (collapsed by default)
+            with st.expander("Advanced Filters"):
+                adv_col1, adv_col2 = st.columns(2)
+                with adv_col1:
+                    search_skills = st.text_input(
+                        "Skills (comma-separated)",
+                        key="crust_search_skills",
+                        placeholder="e.g., Python, AWS, Docker"
+                    )
+                    search_school = st.text_input(
+                        "School/University",
+                        key="crust_search_school",
+                        placeholder="e.g., Tel Aviv University, Stanford"
+                    )
+                with adv_col2:
+                    search_past_companies = st.text_input(
+                        "Past Companies",
+                        key="crust_search_past_companies",
+                        placeholder="e.g., Microsoft, Amazon"
+                    )
+                    adv_checkbox_col1, adv_checkbox_col2 = st.columns(2)
+                    with adv_checkbox_col1:
+                        search_recently_changed = st.checkbox(
+                            "Recently changed jobs",
+                            key="crust_search_recently_changed",
+                            help="Started new job in last 90 days"
+                        )
+                    with adv_checkbox_col2:
+                        search_has_email = st.checkbox(
+                            "Has verified email",
+                            key="crust_search_has_email"
+                        )
+
+            # Controls row
+            ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
+            with ctrl_col1:
+                search_limit = st.selectbox(
+                    "Results limit",
+                    options=[25, 50, 100, 250, 500, 1000],
+                    index=2,  # Default 100
+                    key="crust_search_limit"
+                )
+            with ctrl_col2:
+                pass  # Spacer
+            with ctrl_col3:
+                btn_col1, btn_col2 = st.columns(2)
+                with btn_col1:
+                    search_submitted = st.form_submit_button("Search", type="primary", use_container_width=True)
+                with btn_col2:
+                    clear_submitted = st.form_submit_button("Clear Filters", use_container_width=True)
+
+        # Handle clear filters
+        if clear_submitted:
+            # Clear session state for search
+            keys_to_clear = [
+                'crustdata_search_results',
+                'crustdata_search_cursor',
+                'crustdata_search_total',
+                'crustdata_search_selected',
+                'crustdata_search_credits_used',
+            ]
+            for key in keys_to_clear:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
+
+        # Handle search
+        if search_submitted:
+            # Check if at least one filter is provided
+            has_filters = any([
+                search_title, search_company, search_location,
+                search_seniority, search_headcount,
+                search_exp_min > 0, search_exp_max > 0,
+                search_keywords, search_skills, search_past_companies,
+                search_school, search_recently_changed, search_has_email
+            ])
+
+            if not has_filters:
+                st.warning("Please provide at least one search filter.")
+            else:
+                # Build filters
+                skills_list = [s.strip() for s in search_skills.split(',') if s.strip()] if search_skills else None
+
+                filters = build_search_filters(
+                    title=search_title if search_title else None,
+                    company=search_company if search_company else None,
+                    location=search_location if search_location else None,
+                    seniority=search_seniority if search_seniority else None,
+                    headcount=search_headcount if search_headcount else None,
+                    experience_min=search_exp_min if search_exp_min > 0 else None,
+                    experience_max=search_exp_max if search_exp_max > 0 else None,
+                    skills=skills_list,
+                    keywords=search_keywords if search_keywords else None,
+                    past_companies=search_past_companies if search_past_companies else None,
+                    school=search_school if search_school else None,
+                    recently_changed_jobs=search_recently_changed if search_recently_changed else None,
+                    has_verified_email=search_has_email if search_has_email else None,
+                )
+
+                # Execute search
+                with st.spinner(f"Searching Crustdata database..."):
+                    try:
+                        results = search_people_db(filters, limit=search_limit)
+
+                        if results.get("profiles"):
+                            st.session_state['crustdata_search_results'] = results['profiles']
+                            st.session_state['crustdata_search_cursor'] = results.get('cursor')
+                            st.session_state['crustdata_search_total'] = results.get('total_count', len(results['profiles']))
+                            st.session_state['crustdata_search_credits_used'] = results.get('credits_used', 0)
+                            st.session_state['crustdata_search_selected'] = list(range(len(results['profiles'])))  # Select all by default
+                            st.success(f"Found **{results.get('total_count', len(results['profiles'])):,}** profiles")
+                        else:
+                            st.session_state['crustdata_search_results'] = []
+                            st.session_state['crustdata_search_total'] = 0
+                            st.info("No profiles found matching your criteria. Try adjusting your filters.")
+
+                        # Clear credits cache to refresh
+                        _get_crustdata_credits.clear()
+
+                    except Exception as e:
+                        st.error(f"Search failed: {str(e)}")
+
+        # ===== Results Section =====
+        if 'crustdata_search_results' in st.session_state and st.session_state['crustdata_search_results']:
+            st.divider()
+            results = st.session_state['crustdata_search_results']
+            total_count = st.session_state.get('crustdata_search_total', len(results))
+            credits_used = st.session_state.get('crustdata_search_credits_used', 0)
+
+            # Results header
+            res_col1, res_col2 = st.columns([2, 1])
+            with res_col1:
+                st.markdown(f"##### Results")
+                st.caption(f"Showing {len(results)} of {total_count:,} profiles | Credits used: {credits_used}")
+            with res_col2:
+                # Select/Deselect all
+                sel_col1, sel_col2 = st.columns(2)
+                with sel_col1:
+                    if st.button("Select All", key="crust_select_all", use_container_width=True):
+                        st.session_state['crustdata_search_selected'] = list(range(len(results)))
+                        st.rerun()
+                with sel_col2:
+                    if st.button("Deselect All", key="crust_deselect_all", use_container_width=True):
+                        st.session_state['crustdata_search_selected'] = []
+                        st.rerun()
+
+            # Build dataframe for display
+            display_data = []
+            for i, profile in enumerate(results):
+                # Extract current employer info
+                current_company = ""
+                current_title = ""
+                current_employers = profile.get("current_employers", [])
+                if current_employers and len(current_employers) > 0:
+                    current_company = current_employers[0].get("employer_name") or current_employers[0].get("name", "")
+                    current_title = current_employers[0].get("employee_title") or current_employers[0].get("title", "")
+
+                # Fallback to top-level fields
+                if not current_title:
+                    current_title = profile.get("title", "")
+                if not current_company:
+                    current_company = profile.get("company", "")
+
+                display_data.append({
+                    "idx": i,
+                    "Select": i in st.session_state.get('crustdata_search_selected', []),
+                    "Name": profile.get("name", ""),
+                    "Title": current_title,
+                    "Company": current_company,
+                    "Location": profile.get("region", ""),
+                    "Exp": f"{profile.get('years_of_experience_raw', '')}y" if profile.get('years_of_experience_raw') else "",
+                    "LinkedIn": profile.get("linkedin_profile_url") or profile.get("linkedin_flagship_url", ""),
+                })
+
+            display_df = pd.DataFrame(display_data)
+
+            # Display with data_editor for selection
+            edited_df = st.data_editor(
+                display_df[["Select", "Name", "Title", "Company", "Location", "Exp"]],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Select": st.column_config.CheckboxColumn("Select", default=True),
+                    "Name": st.column_config.TextColumn("Name", width="medium"),
+                    "Title": st.column_config.TextColumn("Title", width="large"),
+                    "Company": st.column_config.TextColumn("Company", width="medium"),
+                    "Location": st.column_config.TextColumn("Location", width="small"),
+                    "Exp": st.column_config.TextColumn("Exp", width="small"),
+                },
+                disabled=["Name", "Title", "Company", "Location", "Exp"],
+                key="crust_results_editor"
+            )
+
+            # Update selected indices based on editor state
+            selected_indices = edited_df[edited_df["Select"] == True].index.tolist()
+            st.session_state['crustdata_search_selected'] = selected_indices
+
+            # Selection count
+            st.caption(f"**{len(selected_indices)}** profiles selected")
+
+            # Action buttons
+            st.divider()
+            action_col1, action_col2, action_col3 = st.columns([2, 1, 1])
+
+            with action_col1:
+                # Send to Filter Tab button
+                if st.button("Send to Filter Tab", type="primary", use_container_width=True, key="crust_send_to_filter"):
+                    if not selected_indices:
+                        st.warning("No profiles selected. Select at least one profile.")
+                    else:
+                        # Get selected profiles
+                        selected_profiles = [results[i] for i in selected_indices]
+
+                        # Normalize to DataFrame
+                        normalized_df = normalize_search_results_to_df(selected_profiles)
+
+                        if not normalized_df.empty:
+                            # Set session state for Filter tab
+                            st.session_state['results_df'] = normalized_df
+                            st.session_state['original_results_df'] = normalized_df.copy()
+                            st.session_state['_data_source'] = 'crustdata_search'
+
+                            st.success(f"Sent **{len(normalized_df)}** profiles to Filter tab!")
+                            st.info("Navigate to **1. Load** or **2. Filter** tab to continue processing.")
+                        else:
+                            st.error("Failed to normalize profiles. Check the data.")
+
+            with action_col2:
+                # Load More button (pagination)
+                cursor = st.session_state.get('crustdata_search_cursor')
+                if cursor:
+                    if st.button("Load More", use_container_width=True, key="crust_load_more"):
+                        with st.spinner("Loading more results..."):
+                            try:
+                                # Get current filters from form inputs (reconstruct)
+                                skills_list = [s.strip() for s in st.session_state.get('crust_search_skills', '').split(',') if s.strip()]
+
+                                filters = build_search_filters(
+                                    title=st.session_state.get('crust_search_title'),
+                                    company=st.session_state.get('crust_search_company'),
+                                    location=st.session_state.get('crust_search_location'),
+                                    seniority=st.session_state.get('crust_search_seniority'),
+                                    headcount=st.session_state.get('crust_search_headcount'),
+                                    experience_min=st.session_state.get('crust_search_exp_min', 0) or None,
+                                    experience_max=st.session_state.get('crust_search_exp_max', 0) or None,
+                                    skills=skills_list if skills_list else None,
+                                    keywords=st.session_state.get('crust_search_keywords'),
+                                    past_companies=st.session_state.get('crust_search_past_companies'),
+                                    school=st.session_state.get('crust_search_school'),
+                                    recently_changed_jobs=st.session_state.get('crust_search_recently_changed'),
+                                    has_verified_email=st.session_state.get('crust_search_has_email'),
+                                )
+
+                                more_results = search_people_db(
+                                    filters,
+                                    limit=st.session_state.get('crust_search_limit', 100),
+                                    cursor=cursor
+                                )
+
+                                if more_results.get("profiles"):
+                                    # Append to existing results
+                                    current_results = st.session_state.get('crustdata_search_results', [])
+                                    new_profiles = more_results['profiles']
+                                    st.session_state['crustdata_search_results'] = current_results + new_profiles
+                                    st.session_state['crustdata_search_cursor'] = more_results.get('cursor')
+                                    st.session_state['crustdata_search_credits_used'] = (
+                                        st.session_state.get('crustdata_search_credits_used', 0) +
+                                        more_results.get('credits_used', 0)
+                                    )
+                                    # Select new profiles by default
+                                    current_selected = st.session_state.get('crustdata_search_selected', [])
+                                    new_indices = list(range(len(current_results), len(current_results) + len(new_profiles)))
+                                    st.session_state['crustdata_search_selected'] = current_selected + new_indices
+
+                                    st.success(f"Loaded {len(new_profiles)} more profiles")
+                                    _get_crustdata_credits.clear()
+                                    st.rerun()
+                                else:
+                                    st.info("No more results available.")
+                                    st.session_state['crustdata_search_cursor'] = None
+
+                            except Exception as e:
+                                st.error(f"Failed to load more: {str(e)}")
+                else:
+                    st.button("Load More", disabled=True, use_container_width=True, key="crust_load_more_disabled")
+
+            with action_col3:
+                # Export CSV button
+                if st.button("Export CSV", use_container_width=True, key="crust_export_csv"):
+                    # Export selected profiles
+                    if selected_indices:
+                        selected_profiles = [results[i] for i in selected_indices]
+                        export_df = normalize_search_results_to_df(selected_profiles)
+
+                        # Remove internal columns for export
+                        export_cols = [c for c in export_df.columns if not c.startswith('_')]
+                        export_data = export_df[export_cols].to_csv(index=False).encode('utf-8-sig')
+
+                        st.download_button(
+                            "Download CSV",
+                            export_data,
+                            f"crustdata_search_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            "text/csv",
+                            key="crust_download_csv"
+                        )
+                    else:
+                        st.warning("No profiles selected for export.")
 
 # ========== TAB 1: Upload ==========
 with tab_upload:
@@ -5821,6 +6242,7 @@ with tab_enrich:
                 import re
                 new_urls = []
                 skipped_urls = []
+                skipped_matched_usernames = {}  # Track which DB username matched each skipped URL
                 unavailable_urls = []  # Not found in Crustdata
                 for url in urls:
                     normalized = normalize_linkedin_url(url) if HAS_DATABASE else url
@@ -5859,12 +6281,17 @@ with tab_enrich:
                     # Then check if recently enriched (URL match or any username variant match)
                     elif normalized in recently_enriched:
                         skipped_urls.append(url)
+                        skipped_matched_usernames[url] = username  # Track matched username
                     elif username_variants & recently_enriched_usernames:  # Set intersection
                         skipped_urls.append(url)
+                        # Track which variant matched
+                        matched = username_variants & recently_enriched_usernames
+                        skipped_matched_usernames[url] = list(matched)[0] if matched else username
                     else:
                         # Fallback: substring matching for cases where Crustdata returns shorter username
                         # e.g., input "nadav-covalio-project-master" -> DB has "nadavcovalio"
                         found_substring_match = False
+                        matched_db_user = None
                         if username:
                             input_no_hyphen = username.replace('-', '').lower()
                             # Check if any DB username is contained in input (or vice versa)
@@ -5877,15 +6304,26 @@ with tab_enrich:
                                     # Check if DB username is prefix of input (most common case)
                                     if input_no_hyphen.startswith(db_no_hyphen):
                                         found_substring_match = True
+                                        matched_db_user = db_user
                                         break
                                     # Also check if input is prefix of DB (less common)
                                     if len(input_no_hyphen) >= 5 and db_no_hyphen.startswith(input_no_hyphen):
                                         found_substring_match = True
+                                        matched_db_user = db_user
                                         break
                         if found_substring_match:
                             skipped_urls.append(url)
+                            skipped_matched_usernames[url] = matched_db_user  # Track the DB username that matched
                         else:
                             new_urls.append(url)
+
+                # Deduplicate URLs (preserve order, keep first occurrence)
+                skipped_urls = list(dict.fromkeys(skipped_urls))
+                new_urls = list(dict.fromkeys(new_urls))
+                unavailable_urls = list(dict.fromkeys(unavailable_urls))
+
+                # Store matched usernames in session state for Load from DB
+                st.session_state['_skipped_matched_usernames'] = skipped_matched_usernames
 
                 # Show stats - skip recently enriched and unavailable by default
                 status_parts = []
@@ -6036,6 +6474,9 @@ with tab_enrich:
                                         matched_profiles = []
                                         matched_urls = set()
                                         unmatched_usernames = []  # Track for debug
+                                        # Get the matched usernames from detection phase
+                                        matched_usernames_map = st.session_state.get('_skipped_matched_usernames', {})
+
                                         for url in skipped_urls:
                                             norm = normalize_linkedin_url(url)
                                             if not norm or '/in/' not in norm:
@@ -6043,23 +6484,36 @@ with tab_enrich:
                                             username = norm.split('/in/')[-1].rstrip('/').lower()
                                             username_no_hyphen = username.replace('-', '')
 
-                                            # Try exact match first
-                                            profile = profile_by_username.get(username) or profile_by_username.get(username_no_hyphen)
+                                            # PRIORITY 1: Use the matched username from detection phase
+                                            candidates = []
+                                            if url in matched_usernames_map:
+                                                matched_key = matched_usernames_map[url]
+                                                if matched_key:
+                                                    candidates = profile_by_username.get(matched_key.lower(), [])
+                                                    # Also try without hyphens
+                                                    if not candidates:
+                                                        candidates = profile_by_username.get(matched_key.lower().replace('-', ''), [])
 
-                                            # Try prefix matching (same as "already enriched" check)
-                                            if not profile:
-                                                for db_user, p in profile_by_username.items():
+                                            # PRIORITY 2: Try exact match on input username
+                                            if not candidates:
+                                                candidates = profile_by_username.get(username, []) or profile_by_username.get(username_no_hyphen, [])
+
+                                            # PRIORITY 3: Try prefix matching (same as "already enriched" check)
+                                            if not candidates:
+                                                for db_user, profiles_list in profile_by_username.items():
                                                     db_no_hyphen = db_user.replace('-', '')
                                                     if len(db_no_hyphen) >= 5:
-                                                        if username_no_hyphen.startswith(db_no_hyphen) or db_no_hyphen.startswith(username_no_hyphen):
-                                                            profile = p
+                                                        if username_no_hyphen.startswith(db_no_hyphen) or (len(username_no_hyphen) >= 5 and db_no_hyphen.startswith(username_no_hyphen)):
+                                                            candidates = profiles_list
                                                             break
 
-                                            if profile:
-                                                p_url = profile.get('linkedin_url', '')
-                                                if p_url not in matched_urls:
-                                                    matched_urls.add(p_url)
-                                                    matched_profiles.append(profile)
+                                            # Add all matching profiles
+                                            if candidates:
+                                                for profile in candidates:
+                                                    p_url = profile.get('linkedin_url', '')
+                                                    if p_url not in matched_urls:
+                                                        matched_urls.add(p_url)
+                                                        matched_profiles.append(profile)
                                             else:
                                                 if len(unmatched_usernames) < 10:
                                                     unmatched_usernames.append(username)

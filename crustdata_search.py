@@ -373,6 +373,7 @@ def search_people_db(
     limit: int = 100,
     cursor: str = None,
     sorts: List[Dict[str, str]] = None,
+    api_key: str = None,
 ) -> Dict[str, Any]:
     """
     Search Crustdata's people database.
@@ -382,6 +383,7 @@ def search_people_db(
         limit: Results per page (max 1000, default 100)
         cursor: Pagination cursor from previous response
         sorts: Optional sorting list, e.g., [{"column": "years_of_experience_raw", "order": "desc"}]
+        api_key: Optional API key (if not provided, loads from config.json or env var)
 
     Returns:
         {
@@ -396,7 +398,8 @@ def search_people_db(
         RateLimitError: Rate limit exceeded
         ExternalServiceError: API error
     """
-    api_key = _load_api_key()
+    if not api_key:
+        api_key = _load_api_key()
     limiter = get_rate_limiter('crustdata')
 
     # Build request body
@@ -499,9 +502,12 @@ def search_people_db(
     base_delay=1.0,
     retryable_exceptions=(RateLimitError, ServiceUnavailableError, ConnectionError),
 )
-def check_credits() -> Dict[str, Any]:
+def check_credits(api_key: str = None) -> Dict[str, Any]:
     """
     Check remaining Crustdata credits.
+
+    Args:
+        api_key: Optional API key (if not provided, loads from config.json or env var)
 
     Returns:
         {
@@ -514,7 +520,8 @@ def check_credits() -> Dict[str, Any]:
         AuthenticationError: Invalid API key
         ExternalServiceError: API error
     """
-    api_key = _load_api_key()
+    if not api_key:
+        api_key = _load_api_key()
     limiter = get_rate_limiter('crustdata')
 
     try:

@@ -4056,13 +4056,13 @@ with tab_search:
         with credits_col2:
             # Cache credits check to avoid repeated API calls
             @st.cache_data(ttl=300)  # 5 minute cache
-            def _get_crustdata_credits():
+            def _get_crustdata_credits(_api_key: str):
                 try:
-                    return check_crustdata_credits()
+                    return check_crustdata_credits(api_key=_api_key)
                 except Exception as e:
                     return {"remaining": "?", "error": str(e)}
 
-            credits_info = _get_crustdata_credits()
+            credits_info = _get_crustdata_credits(api_key)
             if "error" not in credits_info:
                 st.metric("Credits", f"{credits_info.get('remaining', '?'):,}")
             else:
@@ -4240,7 +4240,7 @@ with tab_search:
                 # Execute search
                 with st.spinner(f"Searching Crustdata database..."):
                     try:
-                        results = search_people_db(filters, limit=search_limit)
+                        results = search_people_db(filters, limit=search_limit, api_key=api_key)
 
                         if results.get("profiles"):
                             loaded_count = len(results['profiles'])
@@ -4419,7 +4419,8 @@ with tab_search:
                                 more_results = search_people_db(
                                     filters,
                                     limit=st.session_state.get('crust_search_limit', 100),
-                                    cursor=cursor
+                                    cursor=cursor,
+                                    api_key=api_key
                                 )
 
                                 if more_results.get("profiles"):
@@ -6386,6 +6387,14 @@ with tab_enrich:
                 new_urls = list(dict.fromkeys(new_urls))
                 unavailable_urls = list(dict.fromkeys(unavailable_urls))
 
+                # Count unique profiles (not input URLs) for accurate display
+                unique_profile_urls = set()
+                for url in skipped_urls:
+                    profile = matched_profiles_cache.get(url)
+                    if profile:
+                        unique_profile_urls.add(profile.get('linkedin_url', ''))
+                unique_profile_count = len(unique_profile_urls)
+
                 # Cache detection results for Load from DB (prevents mismatch on button click)
                 if not use_cached_detection:
                     st.session_state['_detection_hash'] = urls_hash
@@ -6394,14 +6403,15 @@ with tab_enrich:
                     st.session_state['_unavailable_urls'] = unavailable_urls
                     st.session_state['_matched_profiles_cache'] = matched_profiles_cache
                     st.session_state['_refresh_months'] = refresh_months
-
+                    st.session_state['_unique_profile_count'] = unique_profile_count
 
                 # Show stats - skip recently enriched and unavailable by default
                 status_parts = []
                 if new_urls:
                     status_parts.append(f"**{len(new_urls)}** to enrich")
                 if skipped_urls:
-                    status_parts.append(f"**{len(skipped_urls)}** already enriched")
+                    # Show unique profile count, not input URL count (avoids confusion when loading)
+                    status_parts.append(f"**{unique_profile_count}** already enriched")
                 if unavailable_urls:
                     status_parts.append(f"**{len(unavailable_urls)}** unavailable (not in Crustdata)")
 
@@ -6482,7 +6492,7 @@ with tab_enrich:
                                 st.write(f"  **DB matches by name:** {db_name_check[username]}")
                     # Show next step with correct count (only enriched profiles can be filtered/screened)
                     if skipped_urls:
-                        st.success(f"**{len(skipped_urls)}** profiles ready for Filter+ and AI Screen")
+                        st.success(f"**{unique_profile_count}** profiles ready for Filter+ and AI Screen")
                         # Store for Filter+ tab to use
                         st.session_state['_enriched_loaded_urls'] = set(normalize_linkedin_url(u) for u in skipped_urls if u)
                 urls_for_enrichment = new_urls
@@ -6491,7 +6501,7 @@ with tab_enrich:
 
                     # Option to load enriched profiles from DB for this list
                     if HAS_DATABASE and len(skipped_urls) > 0:
-                        if st.button(f"Load {len(skipped_urls)} enriched profiles for screening", type="primary", key="load_enriched_for_list"):
+                        if st.button(f"Load {unique_profile_count} enriched profiles for screening", type="primary", key="load_enriched_for_list"):
                             with st.spinner("Loading profiles..."):
                                 try:
                                     # Use cached profiles from detection (guaranteed 0 gap - same matching logic)
@@ -6520,6 +6530,10 @@ with tab_enrich:
                                             'gap': 0
                                         }
                                         st.session_state['enrichment_message'] = f"success:Loaded {len(matched_profiles)} enriched profiles"
+                                        # Clear detection cache so UI updates correctly
+                                        for key in ['_detection_hash', '_skipped_urls', '_new_urls', '_unavailable_urls', '_matched_profiles_cache', '_unique_profile_count']:
+                                            if key in st.session_state:
+                                                del st.session_state[key]
                                         st.rerun()
                                     else:
                                         st.warning("No cached profiles found. Please refresh the page and try again.")
@@ -6530,7 +6544,7 @@ with tab_enrich:
                     with st.expander("Re-enrich options", expanded=False):
                         if st.checkbox("Re-enrich recently-enriched profiles", value=False, key="reenrich_cb"):
                             urls_for_enrichment = urls
-                            st.warning(f"Will re-enrich all {len(urls)} profiles including {len(skipped_urls)} recently enriched")
+                            st.warning(f"Will re-enrich all {len(urls)} profiles including {unique_profile_count} recently enriched")
                 else:
                     if unavailable_urls:
                         st.info(f"**{len(new_urls)}** profiles to enrich | **{len(unavailable_urls)}** unavailable (not in Crustdata)")
@@ -6541,7 +6555,7 @@ with tab_enrich:
                     if unavailable_urls and not skipped_urls:
                         st.warning(f"No profiles to enrich. {len(unavailable_urls)} profiles are unavailable in Crustdata.")
                     elif unavailable_urls:
-                        st.warning(f"No new profiles to enrich. {len(skipped_urls)} already enriched, {len(unavailable_urls)} unavailable in Crustdata.")
+                        st.warning(f"No new profiles to enrich. {unique_profile_count} already enriched, {len(unavailable_urls)} unavailable in Crustdata.")
                     else:
                         st.warning(f"All profiles were enriched within the last {refresh_months} months.")
                 else:

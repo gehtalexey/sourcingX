@@ -2181,12 +2181,16 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
     }
 
     # Generic column mapping (other CSV formats)
+    # Note: Order matters - defaultProfileUrl should come before linkedInProfileUrl
+    # because linkedInProfileUrl often contains encoded ACwAAA... identifiers that get rejected
     generic_column_map = {
         'first_name': 'first_name',
         'last_name': 'last_name',
         'firstName': 'first_name',
         'lastName': 'last_name',
+        'fullName': 'name',
         'company': 'current_company',
+        'companyName': 'current_company',
         'title': 'current_title',
         'job_title': 'current_title',
         'email': 'email',
@@ -2195,6 +2199,8 @@ def normalize_uploaded_csv(df: pd.DataFrame) -> pd.DataFrame:
         'LinkedIn URL': 'linkedin_url',
         'linkedinUrl': 'linkedin_url',
         'profile_url': 'linkedin_url',
+        # PhantomBuster Search Export columns - defaultProfileUrl is the clean URL
+        'defaultProfileUrl': 'linkedin_url',
     }
 
     # Combine mappings (GEM takes priority)
@@ -5784,11 +5790,15 @@ with tab_enrich:
                                     base = match.group(1).rstrip('-')
                                     if base and base != username:
                                         username_set.add(base)
+                                        # SYNC FIX: Also add base without hyphens (matches input URL variant generation)
+                                        username_set.add(base.replace('-', ''))
                                 # Also try simple hyphen split for shorter suffixes
                                 if '-' in username:
                                     parts = username.rsplit('-', 1)
                                     if len(parts[1]) >= 3:  # Suffix at least 3 chars
                                         username_set.add(parts[0])
+                                        # SYNC FIX: Also add this base without hyphens (matches input URL variant generation)
+                                        username_set.add(parts[0].replace('-', ''))
                                 # Also add hyphen-free version for matching
                                 # e.g., "john-doe" -> "johndoe"
                                 no_hyphen = username.replace('-', '')
@@ -5886,6 +5896,12 @@ with tab_enrich:
                             skipped_urls.append(url)
                         else:
                             new_urls.append(url)
+
+                # SYNC FIX: Deduplicate URLs to ensure counts match between detection and loading
+                # Input CSV may contain duplicate URLs which would inflate skipped count
+                skipped_urls = list(dict.fromkeys(skipped_urls))  # Preserves order, removes dupes
+                new_urls = list(dict.fromkeys(new_urls))
+                unavailable_urls = list(dict.fromkeys(unavailable_urls))
 
                 # Show stats - skip recently enriched and unavailable by default
                 status_parts = []
@@ -5996,6 +6012,7 @@ with tab_enrich:
                                             filters={'enriched_at': f'gte.{cutoff}'}, limit=50000)
 
                                         # Build lookup by username (SAME variants as recently_enriched_usernames)
+                                        # FIX: Store LIST of profiles per variant to handle collisions
                                         profile_by_username = {}
                                         for p in all_profiles:
                                             url = p.get('linkedin_url') or ''
@@ -6015,22 +6032,30 @@ with tab_enrich:
                                                         base = match.group(1).rstrip('-')
                                                         if base and base != username:
                                                             variants.append(base)
+                                                            # SYNC FIX: Also add base without hyphens
+                                                            variants.append(base.replace('-', ''))
 
                                                     # First part before last hyphen (if suffix >= 3 chars)
                                                     if '-' in username:
                                                         parts = username.rsplit('-', 1)
                                                         if len(parts[1]) >= 3:
                                                             variants.append(parts[0])
+                                                            # SYNC FIX: Also add this base without hyphens
+                                                            variants.append(parts[0].replace('-', ''))
 
                                                     # Hyphen-free version
                                                     no_hyphen = username.replace('-', '')
                                                     if no_hyphen and no_hyphen != username:
                                                         variants.append(no_hyphen)
 
-                                                    # Add all variants to lookup
+                                                    # Add all variants to lookup (store LIST to handle collisions)
                                                     for v in variants:
-                                                        if v and v not in profile_by_username:
-                                                            profile_by_username[v] = p
+                                                        if v:
+                                                            if v not in profile_by_username:
+                                                                profile_by_username[v] = []
+                                                            # Only add if this profile not already in list
+                                                            if p not in profile_by_username[v]:
+                                                                profile_by_username[v].append(p)
 
                                         # Match skipped_urls to profiles using same logic as "already enriched"
                                         matched_profiles = []
@@ -6043,23 +6068,26 @@ with tab_enrich:
                                             username = norm.split('/in/')[-1].rstrip('/').lower()
                                             username_no_hyphen = username.replace('-', '')
 
-                                            # Try exact match first
-                                            profile = profile_by_username.get(username) or profile_by_username.get(username_no_hyphen)
+                                            # Try exact match first (now returns LIST of profiles)
+                                            candidates = profile_by_username.get(username) or profile_by_username.get(username_no_hyphen) or []
 
                                             # Try prefix matching (same as "already enriched" check)
-                                            if not profile:
-                                                for db_user, p in profile_by_username.items():
+                                            if not candidates:
+                                                for db_user, profiles_list in profile_by_username.items():
                                                     db_no_hyphen = db_user.replace('-', '')
+                                                    # SYNC FIX: Add same length check as "already enriched" (line 5882)
                                                     if len(db_no_hyphen) >= 5:
-                                                        if username_no_hyphen.startswith(db_no_hyphen) or db_no_hyphen.startswith(username_no_hyphen):
-                                                            profile = p
+                                                        if username_no_hyphen.startswith(db_no_hyphen) or (len(username_no_hyphen) >= 5 and db_no_hyphen.startswith(username_no_hyphen)):
+                                                            candidates = profiles_list
                                                             break
 
-                                            if profile:
-                                                p_url = profile.get('linkedin_url', '')
-                                                if p_url not in matched_urls:
-                                                    matched_urls.add(p_url)
-                                                    matched_profiles.append(profile)
+                                            # Add all matching profiles (handles collision case)
+                                            if candidates:
+                                                for profile in candidates:
+                                                    p_url = profile.get('linkedin_url', '')
+                                                    if p_url not in matched_urls:
+                                                        matched_urls.add(p_url)
+                                                        matched_profiles.append(profile)
                                             else:
                                                 if len(unmatched_usernames) < 10:
                                                     unmatched_usernames.append(username)

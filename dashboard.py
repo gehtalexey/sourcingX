@@ -4078,15 +4078,15 @@ with tab_search:
             col1, col2, col3 = st.columns(3)
             with col1:
                 search_title = st.text_input(
-                    "Title/Role",
+                    "Title/Role (comma = OR)",
                     key="crust_search_title",
-                    placeholder="e.g., Backend Engineer, Data Scientist"
+                    placeholder="e.g., devops engineer, devops developer"
                 )
             with col2:
                 search_company = st.text_input(
-                    "Company",
+                    "Company (comma = OR)",
                     key="crust_search_company",
-                    placeholder="e.g., Google, Meta, Wiz"
+                    placeholder="e.g., google, meta, wiz"
                 )
             with col3:
                 search_location = st.text_input(
@@ -4133,7 +4133,7 @@ with tab_search:
                 )
             with col8:
                 search_keywords = st.text_input(
-                    "Keywords (searches headline/summary/skills)",
+                    "Keywords (OR across headline/summary/skills)",
                     key="crust_search_keywords",
                     placeholder="e.g., kubernetes, microservices, golang"
                 )
@@ -4143,9 +4143,9 @@ with tab_search:
                 adv_col1, adv_col2 = st.columns(2)
                 with adv_col1:
                     search_skills = st.text_input(
-                        "Skills (comma-separated)",
+                        "Skills (any of, comma = OR)",
                         key="crust_search_skills",
-                        placeholder="e.g., Python, AWS, Docker"
+                        placeholder="e.g., python, kubernetes, terraform"
                     )
                     search_school = st.text_input(
                         "School/University",
@@ -4243,12 +4243,14 @@ with tab_search:
                         results = search_people_db(filters, limit=search_limit)
 
                         if results.get("profiles"):
+                            loaded_count = len(results['profiles'])
+                            total_count = results.get('total_count', loaded_count)
                             st.session_state['crustdata_search_results'] = results['profiles']
                             st.session_state['crustdata_search_cursor'] = results.get('cursor')
-                            st.session_state['crustdata_search_total'] = results.get('total_count', len(results['profiles']))
+                            st.session_state['crustdata_search_total'] = total_count
                             st.session_state['crustdata_search_credits_used'] = results.get('credits_used', 0)
-                            st.session_state['crustdata_search_selected'] = list(range(len(results['profiles'])))  # Select all by default
-                            st.success(f"Found **{results.get('total_count', len(results['profiles'])):,}** profiles")
+                            st.session_state['crustdata_search_selected'] = list(range(loaded_count))  # Select all by default
+                            st.success(f"Loaded **{loaded_count:,}** profiles (of {total_count:,} total matching)")
                         else:
                             st.session_state['crustdata_search_results'] = []
                             st.session_state['crustdata_search_total'] = 0
@@ -4290,10 +4292,15 @@ with tab_search:
                 # Extract current employer info
                 current_company = ""
                 current_title = ""
+                seniority = ""
+                company_size = ""
                 current_employers = profile.get("current_employers", [])
                 if current_employers and len(current_employers) > 0:
-                    current_company = current_employers[0].get("employer_name") or current_employers[0].get("name", "")
-                    current_title = current_employers[0].get("employee_title") or current_employers[0].get("title", "")
+                    emp = current_employers[0]
+                    current_company = emp.get("employer_name") or emp.get("name", "")
+                    current_title = emp.get("employee_title") or emp.get("title", "")
+                    seniority = emp.get("seniority_level", "")
+                    company_size = emp.get("company_headcount_range", "")
 
                 # Fallback to top-level fields
                 if not current_title:
@@ -4304,14 +4311,25 @@ with tab_search:
                 # Use flagship_profile_url (clean URL) not linkedin_profile_url (URN format)
                 linkedin_url = profile.get("flagship_profile_url") or profile.get("linkedin_flagship_url") or profile.get("linkedin_profile_url", "")
 
+                # Extract top 3 skills
+                skills_list = profile.get("skills", [])
+                top_skills = ", ".join(skills_list[:3]) if skills_list else ""
+
+                # Headline
+                headline = profile.get("headline", "")
+
                 display_data.append({
                     "idx": i,
                     "Select": i in st.session_state.get('crustdata_search_selected', []),
                     "Name": profile.get("name", ""),
+                    "Headline": headline[:60] + "..." if len(headline) > 60 else headline,
                     "Title": current_title,
                     "Company": current_company,
+                    "Seniority": seniority,
+                    "Size": company_size,
                     "Location": profile.get("region", ""),
                     "Exp": f"{profile.get('years_of_experience_raw', '')}y" if profile.get('years_of_experience_raw') else "",
+                    "Skills": top_skills,
                     "LinkedIn": linkedin_url,
                 })
 
@@ -4319,19 +4337,22 @@ with tab_search:
 
             # Display with data_editor for selection
             edited_df = st.data_editor(
-                display_df[["Select", "Name", "Title", "Company", "Location", "Exp", "LinkedIn"]],
+                display_df[["Select", "Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn"]],
                 hide_index=True,
                 use_container_width=True,
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Select", default=True),
-                    "Name": st.column_config.TextColumn("Name", width="medium"),
-                    "Title": st.column_config.TextColumn("Title", width="large"),
-                    "Company": st.column_config.TextColumn("Company", width="medium"),
+                    "Name": st.column_config.TextColumn("Name", width="small"),
+                    "Title": st.column_config.TextColumn("Title", width="small"),
+                    "Headline": st.column_config.TextColumn("Headline", width="medium"),
+                    "Company": st.column_config.TextColumn("Company", width="small"),
                     "Location": st.column_config.TextColumn("Location", width="small"),
+                    "Size": st.column_config.TextColumn("Size", width="small"),
                     "Exp": st.column_config.TextColumn("Exp", width="small"),
-                    "LinkedIn": st.column_config.LinkColumn("LinkedIn", width="medium", display_text="View"),
+                    "Skills": st.column_config.TextColumn("Skills", width="medium"),
+                    "LinkedIn": st.column_config.LinkColumn("LinkedIn", width="small", display_text="View"),
                 },
-                disabled=["Name", "Title", "Company", "Location", "Exp", "LinkedIn"],
+                disabled=["Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn"],
                 key="crust_results_editor"
             )
 
@@ -4429,26 +4450,24 @@ with tab_search:
                     st.button("Load More", disabled=True, use_container_width=True, key="crust_load_more_disabled")
 
             with action_col3:
-                # Export CSV button
-                if st.button("Export CSV", use_container_width=True, key="crust_export_csv"):
-                    # Export selected profiles
-                    if selected_indices:
-                        selected_profiles = [results[i] for i in selected_indices]
-                        export_df = normalize_search_results_to_df(selected_profiles)
+                # Direct download button for selected profiles
+                if selected_indices:
+                    selected_profiles = [results[i] for i in selected_indices]
+                    export_df = normalize_search_results_to_df(selected_profiles)
+                    # Remove internal columns for export
+                    export_cols = [c for c in export_df.columns if not c.startswith('_')]
+                    export_data = export_df[export_cols].to_csv(index=False).encode('utf-8-sig')
 
-                        # Remove internal columns for export
-                        export_cols = [c for c in export_df.columns if not c.startswith('_')]
-                        export_data = export_df[export_cols].to_csv(index=False).encode('utf-8-sig')
-
-                        st.download_button(
-                            "Download CSV",
-                            export_data,
-                            f"crustdata_search_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            "text/csv",
-                            key="crust_download_csv"
-                        )
-                    else:
-                        st.warning("No profiles selected for export.")
+                    st.download_button(
+                        f"Download CSV ({len(selected_indices)})",
+                        export_data,
+                        f"crustdata_search_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        "text/csv",
+                        use_container_width=True,
+                        key="crust_download_csv"
+                    )
+                else:
+                    st.button("Download CSV (0)", disabled=True, use_container_width=True, key="crust_download_disabled")
 
 # ========== TAB 1: Upload ==========
 with tab_upload:
@@ -6162,6 +6181,16 @@ with tab_enrich:
             urls = extract_urls_from_phantombuster(results_df)
 
             if urls:
+                # Input hash caching: Skip detection if URLs haven't changed (prevents mismatch on button click)
+                import hashlib
+                urls_hash = hashlib.md5('|'.join(sorted(str(u) for u in urls)).encode()).hexdigest()
+
+                use_cached_detection = (
+                    st.session_state.get('_detection_hash') == urls_hash and
+                    '_matched_profiles_cache' in st.session_state and
+                    '_skipped_urls' in st.session_state
+                )
+
                 # Helper function for username extraction
                 def get_base_username_from_url(url):
                     """Extract base username from URL, removing ID suffix"""
@@ -6214,7 +6243,7 @@ with tab_enrich:
                                 # Pattern: name followed by alphanumeric ID (with or without hyphen)
                                 # e.g., "john-doe-abc123" -> "john-doe"
                                 # e.g., "johndoe14b8a717b" -> "johndoe"
-                                match = re.match(r'^([a-z-]+?)(?:-?[a-z0-9]{6,})$', username, re.IGNORECASE)
+                                match = re.match(r'^([a-z][a-z-]*)-([a-z0-9]{6,})$', username, re.IGNORECASE)
                                 if match:
                                     base = match.group(1).rstrip('-')
                                     if base and base != username:
@@ -6245,7 +6274,14 @@ with tab_enrich:
                 unavailable_urls = []
                 matched_profiles_cache = {}  # url -> profile (for Load from DB)
 
-                if HAS_DATABASE:
+                # Use cached detection results if available (prevents mismatch on button click)
+                if use_cached_detection:
+                    skipped_urls = st.session_state.get('_skipped_urls', [])
+                    new_urls = st.session_state.get('_new_urls', [])
+                    unavailable_urls = st.session_state.get('_unavailable_urls', [])
+                    matched_profiles_cache = st.session_state.get('_matched_profiles_cache', {})
+                    refresh_months = st.session_state.get('_refresh_months', 3)
+                elif HAS_DATABASE:
                     try:
                         refresh_months = ENRICHMENT_REFRESH_MONTHS
                         db_client = _get_db_client()
@@ -6277,7 +6313,7 @@ with tab_enrich:
                                     variants = [username]
 
                                     # Base username without alphanumeric suffix
-                                    match = re.match(r'^([a-z-]+?)(?:-?[a-z0-9]{6,})$', username, re.IGNORECASE)
+                                    match = re.match(r'^([a-z][a-z-]*)-([a-z0-9]{6,})$', username, re.IGNORECASE)
                                     if match:
                                         base = match.group(1).rstrip('-')
                                         if base and base != username:
@@ -6350,8 +6386,14 @@ with tab_enrich:
                 new_urls = list(dict.fromkeys(new_urls))
                 unavailable_urls = list(dict.fromkeys(unavailable_urls))
 
-                # Store matched profiles in session state for Load from DB (guaranteed 0 gap)
-                st.session_state['_matched_profiles_cache'] = matched_profiles_cache
+                # Cache detection results for Load from DB (prevents mismatch on button click)
+                if not use_cached_detection:
+                    st.session_state['_detection_hash'] = urls_hash
+                    st.session_state['_skipped_urls'] = skipped_urls
+                    st.session_state['_new_urls'] = new_urls
+                    st.session_state['_unavailable_urls'] = unavailable_urls
+                    st.session_state['_matched_profiles_cache'] = matched_profiles_cache
+                    st.session_state['_refresh_months'] = refresh_months
 
 
                 # Show stats - skip recently enriched and unavailable by default
@@ -6418,7 +6460,7 @@ with tab_enrich:
                             if username:
                                 variants.add(username)
                                 # Same logic as matching
-                                match = re.match(r'^([a-z-]+?)(?:-?[a-z0-9]{6,})$', username, re.IGNORECASE)
+                                match = re.match(r'^([a-z][a-z-]*)-([a-z0-9]{6,})$', username, re.IGNORECASE)
                                 if match:
                                     base = match.group(1).rstrip('-')
                                     variants.add(base)

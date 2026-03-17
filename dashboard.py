@@ -393,6 +393,39 @@ def load_salesql_key():
     return config.get('salesql_api_key')
 
 
+# ===== Export Helpers =====
+def prepare_df_for_export(df: pd.DataFrame) -> pd.DataFrame:
+    """Prepare a DataFrame for CSV export with consistent column order.
+
+    Ensures key columns (first_name, last_name, location, university) come first,
+    followed by other profile data, then screening/email fields.
+    """
+    if df is None or df.empty:
+        return df
+
+    # Preferred column order - personal info first, then role, then extras
+    preferred_order = [
+        'first_name', 'last_name', 'name', 'email', 'salesql_email', 'linkedin_url', 'public_url',
+        'location', 'university', 'education', 'all_schools',
+        'current_title', 'current_company', 'headline', 'title', 'company',
+        'score', 'fit', 'summary', 'reasoning',
+        'subject_line', 'email_opener', 'subject_angle', 'opener_angle'
+    ]
+
+    # Build final column order
+    final_cols = []
+    for col in preferred_order:
+        if col in df.columns:
+            final_cols.append(col)
+
+    # Add any remaining columns not in preferred order (except internal ones)
+    for col in df.columns:
+        if col not in final_cols and not col.startswith('_') and col != 'index':
+            final_cols.append(col)
+
+    return df[final_cols]
+
+
 # ===== Session Persistence =====
 # On Streamlit Cloud, use /tmp which is writable (but ephemeral across reboots)
 # Locally, use .sessions in app directory
@@ -3765,22 +3798,71 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
             if not name:
                 name = profile.get('full_name', '') or profile.get('fullName', '') or f"Profile {index}"
             result['name'] = name
+            result['first_name'] = profile.get('first_name', '')
+            result['last_name'] = profile.get('last_name', '')
+            # If no first/last name, try to split from full name
+            if not result['first_name'] and name and ' ' in name:
+                parts = name.split(' ', 1)
+                result['first_name'] = parts[0]
+                result['last_name'] = parts[1] if len(parts) > 1 else ''
             result['current_title'] = profile.get('current_title', '') or profile.get('headline', '') or profile.get('title', '') or ''
             result['current_company'] = profile.get('current_company', '') or profile.get('companyName', '') or profile.get('company', '') or ''
             result['linkedin_url'] = profile.get('linkedin_url', '') or profile.get('public_url', '') or profile.get('defaultProfileUrl', '') or ''
+            result['location'] = profile.get('location', '') or ''
+            # Get university from raw_data education_background (full name, not normalized)
+            university = ''
+            raw_data = profile.get('raw_data') or profile.get('raw_crustdata') or {}
+            if isinstance(raw_data, str):
+                try:
+                    raw_data = json.loads(raw_data)
+                except:
+                    raw_data = {}
+            edu_bg = raw_data.get('education_background', []) or []
+            if edu_bg:
+                # Get first school's full name
+                university = edu_bg[0].get('institute_name') or edu_bg[0].get('school_name') or ''
+            elif profile.get('all_schools'):
+                university = profile['all_schools'][0] if profile['all_schools'] else ''
+            elif profile.get('education'):
+                university = profile['education']
+            result['university'] = university
             # Include email for export (prefer DB email, fallback to SalesQL)
             result['email'] = profile.get('email', '') or profile.get('salesql_email', '') or ''
             result['index'] = index
         except Exception as e:
             import traceback
+            fallback_name = profile.get('name', '') or profile.get('first_name', '') or profile.get('fullName', '') or f"Profile {index}"
+            first_name = profile.get('first_name', '')
+            last_name = profile.get('last_name', '')
+            if not first_name and fallback_name and ' ' in fallback_name:
+                parts = fallback_name.split(' ', 1)
+                first_name = parts[0]
+                last_name = parts[1] if len(parts) > 1 else ''
+            # Get university from raw_data education_background (full name)
+            err_university = ''
+            err_raw_data = profile.get('raw_data') or profile.get('raw_crustdata') or {}
+            if isinstance(err_raw_data, str):
+                try:
+                    err_raw_data = json.loads(err_raw_data)
+                except:
+                    err_raw_data = {}
+            err_edu_bg = err_raw_data.get('education_background', []) or []
+            if err_edu_bg:
+                err_university = err_edu_bg[0].get('institute_name') or err_edu_bg[0].get('school_name') or ''
+            elif profile.get('all_schools'):
+                err_university = profile['all_schools'][0] if profile['all_schools'] else ''
             result = {
                 "score": 0,
                 "fit": "Error",
                 "summary": f"Screen error: {str(e)[:80]}",
-                "name": profile.get('name', '') or profile.get('first_name', '') or profile.get('fullName', '') or f"Profile {index}",
+                "name": fallback_name,
+                "first_name": first_name,
+                "last_name": last_name,
                 "current_title": "",
                 "current_company": "",
                 "linkedin_url": "",
+                "location": profile.get('location', ''),
+                "university": err_university,
                 "email": profile.get('email', '') or profile.get('salesql_email', '') or '',
                 "index": index
             }
@@ -4375,9 +4457,9 @@ with tab_search:
                 if selected_indices:
                     selected_profiles = [results[i] for i in selected_indices]
                     export_df = normalize_search_results_to_df(selected_profiles)
-                    # Remove internal columns for export
-                    export_cols = [c for c in export_df.columns if not c.startswith('_')]
-                    export_data = export_df[export_cols].to_csv(index=False).encode('utf-8-sig')
+                    # Apply consistent column order and remove internal columns
+                    export_df = prepare_df_for_export(export_df)
+                    export_data = export_df.to_csv(index=False).encode('utf-8-sig')
 
                     st.download_button(
                         f"Download CSV ({len(selected_indices)})",
@@ -5847,7 +5929,8 @@ with tab_filter:
         # Download and Send to Enrich buttons
         col1, col2, col3 = st.columns([1, 1, 2])
         with col1:
-            csv_data = view_df.to_csv(index=False)
+            export_view_df = prepare_df_for_export(view_df)
+            csv_data = export_view_df.to_csv(index=False)
             st.download_button(
                 label="Download View (CSV)",
                 data=csv_data,
@@ -7446,7 +7529,8 @@ with tab_filter2:
                         })
 
         if len(display_df) > 0:
-            csv_data = display_df.to_csv(index=False)
+            export_display_df = prepare_df_for_export(display_df)
+            csv_data = export_display_df.to_csv(index=False)
             st.download_button("Download Passed (CSV)", csv_data, "passed_profiles.csv", "text/csv", key="download_passed")
 
         # Show filtered out candidates - MEMORY OPTIMIZED: only show counts
@@ -8330,6 +8414,69 @@ with tab_screening:
             # Export options
             st.markdown("### Export Results")
 
+            # Helper to prepare screening results for export with consistent columns
+            def prepare_screening_export(results_list):
+                """Prepare screening results for CSV export with consistent column order."""
+                if not results_list:
+                    return ""
+                df = pd.DataFrame(results_list)
+
+                # Populate missing fields from available data
+                # 1. Split name into first_name/last_name if missing
+                if 'first_name' not in df.columns:
+                    df['first_name'] = ''
+                if 'last_name' not in df.columns:
+                    df['last_name'] = ''
+                if 'name' in df.columns:
+                    for idx, row in df.iterrows():
+                        if not row.get('first_name') and row.get('name') and ' ' in str(row['name']):
+                            parts = str(row['name']).split(' ', 1)
+                            df.at[idx, 'first_name'] = parts[0]
+                            df.at[idx, 'last_name'] = parts[1] if len(parts) > 1 else ''
+
+                # 2. Try to get location/university from enriched profiles in session
+                enriched_raw = st.session_state.get('enriched_profiles_raw', {})
+                if 'location' not in df.columns:
+                    df['location'] = ''
+                if 'university' not in df.columns:
+                    df['university'] = ''
+
+                for idx, row in df.iterrows():
+                    url = row.get('linkedin_url', '')
+                    if url and url in enriched_raw:
+                        raw = enriched_raw[url]
+                        raw_data = raw.get('raw_data') or raw
+                        if isinstance(raw_data, str):
+                            try:
+                                import json
+                                raw_data = json.loads(raw_data)
+                            except:
+                                raw_data = {}
+                        # Location
+                        if not df.at[idx, 'location']:
+                            df.at[idx, 'location'] = raw_data.get('location', '') or raw.get('location', '')
+                        # University
+                        if not df.at[idx, 'university']:
+                            edu = raw_data.get('education_background', []) or []
+                            if edu:
+                                school = edu[0].get('institute_name') or edu[0].get('school_name') or ''
+                                df.at[idx, 'university'] = school
+                            elif raw_data.get('all_schools'):
+                                df.at[idx, 'university'] = raw_data['all_schools'][0] if raw_data['all_schools'] else ''
+
+                # Define preferred column order
+                export_cols = [
+                    'first_name', 'last_name', 'name', 'email', 'salesql_email', 'linkedin_url',
+                    'location', 'university', 'current_title', 'current_company',
+                    'score', 'fit', 'summary', 'reasoning'
+                ]
+                # Use only columns that exist
+                available_cols = [c for c in export_cols if c in df.columns]
+                # Add any remaining columns not in preferred order
+                remaining = [c for c in df.columns if c not in export_cols and c != 'index']
+                final_cols = available_cols + remaining
+                return df[final_cols].to_csv(index=False)
+
             # Count by fit level
             strong_list = [r for r in screening_results if r.get('fit') == 'Strong Fit']
             good_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
@@ -8344,7 +8491,7 @@ with tab_screening:
             with combo_col1:
                 st.download_button(
                     f"Strong + Good ({len(strong_good_list)})",
-                    pd.DataFrame(strong_good_list).to_csv(index=False) if strong_good_list else "",
+                    prepare_screening_export(strong_good_list),
                     "screening_strong_good_fit.csv",
                     "text/csv",
                     disabled=len(strong_good_list) == 0,
@@ -8354,17 +8501,16 @@ with tab_screening:
             with combo_col2:
                 st.download_button(
                     f"Strong + Good + Partial ({len(strong_good_partial_list)})",
-                    pd.DataFrame(strong_good_partial_list).to_csv(index=False) if strong_good_partial_list else "",
+                    prepare_screening_export(strong_good_partial_list),
                     "screening_strong_good_partial_fit.csv",
                     "text/csv",
                     disabled=len(strong_good_partial_list) == 0
                 )
 
             with combo_col3:
-                full_df = pd.DataFrame(sorted_results)
                 st.download_button(
                     f"All Results ({len(sorted_results)})",
-                    full_df.to_csv(index=False),
+                    prepare_screening_export(sorted_results),
                     "screening_results_all.csv",
                     "text/csv"
                 )
@@ -8381,7 +8527,7 @@ with tab_screening:
                 with ind_col1:
                     st.download_button(
                         f"Strong Fit ({len(strong_list)})",
-                        pd.DataFrame(strong_list).to_csv(index=False) if strong_list else "",
+                        prepare_screening_export(strong_list),
                         "screening_strong_fit.csv",
                         "text/csv",
                         disabled=len(strong_list) == 0
@@ -8390,7 +8536,7 @@ with tab_screening:
                 with ind_col2:
                     st.download_button(
                         f"Good Fit ({len(good_list)})",
-                        pd.DataFrame(good_list).to_csv(index=False) if good_list else "",
+                        prepare_screening_export(good_list),
                         "screening_good_fit.csv",
                         "text/csv",
                         disabled=len(good_list) == 0
@@ -8399,7 +8545,7 @@ with tab_screening:
                 with ind_col3:
                     st.download_button(
                         f"Partial Fit ({len(partial_list)})",
-                        pd.DataFrame(partial_list).to_csv(index=False) if partial_list else "",
+                        prepare_screening_export(partial_list),
                         "screening_partial_fit.csv",
                         "text/csv",
                         disabled=len(partial_list) == 0
@@ -8732,7 +8878,8 @@ with tab_screening:
                         with email_export_col1:
                             # Full export with all fields
                             export_df = pd.DataFrame(email_results)
-                            export_cols = ['name', 'email', 'linkedin_url', 'current_title', 'current_company',
+                            export_cols = ['first_name', 'last_name', 'name', 'email', 'linkedin_url',
+                                          'location', 'university', 'current_title', 'current_company',
                                           'subject_line', 'email_opener', 'subject_angle', 'opener_angle']
                             export_cols = [c for c in export_cols if c in export_df.columns]
                             st.download_button(
@@ -9207,9 +9354,10 @@ with tab_database:
                     # Action buttons
                     btn_col1, btn_col2 = st.columns(2)
                     with btn_col1:
+                        export_filtered_df = prepare_df_for_export(filtered_df)
                         st.download_button(
                             f"Download CSV ({len(filtered_df)})",
-                            filtered_df.to_csv(index=False),
+                            export_filtered_df.to_csv(index=False),
                             "database_filtered.csv",
                             "text/csv",
                             key="db_download_btn"

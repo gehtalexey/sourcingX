@@ -49,6 +49,40 @@ COMPANY_NAME_MAP = {
     'healthy.io': 'Healthy',
 }
 
+# Israeli school name mappings (long names -> short)
+SCHOOL_NAME_MAP = {
+    'hamikhlalah ha\'academit lehandassah sami shamoon': 'SCE',
+    'sami shamoon college of engineering': 'SCE',
+    'hamikhlalah haacademit lehandassah sami shamoon': 'SCE',
+    'the academic college of tel aviv-yaffo': 'MTA',
+    'tel aviv-yaffo academic college': 'MTA',
+    'the college of management academic studies': 'COMAS',
+    'college of management academic studies': 'COMAS',
+    'the interdisciplinary center': 'IDC Herzliya',
+    'interdisciplinary center herzliya': 'IDC Herzliya',
+    'reichman university': 'Reichman',
+    'the open university of israel': 'Open University',
+    'open university of israel': 'Open University',
+    'afeka tel aviv academic college of engineering': 'Afeka',
+    'afeka - tel aviv academic college of engineering': 'Afeka',
+    'holon institute of technology': 'HIT',
+    'ort braude college of engineering': 'Braude',
+    'braude college of engineering': 'Braude',
+    'ruppin academic center': 'Ruppin',
+    'sapir academic college': 'Sapir',
+    'the technion - israel institute of technology': 'Technion',
+    'technion - israel institute of technology': 'Technion',
+    'tel aviv university': 'TAU',
+    'the hebrew university of jerusalem': 'Hebrew U',
+    'hebrew university of jerusalem': 'Hebrew U',
+    'ben-gurion university of the negev': 'BGU',
+    'ben gurion university of the negev': 'BGU',
+    'bar-ilan university': 'Bar-Ilan',
+    'bar ilan university': 'Bar-Ilan',
+    'weizmann institute of science': 'Weizmann',
+    'university of haifa': 'Haifa U',
+}
+
 
 def normalize_company_name(name: str) -> str:
     """Clean company name by stripping suffixes and normalizing known names."""
@@ -70,6 +104,18 @@ def normalize_company_name(name: str) -> str:
         cleaned = cleaned[:-3]
 
     return cleaned.strip()
+
+
+def normalize_school_name(name: str) -> str:
+    """Clean school name by mapping long Israeli school names to short versions."""
+    if not name:
+        return ''
+
+    name_lower = name.lower().strip()
+    if name_lower in SCHOOL_NAME_MAP:
+        return SCHOOL_NAME_MAP[name_lower]
+
+    return name.strip()
 
 
 # ===== Prompt Templates =====
@@ -148,26 +194,29 @@ Return ONLY valid JSON:
    - "Ready to...", "Interested in...", "Looking for...", "Excited about..."
    - Any question that doesn't mention something specific about THEM
 
-3. **OPENER - MUST BE PERSONALIZED & VARIED**:
+3. **OPENER - MUST BE PERSONALIZED & SPECIFIC**:
    - {length_desc}. Tone: {tone_desc}.
    - Must reference a DIFFERENT aspect than subject
-   - Use the FULL profile context (summary, role descriptions, company info, education details)
+   - MUST mention something SPECIFIC from their profile (a tech, project, domain, company product)
+   - Be direct and conversational - sound like a real person, not a template
 
-   OPENER FORMAT VARIETY (rotate through these):
-   - Ask about their work: "What's the trickiest part of [their domain] at [company]?"
-   - Reference career path: "Lead to IC is bold - what drove that?"
-   - Education hook: "[School] [field] is solid prep. How does it help at [company]?"
-   - Skill curiosity: "[Skill] at scale gets complex. What's your approach?"
-   - Company transition: "Big move from [prev]. What pulled you to [current]?"
-   - Tenure observation: "[X] years at [company] is rare. What keeps you engaged?"
-   - Domain interest: "[Company]'s work on [domain from description] sounds interesting."
-   - Role curiosity: "Your focus on [something from role description] caught my eye."
-   - Background uniqueness: "[non-CS field] to engineering is unique. How does that help?"
-   - Team/culture: "How's the [backend/infra/platform] team culture at [company]?"
+   GOOD OPENER EXAMPLES:
+   - "GraphQL at monday scale - how do you handle schema versioning?"
+   - "Cloud security at Wiz must be wild. What's your toughest challenge?"
+   - "Saw you moved from Waze to a startup. Miss the scale or loving the speed?"
+   - "Bioinformatics to backend is a cool pivot. What sparked it?"
+   - "5 years at Check Point - what's kept you there?"
 
-4. **FORBIDDEN** (instant fail):
+   BAD OPENER EXAMPLES (NEVER use these patterns):
+   - "What keeps your team motivated?" - generic, no specifics
+   - "What inspired you to make the switch?" - generic
+   - "How has X shaped your approach?" - generic corporate-speak
+   - "must be quite the challenge/dance" - cliche filler
+   - Any question that doesn't mention specific tech/domain/project
+
+4. **FORBIDDEN WORDS & PHRASES** (instant fail):
    - Em dashes (use regular dash - or comma)
-   - "I noticed", "I came across", "I was impressed"
+   - "I noticed", "I came across", "I was impressed", "caught my eye"
    - "I hope this finds you well", "Hope you're doing well"
    - "Reaching out because", "Just following up"
    - "Ready to..." subject lines
@@ -175,12 +224,34 @@ Return ONLY valid JSON:
    - Mentioning the same company twice
    - Mentioning companies from before 2018
 
-5. **COMPANY NAMES**: Clean them up
+   FORBIDDEN FLATTERY (sounds fake):
+   - "impressive", "intriguing", "fascinating", "exciting"
+   - "great milestone", "quite the challenge", "quite the dance"
+   - "sounds intense", "sounds amazing", "sounds incredible"
+   - Any superlative praise about their career
+
+   FORBIDDEN GENERIC QUESTIONS:
+   - "What keeps you motivated?"
+   - "What inspired you to..."
+   - "How has X shaped your approach?"
+   - "What's been the most exciting/challenging part?"
+   - "How do you keep the team motivated/innovative?"
+   - Any question without a specific tech/domain/project mentioned
+
+5. **SCHOOL NAMES**: Use short versions
+   - "Hamikhlalah Ha'academit Lehandassah Sami Shamoon" -> "SCE"
+   - "The Academic College of Tel Aviv-Yaffo" -> "MTA"
+   - "Tel Aviv University" -> "TAU"
+   - "Ben-Gurion University of the Negev" -> "BGU"
+   - "The Technion - Israel Institute of Technology" -> "Technion"
+   - If school name is long and not well-known, skip education angle entirely
+
+6. **COMPANY NAMES**: Clean them up
    - Strip: Ltd, Inc, Corp, Technologies, Labs, Group, Solutions, .io
    - "Check Point Software Technologies, Ltd." -> "Check Point"
    - "AI21 Labs" -> "AI21"
 
-6. **ANGLE SELECTION** (pick what's MOST distinctive - DON'T default to skills):
+7. **ANGLE SELECTION** (pick what's MOST distinctive - DON'T default to skills):
 
    CHECK IN THIS ORDER and pick the FIRST that's notable:
    1. Career pattern? Manager->IC, Founder, 5+ years tenure, acquisition → use CAREER angle
@@ -192,9 +263,9 @@ Return ONLY valid JSON:
 
    IMPORTANT: Skills angle is OVERUSED. Only use it when nothing else is distinctive.
 
-7. **COMPANY TRANSITIONS**: Only mention for tier-1 companies (Google, Meta, Apple, Amazon, Microsoft, Waze). Most people have previous jobs - that's not distinctive!
+8. **COMPANY TRANSITIONS**: Only mention for tier-1 companies (Google, Meta, Apple, Amazon, Microsoft, Waze). Most people have previous jobs - that's not distinctive!
 
-8. **SAME COMPANY CHECK**: If previous company = current company (or parent/child like Waze/Google), do NOT use company transition angle. Focus on role growth, skills, or education instead.
+9. **SAME COMPANY CHECK**: If previous company = current company (or parent/child like Waze/Google), do NOT use company transition angle. Focus on role growth, skills, or education instead.
 {custom_section}
 
 Today's date: {datetime.now().strftime("%Y-%m-%d")}"""
@@ -287,6 +358,8 @@ def trim_profile_for_email(raw: dict) -> dict:
             school = edu.get('institute_name') or edu.get('school_name') or ''
             if not school:
                 continue
+            # Normalize school name to short version
+            school = normalize_school_name(school)
             entry = {
                 'school': school,
                 'degree': edu.get('degree_name') or edu.get('degree'),
@@ -357,9 +430,10 @@ def generate_email_for_profile(
     length: str = 'medium',
     custom_instruction: str = None,
     ai_model: str = 'gpt-4o-mini',
-    tracker=None
+    tracker=None,
+    generate_type: str = 'both'
 ) -> dict:
-    """Generate email subject line and opener for a single profile.
+    """Generate email subject line and/or opener for a single profile.
 
     Args:
         profile: Profile dict with raw_data or raw_crustdata
@@ -370,6 +444,7 @@ def generate_email_for_profile(
         custom_instruction: Optional user instruction
         ai_model: Model to use (gpt-4o-mini or gpt-4o)
         tracker: Optional usage tracker
+        generate_type: What to generate - 'both', 'subject_only', or 'opener_only'
 
     Returns:
         Dict with subject_line, subject_angle, email_opener, opener_angle
@@ -399,7 +474,23 @@ def generate_email_for_profile(
     # Build prompts
     system_prompt = build_email_prompt(sender, tone, length, custom_instruction)
 
-    user_prompt = f"""## Candidate Profile:
+    # Customize user prompt based on generate_type
+    if generate_type == 'subject_only':
+        user_prompt = f"""## Candidate Profile:
+```json
+{json.dumps(trimmed, indent=2, default=str)}
+```
+
+Generate ONLY a personalized subject line. Return JSON with: subject_line, subject_angle."""
+    elif generate_type == 'opener_only':
+        user_prompt = f"""## Candidate Profile:
+```json
+{json.dumps(trimmed, indent=2, default=str)}
+```
+
+Generate ONLY a personalized email opener (first 2-3 sentences). Return JSON with: email_opener, opener_angle."""
+    else:  # both
+        user_prompt = f"""## Candidate Profile:
 ```json
 {json.dumps(trimmed, indent=2, default=str)}
 ```
@@ -433,8 +524,16 @@ Generate a personalized subject line and email opener. Remember: subject and ope
 
         result = json.loads(response.choices[0].message.content)
 
-        # Validate different angles
-        if result.get('subject_angle') == result.get('opener_angle'):
+        # Fill in empty values for fields not generated based on generate_type
+        if generate_type == 'subject_only':
+            result.setdefault('email_opener', '')
+            result.setdefault('opener_angle', '')
+        elif generate_type == 'opener_only':
+            result.setdefault('subject_line', '')
+            result.setdefault('subject_angle', '')
+
+        # Validate different angles only if generating both
+        if generate_type == 'both' and result.get('subject_angle') == result.get('opener_angle'):
             result['warning'] = 'Same angle used for both (AI error)'
 
         return result
@@ -472,7 +571,8 @@ def generate_emails_batch(
     ai_model: str = 'gpt-4o-mini',
     max_workers: int = 10,
     progress_callback=None,
-    cancel_flag=None
+    cancel_flag=None,
+    generate_type: str = 'both'
 ) -> list:
     """Generate emails for multiple profiles in parallel.
 
@@ -487,6 +587,7 @@ def generate_emails_batch(
         max_workers: Concurrent threads
         progress_callback: Function(completed, total, result) called after each
         cancel_flag: Dict with 'cancelled' key to check
+        generate_type: What to generate - 'both', 'subject_only', or 'opener_only'
 
     Returns:
         List of results with profile info + generated email content
@@ -511,7 +612,8 @@ def generate_emails_batch(
                 profile, client,
                 sender=sender, tone=tone, length=length,
                 custom_instruction=custom_instruction,
-                ai_model=ai_model, tracker=tracker
+                ai_model=ai_model, tracker=tracker,
+                generate_type=generate_type
             )
 
             # Add profile info
@@ -539,16 +641,47 @@ def generate_emails_batch(
             result['email'] = profile.get('email', '') or profile.get('salesql_email', '')
             result['index'] = index
 
+            # Additional fields for export
+            result['first_name'] = raw.get('first_name', '') or profile.get('first_name', '')
+            result['last_name'] = raw.get('last_name', '') or profile.get('last_name', '')
+            # If no first/last name, try to split from full name
+            if not result['first_name'] and name and ' ' in name:
+                parts = name.split(' ', 1)
+                result['first_name'] = parts[0]
+                result['last_name'] = parts[1] if len(parts) > 1 else ''
+            result['location'] = raw.get('location', '') or profile.get('location', '')
+
+            # Get university from education
+            university = ''
+            edu_background = raw.get('education_background', []) or []
+            if edu_background:
+                # Get first school (most recent)
+                first_edu = edu_background[0] if edu_background else {}
+                university = first_edu.get('institute_name') or first_edu.get('school_name') or ''
+                university = normalize_school_name(university)
+            result['university'] = university or profile.get('university', '')
+
         except Exception as e:
+            fallback_name = profile.get('name', f"Profile {index}")
+            first_name = profile.get('first_name', '')
+            last_name = profile.get('last_name', '')
+            if not first_name and fallback_name and ' ' in fallback_name:
+                parts = fallback_name.split(' ', 1)
+                first_name = parts[0]
+                last_name = parts[1] if len(parts) > 1 else ''
             result = {
                 "subject_line": "",
                 "email_opener": "",
                 "error": f"Generation error: {str(e)[:80]}",
-                "name": profile.get('name', f"Profile {index}"),
+                "name": fallback_name,
+                "first_name": first_name,
+                "last_name": last_name,
                 "current_title": profile.get('current_title', ''),
                 "current_company": profile.get('current_company', ''),
                 "linkedin_url": profile.get('linkedin_url', ''),
                 "email": profile.get('email', ''),
+                "location": profile.get('location', ''),
+                "university": profile.get('university', ''),
                 "index": index
             }
 

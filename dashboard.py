@@ -8908,30 +8908,67 @@ with tab_screening:
                             # Refresh emails from SalesQL/DB
                             if st.button("Refresh Emails", key="refresh_emails_from_salesql", help="Update with latest SalesQL emails"):
                                 updated_count = 0
-                                # Try to get emails from screening results first (has SalesQL emails)
-                                screening_results = st.session_state.get('screening_results', [])
-                                screening_emails = {r.get('linkedin_url'): r.get('email') or r.get('salesql_email')
-                                                   for r in screening_results if r.get('linkedin_url')}
+                                from normalizers import normalize_linkedin_url as norm_url
 
-                                # Also check database
-                                db_emails = {}
+                                # Helper to normalize URL for matching
+                                def norm(url):
+                                    if not url:
+                                        return ''
+                                    try:
+                                        return norm_url(url) or url.lower().rstrip('/')
+                                    except:
+                                        return url.lower().rstrip('/')
+
+                                # Collect all email sources with normalized URLs
+                                all_emails = {}
+
+                                # 1. From screening results
+                                screening_results = st.session_state.get('screening_results', [])
+                                for r in screening_results:
+                                    url = norm(r.get('linkedin_url'))
+                                    email = r.get('salesql_email') or r.get('email')
+                                    if url and email:
+                                        all_emails[url] = email
+
+                                # 2. From passed_candidates_df (SalesQL enrichment results)
+                                passed_df = st.session_state.get('passed_candidates_df')
+                                if passed_df is not None and not passed_df.empty:
+                                    url_col = 'linkedin_url' if 'linkedin_url' in passed_df.columns else 'public_url'
+                                    email_col = 'salesql_email' if 'salesql_email' in passed_df.columns else 'email'
+                                    if url_col in passed_df.columns and email_col in passed_df.columns:
+                                        for _, row in passed_df.iterrows():
+                                            url = norm(row.get(url_col))
+                                            email = row.get(email_col)
+                                            if url and email and pd.notna(email):
+                                                all_emails[url] = email
+
+                                # 3. From database (batch lookup for efficiency)
                                 if HAS_DATABASE:
                                     try:
                                         db_client = _get_db_client()
                                         if db_client:
+                                            # Get URLs we don't have emails for yet
+                                            missing_urls = []
                                             for r in email_results:
                                                 url = r.get('linkedin_url')
-                                                if url and not screening_emails.get(url):
-                                                    db_profile = get_profile(db_client, url)
-                                                    if db_profile and db_profile.get('email'):
-                                                        db_emails[url] = db_profile['email']
-                                    except:
-                                        pass
+                                                if url and norm(url) not in all_emails:
+                                                    missing_urls.append(url)
+
+                                            if missing_urls:
+                                                from db import get_profiles_by_urls
+                                                db_profiles = get_profiles_by_urls(db_client, missing_urls[:100])
+                                                for p in db_profiles:
+                                                    url = norm(p.get('linkedin_url'))
+                                                    email = p.get('email')
+                                                    if url and email:
+                                                        all_emails[url] = email
+                                    except Exception as e:
+                                        st.warning(f"DB lookup failed: {str(e)[:50]}")
 
                                 # Update email_generation_results
                                 for r in st.session_state['email_generation_results']:
-                                    url = r.get('linkedin_url')
-                                    new_email = screening_emails.get(url) or db_emails.get(url)
+                                    url = norm(r.get('linkedin_url'))
+                                    new_email = all_emails.get(url)
                                     if new_email and new_email != r.get('email'):
                                         r['email'] = new_email
                                         updated_count += 1
@@ -8939,7 +8976,7 @@ with tab_screening:
                                 if updated_count > 0:
                                     st.success(f"Updated {updated_count} emails!")
                                 else:
-                                    st.info("No new emails found")
+                                    st.info(f"No new emails found. Checked {len(all_emails)} sources.")
                                 st.rerun()
 
                         with email_export_col4:

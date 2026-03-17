@@ -8908,6 +8908,7 @@ with tab_screening:
                             # Refresh emails from SalesQL/DB
                             if st.button("Refresh Emails", key="refresh_emails_from_salesql", help="Update with latest SalesQL emails"):
                                 updated_count = 0
+                                skipped_mismatch = 0
                                 from normalizers import normalize_linkedin_url as norm_url
 
                                 # Helper to normalize URL for matching
@@ -8919,7 +8920,22 @@ with tab_screening:
                                     except:
                                         return url.lower().rstrip('/')
 
+                                # Helper to get first name for verification
+                                def get_first_name(name):
+                                    if not name:
+                                        return ''
+                                    return str(name).split()[0].lower().strip() if name else ''
+
+                                # Helper to check if names match (first name comparison)
+                                def names_match(name1, name2):
+                                    fn1 = get_first_name(name1)
+                                    fn2 = get_first_name(name2)
+                                    if not fn1 or not fn2:
+                                        return True  # Can't verify, allow match
+                                    return fn1 == fn2
+
                                 # Collect all email sources with normalized URLs
+                                # Store (email, name) tuples for verification
                                 all_emails = {}
 
                                 # 1. From screening results
@@ -8927,20 +8943,23 @@ with tab_screening:
                                 for r in screening_results:
                                     url = norm(r.get('linkedin_url'))
                                     email = r.get('salesql_email') or r.get('email')
+                                    name = r.get('name', '')
                                     if url and email:
-                                        all_emails[url] = email
+                                        all_emails[url] = (email, name)
 
                                 # 2. From passed_candidates_df (SalesQL enrichment results)
                                 passed_df = st.session_state.get('passed_candidates_df')
                                 if passed_df is not None and not passed_df.empty:
                                     url_col = 'linkedin_url' if 'linkedin_url' in passed_df.columns else 'public_url'
                                     email_col = 'salesql_email' if 'salesql_email' in passed_df.columns else 'email'
+                                    name_col = 'name' if 'name' in passed_df.columns else 'first_name'
                                     if url_col in passed_df.columns and email_col in passed_df.columns:
                                         for _, row in passed_df.iterrows():
                                             url = norm(row.get(url_col))
                                             email = row.get(email_col)
+                                            name = row.get(name_col, '')
                                             if url and email and pd.notna(email):
-                                                all_emails[url] = email
+                                                all_emails[url] = (email, name)
 
                                 # 3. From database (batch lookup for efficiency)
                                 if HAS_DATABASE:
@@ -8960,23 +8979,37 @@ with tab_screening:
                                                 for p in db_profiles:
                                                     url = norm(p.get('linkedin_url'))
                                                     email = p.get('email')
+                                                    name = p.get('name', '')
                                                     if url and email:
-                                                        all_emails[url] = email
+                                                        all_emails[url] = (email, name)
                                     except Exception as e:
                                         st.warning(f"DB lookup failed: {str(e)[:50]}")
 
-                                # Update email_generation_results
+                                # Update email_generation_results with name verification
                                 for r in st.session_state['email_generation_results']:
                                     url = norm(r.get('linkedin_url'))
-                                    new_email = all_emails.get(url)
-                                    if new_email and new_email != r.get('email'):
-                                        r['email'] = new_email
-                                        updated_count += 1
+                                    match = all_emails.get(url)
+                                    if match:
+                                        new_email, source_name = match
+                                        target_name = r.get('name', '')
+                                        if new_email and new_email != r.get('email'):
+                                            # Verify names match before assigning
+                                            if names_match(target_name, source_name):
+                                                r['email'] = new_email
+                                                updated_count += 1
+                                            else:
+                                                skipped_mismatch += 1
 
                                 if updated_count > 0:
-                                    st.success(f"Updated {updated_count} emails!")
+                                    msg = f"Updated {updated_count} emails!"
+                                    if skipped_mismatch > 0:
+                                        msg += f" (Skipped {skipped_mismatch} - name mismatch)"
+                                    st.success(msg)
                                 else:
-                                    st.info(f"No new emails found. Checked {len(all_emails)} sources.")
+                                    msg = f"No new emails found. Checked {len(all_emails)} sources."
+                                    if skipped_mismatch > 0:
+                                        msg += f" Skipped {skipped_mismatch} due to name mismatch."
+                                    st.info(msg)
                                 st.rerun()
 
                         with email_export_col4:

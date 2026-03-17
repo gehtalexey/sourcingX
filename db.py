@@ -489,6 +489,42 @@ def update_profile_email(client: SupabaseClient, linkedin_url: str, email: str, 
     return {'linkedin_url': linkedin_url, 'email': email}
 
 
+def update_profile_emails_batch(client: SupabaseClient, emails: list, source: str = 'salesql') -> dict:
+    """Batch update profiles with emails (single DB call instead of N).
+
+    Args:
+        client: SupabaseClient instance
+        emails: List of dicts with keys: linkedin_url, email
+        source: Email source (default 'salesql')
+    Returns:
+        Stats dict with 'saved' and 'errors' counts
+    """
+    if not emails:
+        return {'saved': 0, 'errors': 0}
+
+    rows = []
+    for e in emails:
+        url = normalize_linkedin_url(e.get('linkedin_url', ''))
+        email = e.get('email', '')
+        if not url or not email or not str(email).strip():
+            continue
+        rows.append({
+            'linkedin_url': url,
+            'email': email,
+            'email_source': source,
+        })
+
+    if not rows:
+        return {'saved': 0, 'errors': 0}
+
+    try:
+        client.upsert_batch('profiles', rows, on_conflict='linkedin_url')
+        return {'saved': len(rows), 'errors': 0}
+    except Exception as e:
+        print(f"[DB] Batch email save failed: {e}")
+        return {'saved': 0, 'errors': len(rows)}
+
+
 # ============================================================================
 # QUERY OPERATIONS
 # ============================================================================

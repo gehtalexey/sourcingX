@@ -2599,7 +2599,7 @@ def enrich_batch(urls: list[str], api_key: str, tracker: 'UsageTracker' = None) 
             # Store matching debug in session state
             match_debug = {
                 'results': len(result),
-                'matched': matched_count,
+                'matched': matched_via_query_field + matched_via_fallback,
                 'matched_via_query_field': matched_via_query_field,
                 'matched_via_fallback': matched_via_fallback,
                 'unmatched_count': len(unmatched),

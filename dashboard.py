@@ -337,6 +337,8 @@ def load_config():
                 config['api_key'] = st.secrets['api_key']
             if 'openai_api_key' in st.secrets:
                 config['openai_api_key'] = st.secrets['openai_api_key']
+            elif 'OPENAI_API_KEY' in st.secrets:
+                config['openai_api_key'] = st.secrets['OPENAI_API_KEY']
             if 'phantombuster_api_key' in st.secrets:
                 config['phantombuster_api_key'] = st.secrets['phantombuster_api_key']
             if 'phantombuster_agent_id' in st.secrets:
@@ -8683,18 +8685,16 @@ with tab_screening:
                         if not st.session_state.get('email_test_approved'):
                             st.caption("Run a test batch first to unlock 'Generate All'")
 
-                    # Get OpenAI API key
-                    openai_key = st.session_state.get('openai_api_key') or os.environ.get('OPENAI_API_KEY')
-                    if not openai_key:
-                        config_path = Path("config.json")
-                        if config_path.exists():
-                            try:
-                                config = json.loads(config_path.read_text())
-                                openai_key = config.get('openai_api_key')
-                            except:
-                                pass
+                    # Get OpenAI API key (use load_openai_key which handles st.secrets for cloud)
+                    openai_key = st.session_state.get('openai_api_key') or os.environ.get('OPENAI_API_KEY') or load_openai_key()
 
                     # Generate test batch
+                    if generate_test_btn:
+                        if not openai_key:
+                            st.error("OpenAI API key is required. Set it in Streamlit secrets (openai_api_key), config.json, or environment variable OPENAI_API_KEY.")
+                        elif not filtered_profiles:
+                            st.warning("No profiles selected. Check that profiles have matching fit levels.")
+
                     if generate_test_btn and openai_key and filtered_profiles:
                         test_profiles = filtered_profiles[:test_batch_size]
 
@@ -8760,6 +8760,14 @@ with tab_screening:
                         st.rerun()
 
                     # Generate all
+                    if generate_all_btn:
+                        if not openai_key:
+                            st.error("OpenAI API key is required. Set it in Streamlit secrets (openai_api_key), config.json, or environment variable OPENAI_API_KEY.")
+                        elif not filtered_profiles:
+                            st.warning("No profiles selected. Check that profiles have matching fit levels.")
+                        elif not st.session_state.get('email_test_approved'):
+                            st.warning("Run a test batch first to unlock 'Generate All'.")
+
                     if generate_all_btn and openai_key and filtered_profiles and st.session_state.get('email_test_approved'):
                         # Batch load raw_data for all profiles (much faster than individual calls)
                         with st.spinner(f"Loading profile data for {len(filtered_profiles)} profiles..."):

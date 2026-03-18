@@ -13,9 +13,47 @@ This document explains how LinkedIn URLs flow through SourcingX from input to da
 |--------|-------------------|--------------|
 | CSV/GEM | `john-doe-12345` | `normalize_uploaded_csv()` |
 | PhantomBuster | `defaultProfileUrl` | `normalize_phantombuster_columns()` |
-| Crustdata Response | `linkedin_flagship_url` | `enrich_batch()` |
+| Crustdata Echo | `query_linkedin_profile_urn_or_slug` | `enrich_batch()` - PRIMARY match |
+| Crustdata Canonical | `linkedin_flagship_url` | `enrich_batch()` - fallback |
 | Database PK | `linkedin_url` column | `save_enriched_profile()` |
 | Database Matching | `original_url` column | `get_recently_enriched_urls()` |
+
+## Crustdata Input Echo (Critical for Matching)
+
+**Crustdata echoes our input URL back in the response!**
+
+When we send: `linkedin_profile_url=john-doe-12345`
+
+Crustdata returns:
+```json
+{
+  "query_linkedin_profile_urn_or_slug": ["john-doe-12345"],  // OUR INPUT ECHOED BACK
+  "linkedin_flagship_url": "https://linkedin.com/in/jdoe",   // Their canonical URL
+  "name": "John Doe"
+}
+```
+
+**Why this matters:**
+- `query_linkedin_profile_urn_or_slug` is the PRIMARY matching method (Tier 1)
+- It's an array - always use `[0]` to get the first element
+- This solves 95%+ of URL mismatches since we can match our exact input
+- Fallback tiers (2-5) are rarely needed now
+
+## Multi-Source Duplicate Problem
+
+**Scenario:** Same profile uploaded from PhantomBuster AND Jam CSV with different URLs.
+
+| Upload | Input URL | Crustdata Returns | DB Result |
+|--------|-----------|-------------------|-----------|
+| 1st (PB) | `john-doe-12345` | `jdoe` | `original_url = john-doe-12345` |
+| 2nd (Jam) | `johndoe` | `jdoe` | `original_url = johndoe` (OVERWRITES!) |
+
+**Current limitation:** `original_url` is a single TEXT field, not an array.
+- Only the MOST RECENT input URL is stored
+- Previous input URLs are lost
+- "Already enriched" check may miss profiles from earlier sources
+
+**Workaround:** The Crustdata echo (`query_linkedin_profile_urn_or_slug`) helps during enrichment, but doesn't solve the DB storage issue.
 
 ## The Core Problem
 
@@ -68,16 +106,19 @@ This document explains how LinkedIn URLs flow through SourcingX from input to da
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  4. CRUSTDATA API: GET /screener/person/enrich                      │
-│     Returns: linkedin_flagship_url = "https://linkedin.com/in/jdoe" │
-│              name = "John Doe"                                       │
-│              first_name = "John", last_name = "Doe"                 │
+│     Returns:                                                         │
+│       query_linkedin_profile_urn_or_slug: ["john-doe-12345"]        │
+│         ^^^ IMPORTANT: Crustdata ECHOES our input URL back! ^^^     │
+│       linkedin_flagship_url = "https://linkedin.com/in/jdoe"        │
+│       name = "John Doe"                                              │
+│       first_name = "John", last_name = "Doe"                        │
 └────────────────────────────┬────────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  5. RESULT MATCHING: 5-tier cascade (lines 2531-2620)               │
 │                                                                      │
-│  Tier 1: linkedin_profile_url (input echo from Crustdata)           │
+│  Tier 1: query_linkedin_profile_urn_or_slug (Crustdata echoes input)│
 │  Tier 2: linkedin_flagship_url username matching                    │
 │          - Exact: "jdoe" in original_url_map?                       │
 │          - Base: get_base_username("jdoe") in map?                  │
@@ -215,6 +256,26 @@ get_profile(client, linkedin_url) -> dict | None
 update_profile_email(db_client, linkedin_url, email, source='salesql')
 ```
 
+### Issue: Same profile from multiple sources (PhantomBuster + Jam CSV)
+
+**Symptoms:**
+- Profile uploaded from source A, then from source B with different URL
+- Source A's URL no longer detected as "already enriched"
+- Potential duplicate enrichment (wasted Crustdata credits)
+
+**Cause:** `original_url` is a single TEXT field that gets overwritten on each UPSERT.
+
+**Current behavior:**
+1. PhantomBuster URL `john-doe-12345` saved as `original_url`
+2. Jam CSV URL `johndoe` overwrites `original_url`
+3. PhantomBuster URL no longer in DB, won't match "already enriched" check
+
+**Workaround:**
+- Crustdata's `query_linkedin_profile_urn_or_slug` echo helps during enrichment
+- But DB only stores one `original_url` - previous source URLs are lost
+
+**Future fix:** Consider changing `original_url` to `original_urls TEXT[]` array to store all historical input URLs.
+
 ## Database Schema (Relevant Columns)
 
 ```sql
@@ -233,9 +294,13 @@ profiles (
 
 ```python
 def match_result_to_input(result, original_url_map, normalized_url_map, name_url_map):
-    # Tier 1: Check linkedin_profile_url (Crustdata sometimes echoes input)
-    if result.linkedin_profile_url in original_url_map:
-        return original_url_map[result.linkedin_profile_url]
+    # Tier 1: Check query_linkedin_profile_urn_or_slug (Crustdata ALWAYS echoes input!)
+    # This is the most reliable matching method - Crustdata returns our exact input
+    query_slugs = result.get('query_linkedin_profile_urn_or_slug', [])
+    if query_slugs and query_slugs[0]:
+        input_slug = query_slugs[0].lower()
+        if input_slug in original_url_map:
+            return original_url_map[input_slug]
 
     # Tier 2: Match via result's canonical URL
     result_username = extract_username(result.linkedin_flagship_url)

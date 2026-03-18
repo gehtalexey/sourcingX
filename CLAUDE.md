@@ -184,9 +184,11 @@ Only reject titles the JD EXPLICITLY lists. "Team Lead" is NOT overqualified unl
 ### URL matching & "already enriched" counts
 **READ `.claude/skills/url-flow/SKILL.md` FIRST** when debugging URL issues.
 
-- **Problem**: Crustdata returns different URLs than input (e.g., `yderman` for `yoav-derman-365736152`)
+- **Crustdata echoes input**: `query_linkedin_profile_urn_or_slug` field returns our exact input URL — this is the PRIMARY matching method (Tier 1)
+- **Problem**: Crustdata's `linkedin_flagship_url` is often different from input (e.g., `yderman` for `yoav-derman-365736152`)
 - **Dual storage**: DB stores both `linkedin_url` (Crustdata canonical) and `original_url` (input URL)
-- **Matching cascade**: 5-tier matching in `enrich_batch()` — username → base → reversed → hyphen-free → name-based
+- **Matching cascade**: 5-tier matching in `enrich_batch()` — query echo → username → base → reversed → hyphen-free → name-based
+- **Multi-source limitation**: `original_url` is single TEXT field — if same profile uploaded from PhantomBuster AND Jam CSV with different URLs, only the latest is stored
 - **Debug**: Check debug expander in Enrich tab, search DB by name, verify `original_url` is set
 - **Fix pattern**: Update `original_url` in DB if profile was saved without it
 

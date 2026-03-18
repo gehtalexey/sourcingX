@@ -199,11 +199,50 @@ def get_supabase_client() -> Optional[SupabaseClient]:
 # PROFILE OPERATIONS (Crustdata Enriched Profiles Only)
 # ============================================================================
 
+def _get_existing_original_urls(client: SupabaseClient, linkedin_url: str) -> list:
+    """Get existing original_urls array for a profile (for append operation).
+
+    Returns empty list if profile doesn't exist or has no original_urls.
+    Backward compatible: Works before and after original_urls migration.
+    """
+    try:
+        # Try with original_urls array first (post-migration)
+        try:
+            result = client.select(
+                'profiles',
+                'original_urls,original_url',
+                filters={'linkedin_url': f'eq.{linkedin_url}'},
+                limit=1
+            )
+        except Exception:
+            # Fall back to original_url only (pre-migration)
+            result = client.select(
+                'profiles',
+                'original_url',
+                filters={'linkedin_url': f'eq.{linkedin_url}'},
+                limit=1
+            )
+
+        if result and len(result) > 0:
+            profile = result[0]
+            # Get from array first, fall back to single field
+            urls = profile.get('original_urls') or []
+            if not urls and profile.get('original_url'):
+                urls = [profile['original_url']]
+            return urls if isinstance(urls, list) else []
+    except Exception:
+        pass
+    return []
+
+
 def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_response: dict, original_url: str = None) -> dict:
     """Save a Crustdata-enriched profile to the database.
 
     Simplified approach: Store raw_data as-is, extract only title/company for indexing.
     All other fields are extracted at display time from raw_data.
+
+    Multi-source support: Appends to original_urls array instead of overwriting,
+    allowing tracking of all input URLs from different sources.
 
     Args:
         client: SupabaseClient instance
@@ -220,6 +259,12 @@ def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_r
 
     # Also normalize original_url for matching
     original_url = normalize_linkedin_url(original_url) if original_url else None
+
+    # Multi-source support: Get existing URLs and append (deduplicated)
+    existing_urls = _get_existing_original_urls(client, linkedin_url)
+    original_urls = list(existing_urls)  # Copy
+    if original_url and original_url not in original_urls:
+        original_urls.append(original_url)
 
     cd = crustdata_response or {}
 
@@ -270,7 +315,7 @@ def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_r
     # Data to save - indexed fields + raw_data for everything else
     data = {
         'linkedin_url': linkedin_url,
-        'original_url': original_url,  # For matching with loaded data
+        'original_url': original_url,  # Latest URL (backward compatibility)
         'raw_data': crustdata_response,
         'name': name if name else None,
         'location': location if location else None,
@@ -289,6 +334,17 @@ def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_r
     # Remove None values
     data = {k: v for k, v in data.items() if v is not None}
 
+    # Try to save with original_urls array (post-migration)
+    if original_urls:
+        data_with_array = {**data, 'original_urls': original_urls}
+        try:
+            result = client.upsert('profiles', data_with_array, on_conflict='linkedin_url')
+            return result[0] if result else None
+        except Exception:
+            # Column doesn't exist yet (pre-migration), fall through to save without it
+            pass
+
+    # Save without original_urls array (backward compatible)
     result = client.upsert('profiles', data, on_conflict='linkedin_url')
     return result[0] if result else None
 
@@ -326,6 +382,7 @@ def save_failed_enrichment(client: SupabaseClient, linkedin_url: str, error_mess
     """Save a profile that failed enrichment (Crustdata has no data).
 
     This prevents the profile from showing as "to enrich" forever.
+    Multi-source support: Appends to original_urls array.
 
     Args:
         client: SupabaseClient instance
@@ -343,6 +400,12 @@ def save_failed_enrichment(client: SupabaseClient, linkedin_url: str, error_mess
     original_url = normalize_linkedin_url(original_url) if original_url else None
     now = datetime.utcnow().isoformat()
 
+    # Multi-source support: Get existing URLs and append (deduplicated)
+    existing_urls = _get_existing_original_urls(client, linkedin_url)
+    original_urls = list(existing_urls)
+    if original_url and original_url not in original_urls:
+        original_urls.append(original_url)
+
     try:
         # Use upsert to handle both new and existing profiles
         # Must include status='enriched' to satisfy CHECK constraint on insert
@@ -355,6 +418,18 @@ def save_failed_enrichment(client: SupabaseClient, linkedin_url: str, error_mess
         if original_url:
             data['original_url'] = original_url
 
+        # Try to save with original_urls array (post-migration)
+        if original_urls:
+            data_with_array = {**data, 'original_urls': original_urls}
+            try:
+                result = client.upsert('profiles', data_with_array, on_conflict='linkedin_url')
+                if result:
+                    return result[0] if isinstance(result, list) else result
+            except Exception:
+                # Column doesn't exist yet (pre-migration), fall through
+                pass
+
+        # Save without original_urls array (backward compatible)
         result = client.upsert('profiles', data, on_conflict='linkedin_url')
         if result:
             return result[0] if isinstance(result, list) else result
@@ -1397,21 +1472,41 @@ def get_all_linkedin_urls(client: SupabaseClient) -> list:
 
 def get_recently_enriched_urls(client: SupabaseClient, months: int = 6) -> list:
     """Get LinkedIn URLs enriched within the last N months.
-    Returns both linkedin_url and original_url for better matching.
-    Uses select() auto-pagination to handle large result sets."""
+
+    Returns linkedin_url, original_url, AND all URLs from original_urls array.
+    This supports multi-source deduplication (same profile from PhantomBuster + Jam, etc.).
+    Uses select() auto-pagination to handle large result sets.
+
+    Backward compatible: Works before and after original_urls migration.
+    """
     cutoff_date = (datetime.utcnow() - timedelta(days=months * 30)).isoformat()
-
-    # select() handles pagination internally - just set a high limit
     filters = {'enriched_at': f'gte.{cutoff_date}'}
-    all_results = client.select('profiles', 'linkedin_url,original_url', filters, limit=50000)
 
-    urls = []
+    # Try with original_urls array first (post-migration)
+    try:
+        all_results = client.select('profiles', 'linkedin_url,original_url,original_urls', filters, limit=50000)
+    except Exception:
+        # Fall back to old columns only (pre-migration)
+        all_results = client.select('profiles', 'linkedin_url,original_url', filters, limit=50000)
+
+    urls = set()  # Use set to avoid duplicates
     for p in all_results:
+        # Add canonical URL
         if p.get('linkedin_url'):
-            urls.append(p['linkedin_url'])
-        if p.get('original_url') and p.get('original_url') != p.get('linkedin_url'):
-            urls.append(p['original_url'])
-    return urls
+            urls.add(p['linkedin_url'])
+
+        # Add single original_url (backward compatibility)
+        if p.get('original_url'):
+            urls.add(p['original_url'])
+
+        # Add all URLs from array (multi-source support, post-migration)
+        original_urls_array = p.get('original_urls') or []
+        if isinstance(original_urls_array, list):
+            for url in original_urls_array:
+                if url:
+                    urls.add(url)
+
+    return list(urls)
 
 
 def get_dedup_stats(client: SupabaseClient) -> dict:

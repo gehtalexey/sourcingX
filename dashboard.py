@@ -18,6 +18,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import sys
 
 # Platform-specific imports (for sound/notifications on Windows)
 try:
@@ -445,6 +446,34 @@ _LEGACY_SESSION_FILE = Path(__file__).parent / '.last_session.json'
 if _IS_STREAMLIT_CLOUD:
     import gc
     gc.collect()
+    # Log memory on every rerun for crash diagnosis
+    try:
+        _startup_total = 0
+        _startup_keys = []
+        for _k in st.session_state:
+            _v = st.session_state[_k]
+            if isinstance(_v, pd.DataFrame):
+                _s = int(_v.memory_usage(deep=True).sum())
+            elif isinstance(_v, (dict, list)) and _v:
+                _s = len(json.dumps(_v, default=str).encode('utf-8'))
+            else:
+                _s = sys.getsizeof(_v)
+            _startup_total += _s
+            if _s > 10240:  # > 10KB
+                _startup_keys.append((_k, _s))
+        _startup_keys.sort(key=lambda x: x[1], reverse=True)
+        print(f"[Memory] RERUN | Total session: {_startup_total / 1024 / 1024:.1f}MB | Keys>10KB: {len(_startup_keys)}")
+        for _k, _s in _startup_keys[:5]:
+            print(f"[Memory]   {_k}: {_s / 1024 / 1024:.2f}MB")
+        # Also log process memory
+        try:
+            import psutil
+            _rss = psutil.Process().memory_info().rss
+            print(f"[Memory] Process RSS: {_rss / 1024 / 1024:.0f}MB")
+        except ImportError:
+            pass
+    except Exception as _e:
+        print(f"[Memory] Startup log failed: {_e}")
     # Clear any stale batch state that might have survived a reboot
     if 'screening_batch_state' in st.session_state and not st.session_state.get('screening_batch_mode'):
         del st.session_state['screening_batch_state']
@@ -662,6 +691,37 @@ def _restore_session_data(session_data: dict):
     # Code should use results_df / enriched_df directly
 
 
+def _log_session_memory(context: str = ""):
+    """Log session state memory breakdown to console (for crash diagnosis)."""
+    try:
+        sizes = {}
+        total = 0
+        for key in st.session_state:
+            value = st.session_state[key]
+            if isinstance(value, pd.DataFrame):
+                size = int(value.memory_usage(deep=True).sum())
+                heavy = [c for c in ['raw_crustdata', 'raw_data', 'raw_phantombuster'] if c in value.columns]
+                label = f"DF({len(value)}r×{len(value.columns)}c)"
+                if heavy:
+                    label += f" HEAVY:{','.join(heavy)}"
+            elif isinstance(value, (dict, list)):
+                size = len(json.dumps(value, default=str).encode('utf-8')) if value else 0
+                label = f"{type(value).__name__}({len(value)})"
+            else:
+                size = sys.getsizeof(value)
+                label = type(value).__name__
+            sizes[key] = (size, label)
+            total += size
+        # Print top 10 by size
+        top = sorted(sizes.items(), key=lambda x: x[1][0], reverse=True)[:10]
+        print(f"[Memory] {context} | Total session: {total / 1024 / 1024:.1f}MB")
+        for key, (size, label) in top:
+            if size > 1024:
+                print(f"[Memory]   {key}: {size / 1024 / 1024:.2f}MB ({label})")
+    except Exception as e:
+        print(f"[Memory] Log failed: {e}")
+
+
 def save_session_state(to_db: bool = False):
     """Save current session state to local file and optionally to Supabase.
 
@@ -670,6 +730,12 @@ def save_session_state(to_db: bool = False):
                Default False to avoid excessive IO on every auto-save.
     """
     try:
+        # Log memory state before save (for crash diagnosis)
+        if _IS_STREAMLIT_CLOUD:
+            import traceback
+            caller = traceback.extract_stack(limit=3)[0]
+            _log_session_memory(f"save from {caller.filename.split('/')[-1]}:{caller.lineno}")
+
         session_data = _build_session_data()
         if not session_data:
             return False
@@ -777,6 +843,73 @@ with st.sidebar:
             gc.collect()
             st.success("Cleared!")
             st.rerun()
+    # ===== Memory Diagnostics (collapsible) =====
+    with st.expander("Memory Diagnostics", expanded=False):
+        if st.button("Measure Memory", key="btn_measure_memory"):
+            import gc
+            total_bytes = 0
+            rows = []
+            for key in sorted(st.session_state.keys()):
+                value = st.session_state[key]
+                if isinstance(value, pd.DataFrame):
+                    size = int(value.memory_usage(deep=True).sum())
+                    row_count = len(value)
+                    cols = len(value.columns)
+                    heavy = [c for c in ['raw_crustdata', 'raw_data', 'raw_phantombuster'] if c in value.columns]
+                    detail = f"DataFrame {row_count}r×{cols}c"
+                    if heavy:
+                        detail += f" [HEAVY: {', '.join(heavy)}]"
+                elif isinstance(value, dict):
+                    try:
+                        size = len(json.dumps(value, default=str).encode('utf-8'))
+                    except Exception:
+                        size = sys.getsizeof(value)
+                    detail = f"dict ({len(value)} keys)"
+                elif isinstance(value, list):
+                    try:
+                        size = len(json.dumps(value, default=str).encode('utf-8'))
+                    except Exception:
+                        size = sum(sys.getsizeof(item) for item in value[:100])
+                    detail = f"list ({len(value)} items)"
+                elif isinstance(value, str):
+                    size = len(value.encode('utf-8'))
+                    detail = f"str ({size} bytes)"
+                else:
+                    size = sys.getsizeof(value)
+                    detail = type(value).__name__
+                total_bytes += size
+                if size > 1024:  # Only show keys > 1KB
+                    rows.append({
+                        'Key': key,
+                        'Size': f"{size / 1024 / 1024:.2f} MB" if size > 1024*1024 else f"{size / 1024:.1f} KB",
+                        'Size_bytes': size,
+                        'Detail': detail
+                    })
+            # Sort by size descending
+            rows.sort(key=lambda r: r['Size_bytes'], reverse=True)
+            st.metric("Total Session State", f"{total_bytes / 1024 / 1024:.1f} MB")
+            if total_bytes > 100 * 1024 * 1024:
+                st.error("Session state > 100MB — crash risk!")
+            elif total_bytes > 50 * 1024 * 1024:
+                st.warning("Session state > 50MB — getting heavy")
+            if rows:
+                st.dataframe(
+                    pd.DataFrame(rows)[['Key', 'Size', 'Detail']],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("Session state is lightweight (all keys < 1KB)")
+            # Process memory (if psutil available)
+            try:
+                import psutil
+                process = psutil.Process()
+                mem = process.memory_info()
+                st.metric("Process RSS", f"{mem.rss / 1024 / 1024:.0f} MB")
+                if mem.rss > 800 * 1024 * 1024:
+                    st.error("Process using > 800MB — near 1GB crash limit!")
+            except ImportError:
+                st.caption("Install psutil for process memory: pip install psutil")
     st.divider()
 
 
@@ -6300,8 +6433,10 @@ with tab_enrich:
                             st.warning(f"Could not fetch not_found URLs: {e}")
 
                         # UNIFIED MATCHING: Fetch profiles and build lookup (same as Load from DB)
+                        # MEMORY FIX: Exclude raw_data (20-50KB per profile) — not needed for URL matching or display
                         cutoff = (datetime.utcnow() - timedelta(days=refresh_months * 30)).isoformat()
-                        all_profiles = db_client.select('profiles', '*',
+                        _MATCH_COLUMNS = 'linkedin_url,original_url,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,status,enriched_at,screened_at,contacted_at,screening_score,screening_fit_level,screening_summary'
+                        all_profiles = db_client.select('profiles', _MATCH_COLUMNS,
                             filters={'enriched_at': f'gte.{cutoff}'}, limit=50000)
 
                         # Build profile lookup by username variants (SAME logic as Load from DB)

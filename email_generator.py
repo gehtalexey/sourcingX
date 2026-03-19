@@ -184,127 +184,48 @@ def build_email_prompt(sender: str, tone: str, length: str, custom_instruction: 
 
     return f"""You are {sender_desc} at an Israeli tech company writing {generate_desc} for candidates{position_section}.
 
-## OUTPUT FORMAT
 Return ONLY valid JSON:
 {json_format}
 
-## CRITICAL RULES
+## HARD RULES (violation = reject)
+- NEVER use em dash character (—). Use comma or regular dash (-) instead.
+- NEVER start opener with "Your", "Leading", or "Handling".
+- NEVER use: "impressive", "exciting", "dynamic", "thrilling", "fascinating", "cutting edge", "at the forefront"
+- NEVER use: "I noticed", "I came across", "caught my eye", "I hope this finds you well", "Reaching out because"
+- NEVER use exclamation marks (!) or ask generic questions about feelings/motivation.
+- NEVER mention companies from before 2021 or mention the same company twice.
+- Subject and opener MUST use DIFFERENT angles.
 
-1. **DIFFERENT ANGLES**: subject_angle and opener_angle MUST be different
-   - If subject uses education -> opener must use skills/title/company/career/domain
-   - If subject uses skills -> opener must use education/title/company/career/domain
-   - NEVER use the same angle for both
+## SUBJECT LINE
+Under 10 words, under 60 chars. Must mention something specific from their profile. Rotate formats:
+- "Technion grad at Wiz?" / "Go at Monday?" / "Google to Snyk?" / "Still building infra at Orca?"
+- "After 5 years at Check Point?" / "From lead back to IC?" / "Building cloud security at Wiz?"
 
-2. **SUBJECT LINE - MUST BE PERSONALIZED & VARIED**:
-   - Under 10 words, under 60 characters
-   - MUST mention something specific from THEIR profile
-   - Use DIFFERENT formats - don't repeat the same pattern
-   - NO generic questions like "Ready to...", "Interested in...", "Looking for..." - FORBIDDEN
+## OPENER
+- **Length: {length_desc}. HARD LIMIT.**
+- Tone: {tone_desc}.
+- Make a direct STATEMENT connecting their background to the opportunity. No questions, no flattery.
+- Must reference something SPECIFIC: a tech, company product, domain, or career pattern.
 
-   SUBJECT FORMAT VARIETY (rotate through these):
-   - "[School] grad at [Company]?" - "Technion grad at Wiz?"
-   - "[Skill/expertise] at [Company]?" - "Go at Monday?" / "Enterprise sales at Gong?"
-   - "[Prev] to [Current]?" - "Google to Snyk?" (tier-1 only)
-   - "Still [activity] at [Company]?" - "Still building infra at Orca?" / "Still closing enterprise at Salesforce?"
-   - "[Title] at [Company]?" - "Staff engineer at Snyk?" / "Head of Marketing at Wiz?"
-   - "[Domain] at [Company]?" - "Security backend at Wiz?" / "PLG growth at Monday?"
-   - "After [X years] at [Company]?" - "After 5 years at Check Point?"
-   - "From [old role] to [new]?" - "From lead back to IC?" / "From SDR to AE?"
-   - "[Field] background at [Company]?" - "Physics background at AI21?"
-   - "Building [what] at [Company]?" - "Building cloud security at Wiz?" / "Building EMEA pipeline at Snyk?"
+GOOD examples (notice different starts):
+- "After leading DevOps at CyberArk with cloud automation, you'd bring the right background for our platform team."
+- "The move from backend at Waze to infra at a startup shows you like building from scratch - that's what this role is about."
+- "Scaling CI/CD at WalkMe as the first DevOps engineer is directly relevant to what we need."
+- "Monday's Kubernetes stack plus a Technion CS background - strong fit for our backend team."
+- "Going from SDR at Outreach to closing mid-market at Monday shows fast growth - we need that energy."
 
-   BAD (generic - NEVER use):
-   - "Ready to...", "Interested in...", "Looking for...", "Excited about..."
-   - Any question that doesn't mention something specific about THEM
+## ANGLE PRIORITY (pick the FIRST that's notable)
+1. Career pattern (manager to IC, founder, long tenure, fast promotion) → career
+2. Tier-1 company (Google, Meta, Apple, Amazon, Microsoft) → company
+3. Notable school (Technion, TAU, Hebrew U, Weizmann, BGU) → education
+4. Interesting title (Staff, Principal, Founding, Architect, VP, Director) → title
+5. Unique background (Physics, Math, military intelligence) → background
+6. Domain expertise → domain
+7. Skills/tools → skills (LAST resort, overused)
 
-3. **OPENER - MUST BE PERSONALIZED & SPECIFIC**:
-   - {length_desc}. Tone: {tone_desc}.
-   - Must reference a DIFFERENT aspect than subject
-   - MUST mention something SPECIFIC from their profile (a tech, project, domain, company product)
-   - Write like a real human recruiter, not a bot. Make STATEMENTS about their background, not questions.
-   - The opener should explain WHY you're reaching out to THIS person specifically - what in their background fits.
-
-   STYLE: Write a direct statement connecting their experience to the opportunity. NO questions, NO flattery, NO exclamation marks.
-
-   GOOD OPENER EXAMPLES (follow this exact tone):
-   - "Your recent experience at ironSource and Unity with Kubernetes and AWS infrastructure fits exactly what we're building."
-   - "After leading DevOps at CyberArk with a focus on cloud automation, you'd bring the right background for our platform team."
-   - "Your move from backend at Waze to infra at a startup shows you like building from scratch - that's what this role is about."
-   - "With your Golang and microservices work at Monday, plus the Technion CS background, you'd be a strong fit for our backend team."
-   - "Your 4 years scaling CI/CD pipelines at WalkMe is directly relevant to what we need on our DevOps side."
-   - "The combination of team leadership at JFrog and hands-on Terraform work is hard to find - that's why I'm reaching out."
-   - "Your track record closing enterprise deals at Gong, especially in the EMEA market, aligns well with what we're looking for."
-   - "Going from SDR at Outreach to closing mid-market at Monday shows fast growth - we need that energy on our sales team."
-   - "Your product work at Wix scaling the editor for millions of users is the kind of experience that fits our PM role."
-   - "Leading demand gen at Similarweb with a focus on PLG and content - that's the exact playbook we're building here."
-
-   BAD OPENER EXAMPLES (NEVER use these patterns):
-   - "Leading DevOps at X sounds exciting/intense/dynamic!" - fake flattery, sounds like a bot
-   - "Must be a thrilling/wild ride!" - cliché, nobody talks like this
-   - "How's the transition treating you?" - generic question
-   - "What's been your favorite project?" - generic question
-   - "What keeps your team motivated?" - generic, no specifics
-   - "How has X shaped your approach?" - generic corporate-speak
-   - Any sentence ending with "!" - too enthusiastic, sounds fake
-   - Any question about how they "feel" about their work
-   - Starting with "Handling..." or "Leading..." followed by flattery
-
-4. **FORBIDDEN WORDS & PHRASES** (instant fail):
-   - Em dashes (use regular dash - or comma)
-   - "I noticed", "I came across", "I was impressed", "caught my eye"
-   - "I hope this finds you well", "Hope you're doing well"
-   - "Reaching out because", "Just following up"
-   - "Ready to..." subject lines
-   - Generic phrases that could apply to anyone
-   - Mentioning the same company twice
-   - Mentioning companies from before 2018
-
-   FORBIDDEN FLATTERY (sounds fake - instant reject):
-   - "impressive", "intriguing", "fascinating", "exciting", "dynamic", "thrilling"
-   - "great milestone", "quite the challenge", "quite the dance"
-   - "sounds intense", "sounds amazing", "sounds incredible", "sounds dynamic"
-   - "must be a wild ride", "must be a thrilling ride", "must be exciting"
-   - "leading the charge", "at the forefront", "cutting edge"
-   - Any superlative praise about their career
-   - Any sentence with "!" (exclamation marks sound fake in cold outreach)
-
-   FORBIDDEN GENERIC QUESTIONS:
-   - "What keeps you motivated?"
-   - "What inspired you to..."
-   - "How has X shaped your approach?"
-   - "What's been the most exciting/challenging part?"
-   - "How do you keep the team motivated/innovative?"
-   - Any question without a specific tech/domain/project mentioned
-
-5. **SCHOOL NAMES**: Use short versions
-   - "Hamikhlalah Ha'academit Lehandassah Sami Shamoon" -> "SCE"
-   - "The Academic College of Tel Aviv-Yaffo" -> "MTA"
-   - "Tel Aviv University" -> "TAU"
-   - "Ben-Gurion University of the Negev" -> "BGU"
-   - "The Technion - Israel Institute of Technology" -> "Technion"
-   - If school name is long and not well-known, skip education angle entirely
-
-6. **COMPANY NAMES**: Clean them up
-   - Strip: Ltd, Inc, Corp, Technologies, Labs, Group, Solutions, .io
-   - "Check Point Software Technologies, Ltd." -> "Check Point"
-   - "AI21 Labs" -> "AI21"
-
-7. **ANGLE SELECTION** (pick what's MOST distinctive - DON'T default to skills):
-
-   CHECK IN THIS ORDER and pick the FIRST that's notable:
-   1. Career pattern? Manager->IC, Founder, 5+ years tenure, acquisition, fast promotion → use CAREER angle
-   2. Tier-1 company? Google, Meta, Apple, Amazon, Microsoft, Salesforce, Gong → use COMPANY angle
-   3. Notable school? Technion, TAU, Hebrew U, Weizmann, BGU, top MBA → use EDUCATION angle
-   4. Interesting title? Staff, Principal, Founding, Architect, VP, Head of, Director → use TITLE angle
-   5. Unique background? Physics, Math, non-CS field, military intelligence → use BACKGROUND angle
-   6. Domain expertise? Specific market, vertical, or functional depth → use DOMAIN angle
-   7. Specific skills or tools? Only when nothing else is distinctive → use SKILLS angle (LAST resort)
-
-   IMPORTANT: Skills angle is OVERUSED. Only use it when nothing else is distinctive.
-
-8. **COMPANY TRANSITIONS**: Only mention for tier-1 companies (Google, Meta, Apple, Amazon, Microsoft, Waze). Most people have previous jobs - that's not distinctive!
-
-9. **SAME COMPANY CHECK**: If previous company = current company (or parent/child like Waze/Google), do NOT use company transition angle. Focus on role growth, skills, or education instead.
+## NAME CLEANUP
+Schools: "Sami Shamoon" → "SCE", "Tel Aviv-Yaffo" → "MTA", "Tel Aviv University" → "TAU", "Ben-Gurion" → "BGU", "Technion - Israel Institute" → "Technion". Skip unknown schools.
+Companies: Strip Ltd, Inc, Corp, Technologies, Labs, Group, Solutions, .io suffixes.
 {custom_section}
 
 Today's date: {datetime.now().strftime("%Y-%m-%d")}"""
@@ -375,8 +296,8 @@ def trim_profile_for_email(raw: dict) -> dict:
             if not title:
                 continue
             end_date = emp.get('end_date')
-            # Skip if ended before 2016
-            if end_date and end_date < '2016':
+            # Skip if ended before 2021
+            if end_date and end_date < '2021':
                 continue
             entry = {
                 'title': title,
@@ -526,12 +447,13 @@ def generate_email_for_profile(
 
 Generate ONLY a personalized subject line. Return JSON with: subject_line, subject_angle."""
     elif generate_type == 'opener_only':
+        length_desc = LENGTH_DESCRIPTIONS.get(length, LENGTH_DESCRIPTIONS['medium'])
         user_prompt = f"""## Candidate Profile:
 ```json
 {json.dumps(trimmed, indent=2, default=str)}
 ```
 
-Generate ONLY a personalized email opener (first 2-3 sentences). Return JSON with: email_opener, opener_angle."""
+Generate ONLY a personalized email opener ({length_desc}). Return JSON with: email_opener, opener_angle."""
     else:  # both
         user_prompt = f"""## Candidate Profile:
 ```json
@@ -611,6 +533,11 @@ Generate a personalized subject line and email opener. Remember: subject and ope
         # Validate different angles only if generating both
         if generate_type == 'both' and result.get('subject_angle') == result.get('opener_angle'):
             result['warning'] = 'Same angle used for both (AI error)'
+
+        # Post-process: replace em dashes with regular dashes
+        for key in ('subject_line', 'email_opener'):
+            if result.get(key):
+                result[key] = result[key].replace('—', ' -').replace('–', ' -')
 
         return result
 

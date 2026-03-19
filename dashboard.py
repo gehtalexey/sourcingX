@@ -7822,13 +7822,7 @@ with tab_screening:
                 key="screen_count"
             )
         with col_mode:
-            screening_mode = st.radio(
-                "Output detail",
-                options=["Quick (cheaper)", "Detailed"],
-                index=1,  # Default to Detailed
-                key="screening_mode",
-                help="Quick: score + fit only | Detailed: adds summary with experience calc and justification"
-            )
+            screening_mode = "Detailed"  # Always use detailed mode for accurate scoring
         with col_model:
             model_options = ["gpt-4o-mini (fast)", "gpt-4o (best)", "Claude Haiku (balanced)"]
             ai_model_choice = st.radio(
@@ -7859,12 +7853,8 @@ with tab_screening:
         else:  # gpt-4o
             model_input_cost = 2.50   # gpt-4o: $2.50/1M input tokens
             model_output_cost = 10.00 # gpt-4o: $10.00/1M output tokens
-        if screening_mode == "Quick (cheaper)":
-            output_tokens = 20  # ~20 tokens for score + fit only
-            st.caption("Quick mode: Returns score and fit level only")
-        else:
-            output_tokens = 150  # ~150 tokens for score + fit + summary
-            st.caption("Detailed mode: Returns score, fit, and summary with experience calc")
+        output_tokens = 150  # ~150 tokens for score + fit + summary
+        st.caption("Detailed mode: score, fit, and summary with experience calc")
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
         role_display = selected_role if selected_role != 'General (auto)' else 'General'
@@ -7883,7 +7873,7 @@ with tab_screening:
                             client = anthropic.Anthropic(api_key=anthropic_key)
                         else:
                             client = OpenAI(api_key=openai_key)
-                        test_mode = 'quick' if screening_mode == "Quick (cheaper)" else 'detailed'
+                        test_mode = 'detailed'
                         role_name = st.session_state.get('active_role_name', 'General')
                         st.write(f"Testing with first profile ({test_mode} mode, role: {role_name}, model: {ai_model})...")
                         test_profile = profiles_df.iloc[0].to_dict()
@@ -8292,7 +8282,7 @@ with tab_screening:
                 st.session_state['screening_batch_state'] = {
                     'profiles': profiles_to_screen,
                     'job_description': job_description,
-                    'mode': 'quick' if screening_mode == "Quick (cheaper)" else 'detailed',
+                    'mode': 'detailed',
                     'ai_model': ai_model,
                     'ai_provider': ai_provider,
                     'api_key': anthropic_key if ai_provider == "anthropic" else openai_key,
@@ -8714,11 +8704,18 @@ with tab_screening:
                     with email_col2:
                         email_model = st.selectbox(
                             "Model",
-                            options=["gpt-4o-mini", "gpt-4o"],
+                            options=["gpt-4o-mini", "gpt-4o", "Claude Haiku"],
                             index=0,
-                            help="gpt-4o-mini: ~$0.0004/profile | gpt-4o: ~$0.008/profile",
+                            help="gpt-4o-mini: ~$0.0004 | gpt-4o: ~$0.008 | Haiku: ~$0.002 per profile",
                             key="email_model"
                         )
+                        # Parse email model choice
+                        if email_model == "Claude Haiku":
+                            email_ai_model = "claude-haiku-4-5-20251001"
+                            email_ai_provider = "anthropic"
+                        else:
+                            email_ai_model = email_model
+                            email_ai_provider = "openai"
 
                     with email_col3:
                         email_sender = st.selectbox(
@@ -8747,15 +8744,21 @@ with tab_screening:
                             key="email_length"
                         )
 
-                    # Second row: custom instruction and fit filter
-                    email_row2_col1, email_row2_col2 = st.columns([3, 1])
+                    # Second row: position, company context, fit filter
+                    email_row2_col0, email_row2_col1, email_row2_col2 = st.columns([1, 2, 1])
+
+                    with email_row2_col0:
+                        email_position = st.text_input(
+                            "Position",
+                            placeholder="E.g., DevOps Engineer, Sales Manager, Product Lead",
+                            key="email_position"
+                        )
 
                     with email_row2_col1:
-                        email_custom_instruction = st.text_area(
-                            "Custom Instruction (optional)",
-                            placeholder="E.g., 'Focus on their backend experience' or 'Mention we're a seed-stage startup'",
-                            height=68,
-                            key="email_custom_instruction"
+                        email_company_context = st.text_input(
+                            "Company & Product",
+                            placeholder="E.g., Orca Security — agentless cloud security platform, competitor to Wiz",
+                            key="email_company_context"
                         )
 
                     with email_row2_col2:
@@ -8765,6 +8768,23 @@ with tab_screening:
                             default=["Strong Fit", "Good Fit"],
                             key="email_fit_filter"
                         )
+
+                    # Third row: custom instruction (optional)
+                    email_custom_instruction = st.text_input(
+                        "Custom Instruction (optional)",
+                        placeholder="E.g., 'Mention we just raised $50M' or 'Focus on cloud experience, skip education angle'",
+                        key="email_custom_instruction"
+                    )
+
+                    # Combine company context + custom instruction for the AI
+                    email_full_instruction = ""
+                    if email_company_context:
+                        email_full_instruction += f"COMPANY CONTEXT: {email_company_context}"
+                    if email_custom_instruction:
+                        if email_full_instruction:
+                            email_full_instruction += f"\n{email_custom_instruction}"
+                        else:
+                            email_full_instruction = email_custom_instruction
 
                     # Filter profiles by selected fit levels
                     filtered_profiles = [r for r in profiles_with_raw if r.get('fit') in email_fit_filter]
@@ -8783,8 +8803,8 @@ with tab_screening:
 
                     with email_test_col2:
                         if filtered_profiles:
-                            test_cost = estimate_email_cost(test_batch_size, email_model)
-                            full_cost = estimate_email_cost(len(filtered_profiles), email_model)
+                            test_cost = estimate_email_cost(test_batch_size, email_ai_model)
+                            full_cost = estimate_email_cost(len(filtered_profiles), email_ai_model)
                             st.metric("Est. Cost", f"Test: ${test_cost:.4f} | All: ${full_cost:.3f}")
                         else:
                             st.metric("Profiles Selected", "0")
@@ -8868,17 +8888,22 @@ with tab_screening:
                                 results_placeholder.text(f"Completed {completed}/{total}")
 
                             try:
+                                email_api_key = anthropic_key if email_ai_provider == "anthropic" else openai_key
+                                if not email_api_key:
+                                    raise ValueError(f"{'Anthropic' if email_ai_provider == 'anthropic' else 'OpenAI'} API key not configured")
                                 results = generate_emails_batch(
                                     profiles_for_email,
-                                    openai_key,
+                                    email_api_key,
                                     sender=email_sender,
                                     tone=email_tone,
                                     length=email_length,
-                                    custom_instruction=email_custom_instruction if email_custom_instruction else None,
-                                    ai_model=email_model,
+                                    custom_instruction=email_full_instruction if email_full_instruction else None,
+                                    ai_model=email_ai_model,
                                     max_workers=5,
                                     progress_callback=update_progress,
-                                    generate_type=email_generate_type
+                                    generate_type=email_generate_type,
+                                    position=email_position if email_position else None,
+                                    ai_provider=email_ai_provider
                                 )
 
                                 st.session_state['email_generation_results'] = results
@@ -8896,14 +8921,16 @@ with tab_screening:
 
                     # Generate all
                     if generate_all_btn:
-                        if not openai_key:
-                            st.error("OpenAI API key is required. Set it in Streamlit secrets (openai_api_key), config.json, or environment variable OPENAI_API_KEY.")
+                        email_api_key_check = anthropic_key if email_ai_provider == "anthropic" else openai_key
+                        if not email_api_key_check:
+                            st.error(f"{'Anthropic' if email_ai_provider == 'anthropic' else 'OpenAI'} API key is required. Add it to config.json or Streamlit secrets.")
                         elif not filtered_profiles:
                             st.warning("No profiles selected. Check that profiles have matching fit levels.")
                         elif not st.session_state.get('email_test_approved'):
                             st.warning("Run a test batch first to unlock 'Generate All'.")
 
-                    if generate_all_btn and openai_key and filtered_profiles and st.session_state.get('email_test_approved'):
+                    email_api_key_all = anthropic_key if email_ai_provider == "anthropic" else openai_key
+                    if generate_all_btn and email_api_key_all and filtered_profiles and st.session_state.get('email_test_approved'):
                         # Batch load raw_data for all profiles (much faster than individual calls)
                         with st.spinner(f"Loading profile data for {len(filtered_profiles)} profiles..."):
                             profiles_for_email = []
@@ -8956,15 +8983,17 @@ with tab_screening:
                             try:
                                 results = generate_emails_batch(
                                     profiles_for_email,
-                                    openai_key,
+                                    email_api_key_all,
                                     sender=email_sender,
                                     tone=email_tone,
                                     length=email_length,
-                                    custom_instruction=email_custom_instruction if email_custom_instruction else None,
-                                    ai_model=email_model,
+                                    custom_instruction=email_full_instruction if email_full_instruction else None,
+                                    ai_model=email_ai_model,
                                     max_workers=10,
                                     progress_callback=None,  # Disable callback - causes Streamlit threading issues
-                                    generate_type=email_generate_type
+                                    generate_type=email_generate_type,
+                                    position=email_position if email_position else None,
+                                    ai_provider=email_ai_provider
                                 )
 
                                 st.session_state['email_generation_results'] = results

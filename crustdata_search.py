@@ -209,13 +209,24 @@ def build_filters(
                 "conditions": company_conditions
             })
 
-    # Location filter
+    # Location filter (comma-separated for OR logic)
     if location and location.strip():
-        conditions.append({
-            "column": "region",
-            "type": "[.]",
-            "value": location.strip()
-        })
+        location_values = [l.strip() for l in location.split(",") if l.strip()]
+        if len(location_values) == 1:
+            conditions.append({
+                "column": "region",
+                "type": "[.]",
+                "value": location_values[0]
+            })
+        elif len(location_values) > 1:
+            location_conditions = [
+                {"column": "region", "type": "[.]", "value": l}
+                for l in location_values
+            ]
+            conditions.append({
+                "op": "or",
+                "conditions": location_conditions
+            })
 
     # Seniority filter (set membership)
     if seniority and len(seniority) > 0:
@@ -371,13 +382,24 @@ def build_filters(
                 "conditions": past_title_conditions
             })
 
-    # School filter
+    # School filter (comma-separated for OR logic)
     if school and school.strip():
-        conditions.append({
-            "column": "education_background.institute_name",
-            "type": "[.]",
-            "value": school.strip()
-        })
+        school_values = [s.strip() for s in school.split(",") if s.strip()]
+        if len(school_values) == 1:
+            conditions.append({
+                "column": "education_background.institute_name",
+                "type": "[.]",
+                "value": school_values[0]
+            })
+        elif len(school_values) > 1:
+            school_conditions = [
+                {"column": "education_background.institute_name", "type": "[.]", "value": s}
+                for s in school_values
+            ]
+            conditions.append({
+                "op": "or",
+                "conditions": school_conditions
+            })
 
     # Recently changed jobs filter
     if recently_changed_jobs:
@@ -843,38 +865,81 @@ def log_search_usage(
 # AI-ASSISTED EXPANSION
 # =============================================================================
 
-_TITLE_PROMPT = (
-    'Given the job title "{term}", list 5-10 common alternative titles for the '
-    'same or very similar role. Include spelling variations (Lead vs Leader), '
-    'abbreviations, and industry-standard equivalents at the same seniority level. '
-    'Return ONLY a valid JSON array of lowercase strings. '
-    'Example: ["team lead", "tech lead", "engineering manager"]'
-)
-
-_SKILL_PROMPT = (
-    'Given the technical skill "{term}", list 5-10 closely related skills, tools, '
-    'or technologies that someone with this skill would likely know or that '
-    'recruiters search for interchangeably. Include abbreviations and alternative names. '
-    'Return ONLY a valid JSON array of lowercase strings. '
-    'Example: ["k8s", "docker", "helm", "container orchestration"]'
-)
+_EXPANSION_PROMPTS = {
+    'title': (
+        'You are a senior tech recruiter searching LinkedIn. Given the job title "{term}", '
+        'list 5-10 alternative titles that REAL PEOPLE actually use on their LinkedIn profiles '
+        'for the same role.\n'
+        'Rules:\n'
+        '- Every title you suggest MUST be something you would realistically find on LinkedIn\n'
+        '- Do NOT invent creative combinations by mixing the input word with random nouns '
+        '(e.g., "team guide", "team overseer", "team architect", "team chief" are NOT real titles)\n'
+        '- Focus on: how different companies name the same job, abbreviations, seniority prefixes\n'
+        '- Do NOT include titles at a higher seniority (e.g., director, VP) unless the input is at that level\n'
+        'Return ONLY a valid JSON array of lowercase strings.\n'
+        'Example for "team leader": ["team lead", "tech lead", "engineering lead", "r&d team lead"]\n'
+        'Example for "devops engineer": ["devops developer", "cloud engineer", '
+        '"infrastructure engineer", "site reliability engineer", "sre", "platform engineer"]'
+    ),
+    'skill': (
+        'Given the technical skill "{term}", list 5-10 alternative names, abbreviations, '
+        'or very closely related tools that recruiters treat as interchangeable. '
+        'Only include skills that someone searching for "{term}" would also want to match. '
+        'Do NOT include loosely related or adjacent technologies. '
+        'Return ONLY a valid JSON array of lowercase strings. '
+        'Example for "kubernetes": ["k8s", "docker", "helm", "container orchestration", "openshift"]'
+    ),
+    'company': (
+        'Given the description "{term}", list 5-10 specific company names that match. '
+        'The input may be a category (e.g., "SaaS startups in Tel Aviv"), a single company '
+        '(e.g., "Wiz" → suggest similar companies), or a concept (e.g., "big tech"). '
+        'Return ONLY a valid JSON array of strings with proper company name capitalization. '
+        'Example: ["Wiz", "Monday.com", "Gong", "Snyk", "Fireblocks"]'
+    ),
+    'location': (
+        'Given the location "{term}", list 5-10 specific locations useful for a LinkedIn '
+        'people search. Rules:\n'
+        '- If input is a country (e.g., "Israel"), return the country name plus its major cities\n'
+        '- If input is a region (e.g., "west coast usa"), return specific cities in that region\n'
+        '- If input is a city, return nearby cities and the metro area name\n'
+        '- Use proper city names as they appear on LinkedIn profiles (not airport codes)\n'
+        '- Include the original input if it is already a valid location\n'
+        'Return ONLY a valid JSON array of strings.\n'
+        'Example for "west coast usa": ["San Francisco", "Los Angeles", "Seattle", "San Diego", "Portland"]'
+    ),
+    'school': (
+        'Given the description "{term}", list 5-10 specific university or school names '
+        'that match. The input may be a category (e.g., "top tech universities in London"), '
+        'a country, or a single school (suggest similar ones). '
+        'Return ONLY a valid JSON array of strings with proper capitalization. '
+        'Example: ["Imperial College London", "UCL", "King\'s College London"]'
+    ),
+    'keywords': (
+        'Given the keyword or concept "{term}", list 5-10 closely related keywords, '
+        'technologies, or terms that recruiters would search for together. '
+        'Return ONLY a valid JSON array of lowercase strings. '
+        'Example: ["microservices", "kubernetes", "docker", "service mesh", "api gateway"]'
+    ),
+}
 
 
 def expand_variations(
     term: str,
     field_type: str = 'title',
     openai_api_key: str = None,
+    exclude: List[str] = None,
 ) -> List[str]:
     """
     Use OpenAI gpt-4o-mini to expand a term into common variations.
 
     Args:
-        term: The user's input (e.g., "team leader" or "Kubernetes")
-        field_type: 'title' for job titles, 'skill' for technical skills
+        term: The user's input (e.g., "team leader", "SaaS startups in Tel Aviv")
+        field_type: 'title', 'skill', 'company', 'location', 'school', or 'keywords'
         openai_api_key: OpenAI API key
+        exclude: List of already-suggested values to exclude from results
 
     Returns:
-        List of 5-10 variations (always includes the original term).
+        List of 5-10 variations (always includes the original term for title/skill types).
         On failure, returns [term] (graceful fallback).
     """
     if not term or not term.strip():
@@ -885,8 +950,11 @@ def expand_variations(
     if not openai_api_key:
         return [term]
 
-    prompt_template = _TITLE_PROMPT if field_type == 'title' else _SKILL_PROMPT
+    prompt_template = _EXPANSION_PROMPTS.get(field_type, _EXPANSION_PROMPTS['title'])
     prompt = prompt_template.format(term=term)
+
+    if exclude:
+        prompt += f'\nDo NOT include any of these (already suggested): {json.dumps(exclude)}'
 
     try:
         from openai import OpenAI
@@ -912,10 +980,15 @@ def expand_variations(
         if not isinstance(variations, list):
             return [term]
 
-        # Ensure original term is included, deduplicate
-        variations = [v.strip().lower() for v in variations if isinstance(v, str) and v.strip()]
-        if term.lower() not in variations:
-            variations.insert(0, term.lower())
+        # For title/skill/keywords: lowercase and include original term
+        # For company/location/school: preserve capitalization
+        preserve_case = field_type in ('company', 'location', 'school')
+        if preserve_case:
+            variations = [v.strip() for v in variations if isinstance(v, str) and v.strip()]
+        else:
+            variations = [v.strip().lower() for v in variations if isinstance(v, str) and v.strip()]
+            if term.lower() not in variations:
+                variations.insert(0, term.lower())
 
         # Deduplicate while preserving order
         seen = set()

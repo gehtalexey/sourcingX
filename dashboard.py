@@ -4161,307 +4161,277 @@ with tab_search:
 
         st.divider()
 
-        # ===== AI Title & Skill Expansion (outside form for interactivity) =====
+        # ===== Search Filters (with inline AI expansion) =====
         openai_key = load_openai_key()
-        if openai_key and HAS_CRUSTDATA_SEARCH:
-            with st.expander("AI-Assisted Search Expansion", expanded=False):
-                st.caption("Generate title and skill variations to broaden your search")
+        _has_ai = bool(openai_key and HAS_CRUSTDATA_SEARCH)
 
-                exp_col1, exp_col2 = st.columns(2)
+        # --- AI expansion helper ---
+        def _do_ai_expand(input_key, expanded_key, field_type):
+            """on_click callback: parses manual values, calls AI for each, merges all."""
+            val = st.session_state.get(input_key, '').strip()
+            if not val or not _has_ai:
+                return
+            # Parse comma-separated manual values
+            manual_terms = [t.strip() for t in val.split(',') if t.strip()]
+            # Start with existing suggestions + manual terms
+            all_items = list(st.session_state.get(expanded_key, []))
+            all_items.extend(manual_terms)
+            # AI-expand each manual term
+            for term in manual_terms:
+                sug = expand_variations(term, field_type=field_type, openai_api_key=openai_key)
+                all_items.extend(sug)
+            # Dedupe preserving order
+            seen = set()
+            merged = []
+            for item in all_items:
+                k = item.lower()
+                if k not in seen:
+                    seen.add(k)
+                    merged.append(item)
+            st.session_state[expanded_key] = merged
+            # Also update the multiselect selection to include all new items
+            st.session_state[f"sel_{expanded_key}"] = merged
 
-                # --- Title expansion ---
-                with exp_col1:
-                    st.markdown("**Title Variations**")
-                    title_input = st.text_input(
-                        "Enter a job title to expand",
-                        key="expand_title_input",
-                        placeholder="e.g., team leader"
+        def _generate_more(input_key, expanded_key, field_type):
+            """on_click callback: generate more suggestions excluding existing ones."""
+            val = st.session_state.get(input_key, '').strip()
+            if not val or not _has_ai:
+                return
+            existing = st.session_state.get(expanded_key, [])
+            manual_terms = [t.strip() for t in val.split(',') if t.strip()]
+            new_items = list(existing)
+            for term in manual_terms:
+                sug = expand_variations(term, field_type=field_type,
+                                        openai_api_key=openai_key, exclude=existing)
+                new_items.extend(sug)
+            # Dedupe
+            seen = set()
+            merged = []
+            for item in new_items:
+                k = item.lower()
+                if k not in seen:
+                    seen.add(k)
+                    merged.append(item)
+            st.session_state[expanded_key] = merged
+            st.session_state[f"sel_{expanded_key}"] = merged
+
+        def _clear_expanded(expanded_key):
+            """on_click callback: clear AI suggestions."""
+            st.session_state.pop(expanded_key, None)
+
+        def _add_custom_value(custom_key, expanded_key):
+            """on_change callback: add custom value to expanded list + auto-select it."""
+            val = st.session_state.get(custom_key, '').strip()
+            if val and expanded_key in st.session_state:
+                new_items = [v.strip() for v in val.split(',') if v.strip()]
+                existing = st.session_state[expanded_key]
+                existing_lower = {e.lower() for e in existing}
+                sel_key = f"sel_{expanded_key}"
+                current_sel = list(st.session_state.get(sel_key, existing))
+                for item in new_items:
+                    if item.lower() not in existing_lower:
+                        existing.append(item)
+                        existing_lower.add(item.lower())
+                        current_sel.append(item)
+                st.session_state[expanded_key] = existing
+                st.session_state[sel_key] = current_sel
+                st.session_state[custom_key] = ''
+
+        def _render_ai_field(container, label, input_key, expanded_key, field_type, placeholder):
+            """Render a text input with optional AI suggest button and multiselect.
+            Uses the provided container to avoid nested columns issues."""
+            with container:
+                st.text_input(label, key=input_key, placeholder=placeholder)
+                if _has_ai:
+                    st.button("✨", key=f"btn_ai_{input_key}",
+                              on_click=_do_ai_expand, args=(input_key, expanded_key, field_type),
+                              help="AI suggest variations", use_container_width=True)
+
+                # Show multiselect if AI suggestions exist
+                if st.session_state.get(expanded_key):
+                    st.multiselect(
+                        f"Select {label.split('(')[0].strip()}:",
+                        options=st.session_state[expanded_key],
+                        default=st.session_state[expanded_key],
+                        key=f"sel_{expanded_key}",
+                        label_visibility="collapsed",
                     )
-                    t_btn_col1, t_btn_col2 = st.columns(2)
-                    with t_btn_col1:
-                        if st.button("Suggest", key="btn_expand_title", use_container_width=True):
-                            if title_input and title_input.strip():
-                                with st.spinner("Generating..."):
-                                    suggestions = expand_variations(title_input, field_type='title', openai_api_key=openai_key)
-                                    existing = st.session_state.get('expanded_titles', [])
-                                    merged = list(dict.fromkeys(existing + suggestions))  # dedupe, preserve order
-                                    st.session_state['expanded_titles'] = merged
-                    with t_btn_col2:
-                        if st.button("Clear", key="btn_clear_titles", use_container_width=True):
-                            st.session_state.pop('expanded_titles', None)
-                            st.rerun()
+                    custom_key = f"custom_{expanded_key}"
+                    st.text_input("Add custom:", key=custom_key,
+                                  placeholder="Type and press Enter",
+                                  on_change=_add_custom_value, args=(custom_key, expanded_key),
+                                  label_visibility="collapsed")
+                    more_col, clear_col = st.columns(2)
+                    with more_col:
+                        st.button("✨ More", key=f"btn_more_{expanded_key}",
+                                  on_click=_generate_more, args=(input_key, expanded_key, field_type),
+                                  help="Generate more suggestions", use_container_width=True)
+                    with clear_col:
+                        st.button("✕ Clear", key=f"btn_clear_{expanded_key}",
+                                  on_click=_clear_expanded, args=(expanded_key,),
+                                  help="Clear suggestions", use_container_width=True)
 
-                    if 'expanded_titles' in st.session_state and st.session_state['expanded_titles']:
-                        selected_titles = st.multiselect(
-                            "Select titles to include in search:",
-                            options=st.session_state['expanded_titles'],
-                            default=st.session_state['expanded_titles'],
-                            key="selected_expanded_titles"
-                        )
-                        custom_title = st.text_input("Add custom title:", key="custom_title_add", placeholder="Type and press Enter")
-                        if custom_title and custom_title.strip():
-                            if custom_title.strip().lower() not in [t.lower() for t in st.session_state['expanded_titles']]:
-                                st.session_state['expanded_titles'].append(custom_title.strip().lower())
-                                st.rerun()
+        st.markdown("##### Search Filters")
 
-                # --- Past title expansion ---
-                with exp_col1:
-                    st.markdown("**Past Title Variations**")
-                    past_title_input = st.text_input(
-                        "Enter a past title to expand",
-                        key="expand_past_title_input",
-                        placeholder="e.g., DevOps engineer"
-                    )
-                    pt_btn_col1, pt_btn_col2 = st.columns(2)
-                    with pt_btn_col1:
-                        if st.button("Suggest", key="btn_expand_past_title", use_container_width=True):
-                            if past_title_input and past_title_input.strip():
-                                with st.spinner("Generating..."):
-                                    suggestions = expand_variations(past_title_input, field_type='title', openai_api_key=openai_key)
-                                    existing = st.session_state.get('expanded_past_titles', [])
-                                    merged = list(dict.fromkeys(existing + suggestions))
-                                    st.session_state['expanded_past_titles'] = merged
-                    with pt_btn_col2:
-                        if st.button("Clear", key="btn_clear_past_titles", use_container_width=True):
-                            st.session_state.pop('expanded_past_titles', None)
-                            st.rerun()
+        # Row 1: Title, Company, Location (each with AI button below)
+        col1, col2, col3 = st.columns(3)
+        _render_ai_field(col1, "Title/Role", "crust_search_title", "expanded_titles", "title",
+                         "e.g., team leader")
+        _render_ai_field(col2, "Company", "crust_search_company", "expanded_companies", "company",
+                         "e.g., SaaS startups in Tel Aviv")
+        _render_ai_field(col3, "Location", "crust_search_location", "expanded_locations", "location",
+                         "e.g., west coast usa")
 
-                    if 'expanded_past_titles' in st.session_state and st.session_state['expanded_past_titles']:
-                        selected_past_titles = st.multiselect(
-                            "Select past titles to include:",
-                            options=st.session_state['expanded_past_titles'],
-                            default=st.session_state['expanded_past_titles'],
-                            key="selected_expanded_past_titles"
-                        )
-                        custom_past_title = st.text_input("Add custom past title:", key="custom_past_title_add", placeholder="Type and press Enter")
-                        if custom_past_title and custom_past_title.strip():
-                            if custom_past_title.strip().lower() not in [t.lower() for t in st.session_state['expanded_past_titles']]:
-                                st.session_state['expanded_past_titles'].append(custom_past_title.strip().lower())
-                                st.rerun()
+        # Row 2: Seniority, Company Size
+        col4, col5 = st.columns(2)
+        with col4:
+            search_seniority = st.multiselect(
+                "Seniority",
+                options=SENIORITY_LEVELS,
+                default=[],
+                key="crust_search_seniority"
+            )
+        with col5:
+            search_headcount = st.multiselect(
+                "Company Size",
+                options=HEADCOUNT_RANGES,
+                default=[],
+                key="crust_search_headcount"
+            )
 
-                # --- Skill expansion ---
-                with exp_col2:
-                    st.markdown("**Skill Variations**")
-                    skill_input = st.text_input(
-                        "Enter a skill to expand",
-                        key="expand_skill_input",
-                        placeholder="e.g., Kubernetes"
-                    )
-                    s_btn_col1, s_btn_col2 = st.columns(2)
-                    with s_btn_col1:
-                        if st.button("Suggest", key="btn_expand_skill", use_container_width=True):
-                            if skill_input and skill_input.strip():
-                                with st.spinner("Generating..."):
-                                    suggestions = expand_variations(skill_input, field_type='skill', openai_api_key=openai_key)
-                                    existing = st.session_state.get('expanded_skills', [])
-                                    merged = list(dict.fromkeys(existing + suggestions))
-                                    st.session_state['expanded_skills'] = merged
-                    with s_btn_col2:
-                        if st.button("Clear", key="btn_clear_skills", use_container_width=True):
-                            st.session_state.pop('expanded_skills', None)
-                            st.rerun()
+        # Row 3: Experience range, Keywords
+        col6, col7, col8 = st.columns([1, 1, 2])
+        with col6:
+            search_exp_min = st.number_input(
+                "Min Experience (years)",
+                min_value=0,
+                max_value=50,
+                value=0,
+                key="crust_search_exp_min"
+            )
+        with col7:
+            search_exp_max = st.number_input(
+                "Max Experience (years)",
+                min_value=0,
+                max_value=50,
+                value=0,
+                key="crust_search_exp_max",
+                help="0 = no limit"
+            )
+        _render_ai_field(col8, "Keywords", "crust_search_keywords", "expanded_keywords", "keywords",
+                         "e.g., kubernetes, microservices")
 
-                    if 'expanded_skills' in st.session_state and st.session_state['expanded_skills']:
-                        selected_skills = st.multiselect(
-                            "Select skills to include in search:",
-                            options=st.session_state['expanded_skills'],
-                            default=st.session_state['expanded_skills'],
-                            key="selected_expanded_skills"
-                        )
-                        custom_skill = st.text_input("Add custom skill:", key="custom_skill_add", placeholder="Type and press Enter")
-                        if custom_skill and custom_skill.strip():
-                            if custom_skill.strip().lower() not in [t.lower() for t in st.session_state['expanded_skills']]:
-                                st.session_state['expanded_skills'].append(custom_skill.strip().lower())
-                                st.rerun()
+        # Advanced Filters
+        with st.expander("Advanced Filters"):
+            # Skills - full width, no nesting issue
+            sk_col1, sk_col2 = st.columns([4, 1])
+            with sk_col1:
+                st.text_input("Skills (comma = OR)", key="crust_search_skills",
+                              placeholder="e.g., aws, docker, kubernetes")
+            with sk_col2:
+                if _has_ai:
+                    st.write("")  # label spacer
+                    st.button("✨", key="btn_ai_crust_search_skills",
+                              on_click=_do_ai_expand, args=("crust_search_skills", "expanded_skills", "skill"),
+                              help="AI suggest variations", use_container_width=True)
+            if st.session_state.get('expanded_skills'):
+                st.multiselect("Select Skills:", options=st.session_state['expanded_skills'],
+                               default=st.session_state['expanded_skills'],
+                               key="sel_expanded_skills", label_visibility="collapsed")
+                st.text_input("Add custom:", key="custom_expanded_skills",
+                              placeholder="Type and press Enter",
+                              on_change=_add_custom_value, args=("custom_expanded_skills", "expanded_skills"),
+                              label_visibility="collapsed")
+                sk_more_col, sk_clear_col = st.columns(2)
+                with sk_more_col:
+                    st.button("✨ More", key="btn_more_expanded_skills",
+                              on_click=_generate_more, args=("crust_search_skills", "expanded_skills", "skill"),
+                              help="Generate more suggestions", use_container_width=True)
+                with sk_clear_col:
+                    st.button("✕ Clear", key="btn_clear_expanded_skills",
+                              on_click=_clear_expanded, args=("expanded_skills",), use_container_width=True)
 
-                # Show what will be used in search
-                parts = []
-                if 'selected_expanded_titles' in st.session_state and st.session_state.get('selected_expanded_titles'):
-                    parts.append(f"**Titles:** {', '.join(st.session_state['selected_expanded_titles'])}")
-                if 'selected_expanded_past_titles' in st.session_state and st.session_state.get('selected_expanded_past_titles'):
-                    parts.append(f"**Past titles:** {', '.join(st.session_state['selected_expanded_past_titles'])}")
-                if 'selected_expanded_skills' in st.session_state and st.session_state.get('selected_expanded_skills'):
-                    parts.append(f"**Skills:** {', '.join(st.session_state['selected_expanded_skills'])}")
-                if parts:
-                    st.info("Search will use: " + " | ".join(parts))
+            st.divider()
 
-        # ===== Filter Form =====
-        with st.form("crustdata_search_form"):
-            st.markdown("##### Basic Filters")
+            adv_col1, adv_col2 = st.columns(2)
+            _render_ai_field(adv_col1, "Past Titles (comma = OR)", "crust_search_past_titles", "expanded_past_titles", "title",
+                             "e.g., devops, backend engineer")
+            _render_ai_field(adv_col2, "Past Companies (comma = OR)", "crust_search_past_companies", "expanded_past_companies", "company",
+                             "e.g., big tech, Microsoft")
 
-            # Row 1: Title, Company, Location
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                search_title = st.text_input(
-                    "Title/Role (comma = OR)",
-                    key="crust_search_title",
-                    placeholder="e.g., devops engineer, devops developer"
-                )
-            with col2:
-                search_company = st.text_input(
-                    "Company (comma = OR)",
-                    key="crust_search_company",
-                    placeholder="e.g., google, meta, wiz"
-                )
-            with col3:
-                search_location = st.text_input(
-                    "Location",
-                    key="crust_search_location",
-                    placeholder="e.g., Israel, San Francisco"
-                )
-
-            # Row 2: Seniority, Company Size
-            col4, col5 = st.columns(2)
-            with col4:
-                search_seniority = st.multiselect(
-                    "Seniority",
-                    options=SENIORITY_LEVELS,
-                    default=[],
-                    key="crust_search_seniority"
-                )
-            with col5:
-                search_headcount = st.multiselect(
-                    "Company Size",
-                    options=HEADCOUNT_RANGES,
-                    default=[],
-                    key="crust_search_headcount"
-                )
-
-            # Row 3: Experience range, Keywords
-            col6, col7, col8 = st.columns([1, 1, 2])
-            with col6:
-                search_exp_min = st.number_input(
-                    "Min Experience (years)",
-                    min_value=0,
-                    max_value=50,
-                    value=0,
-                    key="crust_search_exp_min"
-                )
-            with col7:
-                search_exp_max = st.number_input(
-                    "Max Experience (years)",
-                    min_value=0,
-                    max_value=50,
-                    value=0,
-                    key="crust_search_exp_max",
-                    help="0 = no limit"
-                )
-            with col8:
-                search_keywords = st.text_input(
-                    "Keywords (OR across headline/summary/skills)",
-                    key="crust_search_keywords",
-                    placeholder="e.g., kubernetes, microservices, golang"
-                )
-
-            # Advanced Filters (collapsed by default)
-            with st.expander("Advanced Filters"):
-                # Skills groups section - each group is OR, groups combined with AND
-                st.caption("**Skills** (comma = OR within group, groups combined with AND)")
-
-                # Initialize skill groups in session state if not present
-                if 'crust_skill_groups_count' not in st.session_state:
-                    st.session_state['crust_skill_groups_count'] = 2
-
-                skill_groups = []
-                for i in range(st.session_state['crust_skill_groups_count']):
-                    sg_col1, sg_col2 = st.columns([6, 1])
-                    with sg_col1:
-                        group_val = st.text_input(
-                            f"Group {i+1} (any of)",
-                            key=f"crust_skill_group_{i}",
-                            placeholder="e.g., aws, gcp" if i == 0 else "e.g., docker, kubernetes",
-                            label_visibility="collapsed" if i > 0 else "visible"
-                        )
-                        if group_val and group_val.strip():
-                            skill_groups.append(group_val.strip())
-                    with sg_col2:
-                        if i == 0:
-                            st.write("")  # Spacing for label alignment
-
-                # Add/remove group buttons
-                sg_btn_col1, sg_btn_col2, sg_btn_col3 = st.columns([1, 1, 4])
-                with sg_btn_col1:
-                    if st.form_submit_button("+ Group", use_container_width=True):
-                        st.session_state['crust_skill_groups_count'] = min(5, st.session_state['crust_skill_groups_count'] + 1)
-                        st.rerun()
-                with sg_btn_col2:
-                    if st.session_state['crust_skill_groups_count'] > 1:
-                        if st.form_submit_button("- Group", use_container_width=True):
-                            st.session_state['crust_skill_groups_count'] = max(1, st.session_state['crust_skill_groups_count'] - 1)
-                            st.rerun()
-
-                st.divider()
-
-                adv_col1, adv_col2 = st.columns(2)
-                with adv_col1:
-                    search_past_titles = st.text_input(
-                        "Past Titles (comma = OR)",
-                        key="crust_search_past_titles",
-                        placeholder="e.g., devops, backend engineer"
-                    )
-                with adv_col2:
-                    search_past_companies = st.text_input(
-                        "Past Companies (comma = OR)",
-                        key="crust_search_past_companies",
-                        placeholder="e.g., Microsoft, Amazon"
-                    )
-
-                adv_col3, adv_col4 = st.columns(2)
-                with adv_col3:
-                    search_school = st.text_input(
-                        "School/University",
-                        key="crust_search_school",
-                        placeholder="e.g., Tel Aviv University, Stanford"
-                    )
-                with adv_col4:
-                    pass  # Spacer for alignment
-
-                adv_checkbox_col1, adv_checkbox_col2 = st.columns(2)
-                with adv_checkbox_col1:
-                    search_recently_changed = st.checkbox(
-                        "Recently changed jobs",
-                        key="crust_search_recently_changed",
-                        help="Started new job in last 90 days"
-                    )
-                with adv_checkbox_col2:
-                    search_has_email = st.checkbox(
-                        "Has verified email",
-                        key="crust_search_has_email"
-                    )
-
-            # Controls row
-            ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
-            with ctrl_col1:
-                search_limit = st.selectbox(
-                    "Results limit",
-                    options=[25, 50, 100, 250, 500, 1000],
-                    index=2,  # Default 100
-                    key="crust_search_limit"
-                )
-            with ctrl_col2:
+            adv_col3, adv_col4 = st.columns(2)
+            _render_ai_field(adv_col3, "School/University", "crust_search_school", "expanded_schools", "school",
+                             "e.g., top tech universities in London")
+            with adv_col4:
                 pass  # Spacer
-            with ctrl_col3:
-                btn_col1, btn_col2 = st.columns(2)
-                with btn_col1:
-                    search_submitted = st.form_submit_button("Search", type="primary", use_container_width=True)
-                with btn_col2:
-                    clear_submitted = st.form_submit_button("Clear Filters", use_container_width=True)
+
+            adv_checkbox_col1, adv_checkbox_col2 = st.columns(2)
+            with adv_checkbox_col1:
+                search_recently_changed = st.checkbox(
+                    "Recently changed jobs",
+                    key="crust_search_recently_changed",
+                    help="Started new job in last 90 days"
+                )
+            with adv_checkbox_col2:
+                search_has_email = st.checkbox(
+                    "Has verified email",
+                    key="crust_search_has_email"
+                )
+
+        # Controls row
+        ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
+        with ctrl_col1:
+            search_limit = st.selectbox(
+                "Results limit",
+                options=[25, 50, 100, 250, 500, 1000],
+                index=2,  # Default 100
+                key="crust_search_limit"
+            )
+        with ctrl_col2:
+            pass  # Spacer
+        with ctrl_col3:
+            btn_col1, btn_col2 = st.columns(2)
+            with btn_col1:
+                search_submitted = st.button("Search", type="primary", use_container_width=True)
+            with btn_col2:
+                clear_submitted = st.button("Clear Filters", use_container_width=True)
+
+        # --- Helper to get effective value for a field ---
+        def _effective_val(input_key, expanded_key):
+            """Merge text input + AI multiselect selections. Both contribute."""
+            parts = []
+            # Manual text input (comma-separated values)
+            raw = st.session_state.get(input_key, '').strip()
+            if raw:
+                parts.extend([v.strip() for v in raw.split(',') if v.strip()])
+            # AI-selected values
+            sel = st.session_state.get(f"sel_{expanded_key}", [])
+            if sel:
+                parts.extend(sel)
+            # Dedupe preserving order
+            seen = set()
+            unique = []
+            for p in parts:
+                if p.lower() not in seen:
+                    seen.add(p.lower())
+                    unique.append(p)
+            return ', '.join(unique)
 
         # Handle clear filters
         if clear_submitted:
-            # Clear session state for search
             keys_to_clear = [
-                'crustdata_search_results',
-                'crustdata_search_cursor',
-                'crustdata_search_total',
-                'crustdata_search_selected',
+                'crustdata_search_results', 'crustdata_search_cursor',
+                'crustdata_search_total', 'crustdata_search_selected',
                 'crustdata_search_credits_used',
-                'expanded_titles',
-                'expanded_past_titles',
-                'expanded_skills',
-                'selected_expanded_titles',
-                'selected_expanded_past_titles',
-                'selected_expanded_skills',
+                'expanded_titles', 'expanded_companies', 'expanded_locations',
+                'expanded_keywords', 'expanded_skills', 'expanded_past_titles',
+                'expanded_past_companies', 'expanded_schools',
+                'sel_expanded_titles', 'sel_expanded_companies', 'sel_expanded_locations',
+                'sel_expanded_keywords', 'sel_expanded_skills', 'sel_expanded_past_titles',
+                'sel_expanded_past_companies', 'sel_expanded_schools',
+                'custom_expanded_titles', 'custom_expanded_companies', 'custom_expanded_locations',
+                'custom_expanded_keywords', 'custom_expanded_skills', 'custom_expanded_past_titles',
+                'custom_expanded_past_companies', 'custom_expanded_schools',
             ]
             for key in keys_to_clear:
                 if key in st.session_state:
@@ -4470,49 +4440,48 @@ with tab_search:
 
         # Handle search
         if search_submitted:
+            effective_title = _effective_val('crust_search_title', 'expanded_titles')
+            effective_company = _effective_val('crust_search_company', 'expanded_companies')
+            effective_location = _effective_val('crust_search_location', 'expanded_locations')
+            effective_keywords = _effective_val('crust_search_keywords', 'expanded_keywords')
+            effective_skills = _effective_val('crust_search_skills', 'expanded_skills')
+            effective_past_titles = _effective_val('crust_search_past_titles', 'expanded_past_titles')
+            effective_past_companies = _effective_val('crust_search_past_companies', 'expanded_past_companies')
+            effective_school = _effective_val('crust_search_school', 'expanded_schools')
 
-            # Use AI-expanded values if available, otherwise use form inputs
-            expanded_title_list = st.session_state.get('selected_expanded_titles', [])
-            expanded_past_title_list = st.session_state.get('selected_expanded_past_titles', [])
-            expanded_skill_list = st.session_state.get('selected_expanded_skills', [])
+            # Build skill groups from effective skills value
+            skill_groups = [effective_skills] if effective_skills else []
 
-            # Merge expanded values with form input (expanded takes priority if non-empty)
-            effective_title = ', '.join(expanded_title_list) if expanded_title_list else search_title
-            effective_past_titles = ', '.join(expanded_past_title_list) if expanded_past_title_list else search_past_titles
-            effective_skill_groups = [', '.join(expanded_skill_list)] if expanded_skill_list else skill_groups
-
-            # Check filters including expanded values
             has_filters = any([
-                effective_title, search_company, search_location,
+                effective_title, effective_company, effective_location,
                 search_seniority, search_headcount,
                 search_exp_min > 0, search_exp_max > 0,
-                search_keywords, effective_skill_groups, effective_past_titles,
-                search_past_companies, search_school, search_recently_changed, search_has_email
+                effective_keywords, skill_groups, effective_past_titles,
+                effective_past_companies, effective_school,
+                search_recently_changed, search_has_email
             ])
 
             if not has_filters:
                 st.warning("Please provide at least one search filter.")
             else:
-                # Build filters
                 filters = build_search_filters(
                     title=effective_title if effective_title else None,
-                    company=search_company if search_company else None,
-                    location=search_location if search_location else None,
+                    company=effective_company if effective_company else None,
+                    location=effective_location if effective_location else None,
                     seniority=search_seniority if search_seniority else None,
                     headcount=search_headcount if search_headcount else None,
                     experience_min=search_exp_min if search_exp_min > 0 else None,
                     experience_max=search_exp_max if search_exp_max > 0 else None,
-                    skill_groups=effective_skill_groups if effective_skill_groups else None,
-                    keywords=search_keywords if search_keywords else None,
-                    past_companies=search_past_companies if search_past_companies else None,
+                    skill_groups=skill_groups if skill_groups else None,
+                    keywords=effective_keywords if effective_keywords else None,
+                    past_companies=effective_past_companies if effective_past_companies else None,
                     past_titles=effective_past_titles if effective_past_titles else None,
-                    school=search_school if search_school else None,
+                    school=effective_school if effective_school else None,
                     recently_changed_jobs=search_recently_changed if search_recently_changed else None,
                     has_verified_email=search_has_email if search_has_email else None,
                 )
 
-                # Execute search
-                with st.spinner(f"Searching Crustdata database..."):
+                with st.spinner("Searching Crustdata database..."):
                     try:
                         results = search_people_db(filters, limit=search_limit, api_key=api_key)
 
@@ -4523,14 +4492,13 @@ with tab_search:
                             st.session_state['crustdata_search_cursor'] = results.get('cursor')
                             st.session_state['crustdata_search_total'] = total_count
                             st.session_state['crustdata_search_credits_used'] = results.get('credits_used', 0)
-                            st.session_state['crustdata_search_selected'] = list(range(loaded_count))  # Select all by default
+                            st.session_state['crustdata_search_selected'] = list(range(loaded_count))
                             st.success(f"Loaded **{loaded_count:,}** profiles (of {total_count:,} total matching)")
                         else:
                             st.session_state['crustdata_search_results'] = []
                             st.session_state['crustdata_search_total'] = 0
                             st.info("No profiles found matching your criteria. Try adjusting your filters.")
 
-                        # Clear credits cache to refresh
                         _get_crustdata_credits.clear()
 
                     except Exception as e:

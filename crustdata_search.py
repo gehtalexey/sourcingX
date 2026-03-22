@@ -840,6 +840,98 @@ def log_search_usage(
 
 
 # =============================================================================
+# AI-ASSISTED EXPANSION
+# =============================================================================
+
+_TITLE_PROMPT = (
+    'Given the job title "{term}", list 5-10 common alternative titles for the '
+    'same or very similar role. Include spelling variations (Lead vs Leader), '
+    'abbreviations, and industry-standard equivalents at the same seniority level. '
+    'Return ONLY a valid JSON array of lowercase strings. '
+    'Example: ["team lead", "tech lead", "engineering manager"]'
+)
+
+_SKILL_PROMPT = (
+    'Given the technical skill "{term}", list 5-10 closely related skills, tools, '
+    'or technologies that someone with this skill would likely know or that '
+    'recruiters search for interchangeably. Include abbreviations and alternative names. '
+    'Return ONLY a valid JSON array of lowercase strings. '
+    'Example: ["k8s", "docker", "helm", "container orchestration"]'
+)
+
+
+def expand_variations(
+    term: str,
+    field_type: str = 'title',
+    openai_api_key: str = None,
+) -> List[str]:
+    """
+    Use OpenAI gpt-4o-mini to expand a term into common variations.
+
+    Args:
+        term: The user's input (e.g., "team leader" or "Kubernetes")
+        field_type: 'title' for job titles, 'skill' for technical skills
+        openai_api_key: OpenAI API key
+
+    Returns:
+        List of 5-10 variations (always includes the original term).
+        On failure, returns [term] (graceful fallback).
+    """
+    if not term or not term.strip():
+        return []
+
+    term = term.strip()
+
+    if not openai_api_key:
+        return [term]
+
+    prompt_template = _TITLE_PROMPT if field_type == 'title' else _SKILL_PROMPT
+    prompt = prompt_template.format(term=term)
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=openai_api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300,
+            temperature=0.3,
+        )
+
+        text = response.choices[0].message.content.strip()
+        # Handle markdown code fences
+        if text.startswith('```'):
+            text = text.split('\n', 1)[1] if '\n' in text else text[3:]
+            if text.endswith('```'):
+                text = text[:-3]
+            text = text.strip()
+            if text.startswith('json'):
+                text = text[4:].strip()
+
+        variations = json.loads(text)
+        if not isinstance(variations, list):
+            return [term]
+
+        # Ensure original term is included, deduplicate
+        variations = [v.strip().lower() for v in variations if isinstance(v, str) and v.strip()]
+        if term.lower() not in variations:
+            variations.insert(0, term.lower())
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for v in variations:
+            if v not in seen:
+                seen.add(v)
+                unique.append(v)
+
+        return unique
+
+    except Exception:
+        return [term]
+
+
+# =============================================================================
 # EXPORTS
 # =============================================================================
 
@@ -857,4 +949,6 @@ __all__ = [
     'normalize_search_results_to_df',
     # Usage tracking
     'log_search_usage',
+    # AI expansion
+    'expand_variations',
 ]

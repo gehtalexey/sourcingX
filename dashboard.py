@@ -100,6 +100,7 @@ try:
         build_filters as build_search_filters,
         normalize_search_results_to_df,
         check_credits as check_crustdata_credits,
+        expand_variations,
         SENIORITY_LEVELS,
         HEADCOUNT_RANGES,
     )
@@ -4160,6 +4161,130 @@ with tab_search:
 
         st.divider()
 
+        # ===== AI Title & Skill Expansion (outside form for interactivity) =====
+        openai_key = load_openai_key()
+        if openai_key and HAS_CRUSTDATA_SEARCH:
+            with st.expander("AI-Assisted Search Expansion", expanded=False):
+                st.caption("Generate title and skill variations to broaden your search")
+
+                exp_col1, exp_col2 = st.columns(2)
+
+                # --- Title expansion ---
+                with exp_col1:
+                    st.markdown("**Title Variations**")
+                    title_input = st.text_input(
+                        "Enter a job title to expand",
+                        key="expand_title_input",
+                        placeholder="e.g., team leader"
+                    )
+                    t_btn_col1, t_btn_col2 = st.columns(2)
+                    with t_btn_col1:
+                        if st.button("Suggest", key="btn_expand_title", use_container_width=True):
+                            if title_input and title_input.strip():
+                                with st.spinner("Generating..."):
+                                    suggestions = expand_variations(title_input, field_type='title', openai_api_key=openai_key)
+                                    existing = st.session_state.get('expanded_titles', [])
+                                    merged = list(dict.fromkeys(existing + suggestions))  # dedupe, preserve order
+                                    st.session_state['expanded_titles'] = merged
+                    with t_btn_col2:
+                        if st.button("Clear", key="btn_clear_titles", use_container_width=True):
+                            st.session_state.pop('expanded_titles', None)
+                            st.rerun()
+
+                    if 'expanded_titles' in st.session_state and st.session_state['expanded_titles']:
+                        selected_titles = st.multiselect(
+                            "Select titles to include in search:",
+                            options=st.session_state['expanded_titles'],
+                            default=st.session_state['expanded_titles'],
+                            key="selected_expanded_titles"
+                        )
+                        custom_title = st.text_input("Add custom title:", key="custom_title_add", placeholder="Type and press Enter")
+                        if custom_title and custom_title.strip():
+                            if custom_title.strip().lower() not in [t.lower() for t in st.session_state['expanded_titles']]:
+                                st.session_state['expanded_titles'].append(custom_title.strip().lower())
+                                st.rerun()
+
+                # --- Past title expansion ---
+                with exp_col1:
+                    st.markdown("**Past Title Variations**")
+                    past_title_input = st.text_input(
+                        "Enter a past title to expand",
+                        key="expand_past_title_input",
+                        placeholder="e.g., DevOps engineer"
+                    )
+                    pt_btn_col1, pt_btn_col2 = st.columns(2)
+                    with pt_btn_col1:
+                        if st.button("Suggest", key="btn_expand_past_title", use_container_width=True):
+                            if past_title_input and past_title_input.strip():
+                                with st.spinner("Generating..."):
+                                    suggestions = expand_variations(past_title_input, field_type='title', openai_api_key=openai_key)
+                                    existing = st.session_state.get('expanded_past_titles', [])
+                                    merged = list(dict.fromkeys(existing + suggestions))
+                                    st.session_state['expanded_past_titles'] = merged
+                    with pt_btn_col2:
+                        if st.button("Clear", key="btn_clear_past_titles", use_container_width=True):
+                            st.session_state.pop('expanded_past_titles', None)
+                            st.rerun()
+
+                    if 'expanded_past_titles' in st.session_state and st.session_state['expanded_past_titles']:
+                        selected_past_titles = st.multiselect(
+                            "Select past titles to include:",
+                            options=st.session_state['expanded_past_titles'],
+                            default=st.session_state['expanded_past_titles'],
+                            key="selected_expanded_past_titles"
+                        )
+                        custom_past_title = st.text_input("Add custom past title:", key="custom_past_title_add", placeholder="Type and press Enter")
+                        if custom_past_title and custom_past_title.strip():
+                            if custom_past_title.strip().lower() not in [t.lower() for t in st.session_state['expanded_past_titles']]:
+                                st.session_state['expanded_past_titles'].append(custom_past_title.strip().lower())
+                                st.rerun()
+
+                # --- Skill expansion ---
+                with exp_col2:
+                    st.markdown("**Skill Variations**")
+                    skill_input = st.text_input(
+                        "Enter a skill to expand",
+                        key="expand_skill_input",
+                        placeholder="e.g., Kubernetes"
+                    )
+                    s_btn_col1, s_btn_col2 = st.columns(2)
+                    with s_btn_col1:
+                        if st.button("Suggest", key="btn_expand_skill", use_container_width=True):
+                            if skill_input and skill_input.strip():
+                                with st.spinner("Generating..."):
+                                    suggestions = expand_variations(skill_input, field_type='skill', openai_api_key=openai_key)
+                                    existing = st.session_state.get('expanded_skills', [])
+                                    merged = list(dict.fromkeys(existing + suggestions))
+                                    st.session_state['expanded_skills'] = merged
+                    with s_btn_col2:
+                        if st.button("Clear", key="btn_clear_skills", use_container_width=True):
+                            st.session_state.pop('expanded_skills', None)
+                            st.rerun()
+
+                    if 'expanded_skills' in st.session_state and st.session_state['expanded_skills']:
+                        selected_skills = st.multiselect(
+                            "Select skills to include in search:",
+                            options=st.session_state['expanded_skills'],
+                            default=st.session_state['expanded_skills'],
+                            key="selected_expanded_skills"
+                        )
+                        custom_skill = st.text_input("Add custom skill:", key="custom_skill_add", placeholder="Type and press Enter")
+                        if custom_skill and custom_skill.strip():
+                            if custom_skill.strip().lower() not in [t.lower() for t in st.session_state['expanded_skills']]:
+                                st.session_state['expanded_skills'].append(custom_skill.strip().lower())
+                                st.rerun()
+
+                # Show what will be used in search
+                parts = []
+                if 'selected_expanded_titles' in st.session_state and st.session_state.get('selected_expanded_titles'):
+                    parts.append(f"**Titles:** {', '.join(st.session_state['selected_expanded_titles'])}")
+                if 'selected_expanded_past_titles' in st.session_state and st.session_state.get('selected_expanded_past_titles'):
+                    parts.append(f"**Past titles:** {', '.join(st.session_state['selected_expanded_past_titles'])}")
+                if 'selected_expanded_skills' in st.session_state and st.session_state.get('selected_expanded_skills'):
+                    parts.append(f"**Skills:** {', '.join(st.session_state['selected_expanded_skills'])}")
+                if parts:
+                    st.info("Search will use: " + " | ".join(parts))
+
         # ===== Filter Form =====
         with st.form("crustdata_search_form"):
             st.markdown("##### Basic Filters")
@@ -4331,6 +4456,12 @@ with tab_search:
                 'crustdata_search_total',
                 'crustdata_search_selected',
                 'crustdata_search_credits_used',
+                'expanded_titles',
+                'expanded_past_titles',
+                'expanded_skills',
+                'selected_expanded_titles',
+                'selected_expanded_past_titles',
+                'selected_expanded_skills',
             ]
             for key in keys_to_clear:
                 if key in st.session_state:
@@ -4339,12 +4470,23 @@ with tab_search:
 
         # Handle search
         if search_submitted:
-            # Check if at least one filter is provided
+
+            # Use AI-expanded values if available, otherwise use form inputs
+            expanded_title_list = st.session_state.get('selected_expanded_titles', [])
+            expanded_past_title_list = st.session_state.get('selected_expanded_past_titles', [])
+            expanded_skill_list = st.session_state.get('selected_expanded_skills', [])
+
+            # Merge expanded values with form input (expanded takes priority if non-empty)
+            effective_title = ', '.join(expanded_title_list) if expanded_title_list else search_title
+            effective_past_titles = ', '.join(expanded_past_title_list) if expanded_past_title_list else search_past_titles
+            effective_skill_groups = [', '.join(expanded_skill_list)] if expanded_skill_list else skill_groups
+
+            # Check filters including expanded values
             has_filters = any([
-                search_title, search_company, search_location,
+                effective_title, search_company, search_location,
                 search_seniority, search_headcount,
                 search_exp_min > 0, search_exp_max > 0,
-                search_keywords, skill_groups, search_past_titles,
+                search_keywords, effective_skill_groups, effective_past_titles,
                 search_past_companies, search_school, search_recently_changed, search_has_email
             ])
 
@@ -4353,17 +4495,17 @@ with tab_search:
             else:
                 # Build filters
                 filters = build_search_filters(
-                    title=search_title if search_title else None,
+                    title=effective_title if effective_title else None,
                     company=search_company if search_company else None,
                     location=search_location if search_location else None,
                     seniority=search_seniority if search_seniority else None,
                     headcount=search_headcount if search_headcount else None,
                     experience_min=search_exp_min if search_exp_min > 0 else None,
                     experience_max=search_exp_max if search_exp_max > 0 else None,
-                    skill_groups=skill_groups if skill_groups else None,
+                    skill_groups=effective_skill_groups if effective_skill_groups else None,
                     keywords=search_keywords if search_keywords else None,
                     past_companies=search_past_companies if search_past_companies else None,
-                    past_titles=search_past_titles if search_past_titles else None,
+                    past_titles=effective_past_titles if effective_past_titles else None,
                     school=search_school if search_school else None,
                     recently_changed_jobs=search_recently_changed if search_recently_changed else None,
                     has_verified_email=search_has_email if search_has_email else None,

@@ -3927,8 +3927,49 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
             client = anthropic.Anthropic(api_key=_key)
         else:
             client = OpenAI(api_key=_key)
+
         try:
-            result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
+            # Retry logic with exponential backoff for rate limits
+            max_retries = 5
+            base_delay = 2  # seconds
+            result = None
+            last_error = None
+
+            for attempt in range(max_retries):
+                try:
+                    # Check cancellation before each attempt
+                    if cancel_flag and cancel_flag.get('cancelled'):
+                        return None
+
+                    result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
+                    break  # Success, exit retry loop
+
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e).lower()
+                    error_code = getattr(e, 'status_code', None) or ('429' if '429' in str(e) else ('403' if '403' in str(e) else None))
+
+                    # Check if it's a rate limit error (429 or 403 for Anthropic)
+                    is_rate_limit = (
+                        error_code in [429, 403, '429', '403'] or
+                        'rate' in error_str or
+                        'limit' in error_str or
+                        'too many' in error_str or
+                        'overloaded' in error_str
+                    )
+
+                    if is_rate_limit and attempt < max_retries - 1:
+                        # Exponential backoff: 2, 4, 8, 16, 32 seconds
+                        delay = base_delay * (2 ** attempt)
+                        time.sleep(delay)
+                        continue
+                    else:
+                        # Not a rate limit error or max retries reached, re-raise
+                        raise
+
+            if result is None:
+                raise last_error or Exception("Failed after max retries")
+
             # Add profile info to result
             name = profile.get('name', '') or f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
             if not name:
@@ -8200,6 +8241,9 @@ with tab_screening:
                 batch_ai_provider = batch_state.get('ai_provider', 'openai')
                 batch_api_key = batch_state.get('api_key', openai_key)
                 max_workers = batch_state.get('max_workers', 15)
+                # Ensure Anthropic uses reduced concurrency even when resuming
+                if batch_ai_provider == "anthropic":
+                    max_workers = min(max_workers, 5)
                 batch_role_prompt = batch_state.get('role_prompt')
                 batch_size = 50  # Tier 3: 50 parallel requests, 50 × 15KB = ~750KB memory
                 current_batch = batch_state.get('current_batch', 0)
@@ -8358,6 +8402,10 @@ with tab_screening:
                 # Dynamic concurrent workers
                 max_workers = _screening_session_start()
                 st.session_state['_screening_active'] = True
+
+                # Reduce concurrency for Anthropic (lower rate limits than OpenAI)
+                if ai_provider == "anthropic":
+                    max_workers = min(max_workers, 5)  # Cap at 5 for Anthropic
 
                 # Validate API key before starting
                 if ai_provider == "anthropic":

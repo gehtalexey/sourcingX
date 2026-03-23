@@ -114,6 +114,67 @@ def _load_api_key() -> str:
 # FILTER BUILDERS
 # =============================================================================
 
+def _parse_keyword_boolean(expr: str) -> List[List[str]]:
+    """
+    Parse boolean keyword expression into AND groups of OR terms.
+
+    Syntax:
+        (node OR node.js) AND (react OR react.js)
+        node OR node.js  (single OR group)
+        node, node.js    (comma = OR for simple cases)
+        kubernetes       (single term)
+
+    Returns:
+        List of groups, where each group is a list of OR terms.
+        Groups are combined with AND logic.
+        E.g., [["node", "node.js"], ["react", "react.js"]]
+    """
+    import re
+
+    if not expr or not expr.strip():
+        return []
+
+    expr = expr.strip()
+
+    # Check if it contains AND keyword (case insensitive)
+    if re.search(r'\bAND\b', expr, re.IGNORECASE):
+        # Split by AND (case insensitive, word boundary)
+        and_parts = re.split(r'\s+AND\s+', expr, flags=re.IGNORECASE)
+        groups = []
+        for part in and_parts:
+            part = part.strip()
+            # Remove surrounding parentheses if present
+            if part.startswith('(') and part.endswith(')'):
+                part = part[1:-1].strip()
+            # Split by OR (case insensitive) or comma
+            if re.search(r'\bOR\b', part, re.IGNORECASE):
+                or_terms = re.split(r'\s+OR\s+', part, flags=re.IGNORECASE)
+            else:
+                or_terms = part.split(',')
+            # Clean up terms
+            or_terms = [t.strip() for t in or_terms if t.strip()]
+            if or_terms:
+                groups.append(or_terms)
+        return groups
+
+    # No AND - check for OR
+    if re.search(r'\bOR\b', expr, re.IGNORECASE):
+        # Remove surrounding parentheses if present
+        if expr.startswith('(') and expr.endswith(')'):
+            expr = expr[1:-1].strip()
+        or_terms = re.split(r'\s+OR\s+', expr, flags=re.IGNORECASE)
+        or_terms = [t.strip() for t in or_terms if t.strip()]
+        return [or_terms] if or_terms else []
+
+    # No AND/OR - treat commas as OR (backwards compatibility)
+    if ',' in expr:
+        terms = [t.strip() for t in expr.split(',') if t.strip()]
+        return [terms] if terms else []
+
+    # Single term
+    return [[expr.strip()]]
+
+
 def build_filters(
     title: str = None,
     company: str = None,
@@ -156,7 +217,8 @@ def build_filters(
         skills_and: If True, require ALL skills (AND). If False, require ANY skill (OR)
         skill_groups: List of comma-separated skill strings. Each group is OR, groups combined with AND.
                       E.g., ["aws, gcp", "docker, kubernetes"] means (AWS OR GCP) AND (Docker OR Kubernetes)
-        keywords: Comma-separated keywords (OR across headline/summary/skills)
+        keywords: Boolean keyword expression. E.g., "(node OR node.js) AND (react OR react.js)"
+                      Supports AND, OR keywords (case insensitive) and parentheses. Comma = OR for simple cases.
         past_companies: Comma-separated past company names (substring match)
         past_titles: Comma-separated past job titles (substring match)
         school: School/university name (substring match)
@@ -316,37 +378,42 @@ def build_filters(
                     "conditions": skill_conditions
                 })
 
-    # Keywords filter (OR across headline, summary, skills)
+    # Keywords filter (searches headline, summary, skills)
+    # Boolean syntax: (node OR node.js) AND (react OR react.js)
+    # Also supports: node, node.js (comma = OR for simple cases)
     if keywords and keywords.strip():
-        keyword_list = [k.strip() for k in keywords.split(',') if k.strip()]
-        if keyword_list:
-            # Build OR condition for keywords
-            keyword_conditions = []
-            for kw in keyword_list:
-                # Search in headline
-                keyword_conditions.append({
-                    "column": "headline",
-                    "type": "[.]",
-                    "value": kw
-                })
-                # Search in summary
-                keyword_conditions.append({
-                    "column": "summary",
-                    "type": "[.]",
-                    "value": kw
-                })
-                # Search in skills
-                keyword_conditions.append({
-                    "column": "skills",
-                    "type": "[.]",
-                    "value": kw
-                })
+        # Parse boolean expression
+        keyword_groups = _parse_keyword_boolean(keywords)
 
-            # Wrap in OR condition
-            conditions.append({
-                "op": "or",
-                "conditions": keyword_conditions
-            })
+        for group in keyword_groups:
+            if group:
+                # Build OR condition for keywords in this group
+                keyword_conditions = []
+                for kw in group:
+                    # Search in headline
+                    keyword_conditions.append({
+                        "column": "headline",
+                        "type": "[.]",
+                        "value": kw
+                    })
+                    # Search in summary
+                    keyword_conditions.append({
+                        "column": "summary",
+                        "type": "[.]",
+                        "value": kw
+                    })
+                    # Search in skills
+                    keyword_conditions.append({
+                        "column": "skills",
+                        "type": "[.]",
+                        "value": kw
+                    })
+
+                # Wrap group in OR condition, add to main conditions (AND)
+                conditions.append({
+                    "op": "or",
+                    "conditions": keyword_conditions
+                })
 
     # Past companies filter
     if past_companies and past_companies.strip():

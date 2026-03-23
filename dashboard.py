@@ -4319,7 +4319,7 @@ with tab_search:
                 help="0 = no limit"
             )
         _render_ai_field(col8, "Keywords", "crust_search_keywords", "expanded_keywords", "keywords",
-                         "e.g., kubernetes, microservices")
+                         "(node OR node.js) AND (react OR react.js)")
 
         # Advanced Filters
         with st.expander("Advanced Filters"):
@@ -4383,7 +4383,7 @@ with tab_search:
         with ctrl_col1:
             search_limit = st.selectbox(
                 "Results limit",
-                options=[25, 50, 100, 250, 500, 1000],
+                options=[25, 50, 100, 250, 500, 1000, 2000, 5000],
                 index=2,  # Default 100
                 key="crust_search_limit"
             )
@@ -4481,28 +4481,55 @@ with tab_search:
                     has_verified_email=search_has_email if search_has_email else None,
                 )
 
-                with st.spinner("Searching Crustdata database..."):
-                    try:
-                        results = search_people_db(filters, limit=search_limit, api_key=api_key)
+                try:
+                    # First request (API caps at 1000 per request)
+                    progress_placeholder = st.empty()
+                    progress_placeholder.info("Searching Crustdata database...")
 
-                        if results.get("profiles"):
-                            loaded_count = len(results['profiles'])
-                            total_count = results.get('total_count', loaded_count)
-                            st.session_state['crustdata_search_results'] = results['profiles']
-                            st.session_state['crustdata_search_cursor'] = results.get('cursor')
-                            st.session_state['crustdata_search_total'] = total_count
-                            st.session_state['crustdata_search_credits_used'] = results.get('credits_used', 0)
-                            st.session_state['crustdata_search_selected'] = list(range(loaded_count))
-                            st.success(f"Loaded **{loaded_count:,}** profiles (of {total_count:,} total matching)")
-                        else:
-                            st.session_state['crustdata_search_results'] = []
-                            st.session_state['crustdata_search_total'] = 0
-                            st.info("No profiles found matching your criteria. Try adjusting your filters.")
+                    results = search_people_db(filters, limit=min(search_limit, 1000), api_key=api_key)
 
-                        _get_crustdata_credits.clear()
+                    if results.get("profiles"):
+                        all_profiles = results['profiles']
+                        total_count = results.get('total_count', len(all_profiles))
+                        total_credits = results.get('credits_used', 0)
+                        cursor = results.get('cursor')
 
-                    except Exception as e:
-                        st.error(f"Search failed: {str(e)}")
+                        # Auto-paginate if limit > 1000 and more results available
+                        target = min(search_limit, total_count)
+                        while cursor and len(all_profiles) < target:
+                            progress_placeholder.info(f"Loading profiles... {len(all_profiles):,} / {target:,}")
+                            remaining = target - len(all_profiles)
+                            page_results = search_people_db(
+                                filters,
+                                limit=min(remaining, 1000),
+                                cursor=cursor,
+                                api_key=api_key
+                            )
+                            if page_results.get("profiles"):
+                                all_profiles.extend(page_results['profiles'])
+                                total_credits += page_results.get('credits_used', 0)
+                                cursor = page_results.get('cursor')
+                            else:
+                                break
+
+                        progress_placeholder.empty()
+                        loaded_count = len(all_profiles)
+                        st.session_state['crustdata_search_results'] = all_profiles
+                        st.session_state['crustdata_search_cursor'] = cursor
+                        st.session_state['crustdata_search_total'] = total_count
+                        st.session_state['crustdata_search_credits_used'] = total_credits
+                        st.session_state['crustdata_search_selected'] = list(range(loaded_count))
+                        st.success(f"Loaded **{loaded_count:,}** profiles (of {total_count:,} total matching)")
+                    else:
+                        progress_placeholder.empty()
+                        st.session_state['crustdata_search_results'] = []
+                        st.session_state['crustdata_search_total'] = 0
+                        st.info("No profiles found matching your criteria. Try adjusting your filters.")
+
+                    _get_crustdata_credits.clear()
+
+                except Exception as e:
+                    st.error(f"Search failed: {str(e)}")
 
         # ===== Results Section =====
         if 'crustdata_search_results' in st.session_state and st.session_state['crustdata_search_results']:
@@ -5459,7 +5486,20 @@ with tab_filter:
     else:
         df = st.session_state['results_df']
 
-        st.markdown(f"**{len(df)} profiles loaded** — configure filters below")
+        # Header with profile count and export button
+        header_col1, header_col2 = st.columns([3, 1])
+        with header_col1:
+            st.markdown(f"**{len(df)} profiles loaded** — configure filters below")
+        with header_col2:
+            export_df = prepare_df_for_export(df)
+            csv_data = export_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                "Export All (CSV)",
+                csv_data,
+                f"loaded_profiles_{len(df)}.csv",
+                "text/csv",
+                key="filter_tab_export_all"
+            )
 
         needs_filtering = 'job_1_job_title' in df.columns and 'current_title' not in df.columns
 
@@ -6394,18 +6434,17 @@ with tab_enrich:
                             st.write(f"  {col}: {sample.get(col, 'N/A')}")
 
             if show_all_cols:
-                # Show all Crustdata columns
-                all_cols = ['name', 'current_title', 'current_company', 'all_employers', 'all_titles', 'all_schools', 'skills', 'past_positions', 'headline', 'location', 'summary', 'connections_count', 'linkedin_url']
-                available_cols = [c for c in all_cols if c in enriched_df.columns]
+                # Show ALL columns in dataframe
                 st.dataframe(
-                    enriched_df[available_cols].head(20) if available_cols else enriched_df.head(20),
+                    enriched_df.head(50),
                     width="stretch",
                     hide_index=True,
                     column_config={
                         "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                        "public_url": st.column_config.LinkColumn("LinkedIn"),
                     }
                 )
-                st.caption(f"Showing {min(20, len(enriched_df))} of {len(enriched_df)} profiles | {len(available_cols)} columns")
+                st.caption(f"Showing {min(50, len(enriched_df))} of {len(enriched_df)} profiles | {len(enriched_df.columns)} columns")
             else:
                 # Simple preview: name, title, company, linkedin
                 preview_cols = ['name', 'current_title', 'current_company', 'linkedin_url']
@@ -6433,8 +6472,11 @@ with tab_enrich:
                 import hashlib
                 urls_hash = hashlib.md5('|'.join(sorted(str(u) for u in urls)).encode()).hexdigest()
 
+                # Cache version - increment when detection logic changes to force refresh
+                _DETECTION_CACHE_VERSION = 2  # Bumped: Added original_urls support
                 use_cached_detection = (
                     st.session_state.get('_detection_hash') == urls_hash and
+                    st.session_state.get('_detection_cache_version') == _DETECTION_CACHE_VERSION and
                     '_matched_profiles_cache' in st.session_state and
                     '_skipped_urls' in st.session_state
                 )
@@ -6545,7 +6587,7 @@ with tab_enrich:
                         # UNIFIED MATCHING: Fetch profiles and build lookup (same as Load from DB)
                         # MEMORY FIX: Exclude raw_data (20-50KB per profile) — not needed for URL matching or display
                         cutoff = (datetime.utcnow() - timedelta(days=refresh_months * 30)).isoformat()
-                        _MATCH_COLUMNS = 'linkedin_url,original_url,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,status,enriched_at,screened_at,contacted_at,screening_score,screening_fit_level,screening_summary'
+                        _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,status,enriched_at,screened_at,contacted_at,screening_score,screening_fit_level,screening_summary'
                         all_profiles = db_client.select('profiles', _MATCH_COLUMNS,
                             filters={'enriched_at': f'gte.{cutoff}'}, limit=50000)
 
@@ -6555,7 +6597,12 @@ with tab_enrich:
                         for p in all_profiles:
                             url = p.get('linkedin_url') or ''
                             orig = p.get('original_url') or ''
-                            for u in [url, orig]:
+                            # Include all URLs from original_urls array (multi-source support)
+                            orig_array = p.get('original_urls') or []
+                            if not isinstance(orig_array, list):
+                                orig_array = []
+                            all_urls = [url, orig] + orig_array
+                            for u in all_urls:
                                 if u and '/in/' in u:
                                     username = u.split('/in/')[-1].rstrip('/').lower()
                                     if not username:
@@ -6610,14 +6657,9 @@ with tab_enrich:
                             # Try exact match first
                             candidates = profile_by_username.get(username, []) or profile_by_username.get(username_no_hyphen, [])
 
-                            # Try prefix matching
-                            if not candidates:
-                                for db_user, profiles_list in profile_by_username.items():
-                                    db_no_hyphen = db_user.replace('-', '')
-                                    if len(db_no_hyphen) >= 5:
-                                        if username_no_hyphen.startswith(db_no_hyphen) or (len(username_no_hyphen) >= 5 and db_no_hyphen.startswith(username_no_hyphen)):
-                                            candidates = profiles_list
-                                            break
+                            # NOTE: Removed aggressive prefix matching that caused false positives
+                            # (e.g., daniel-kalmykov matching daniel-barkan via shared 'daniel' prefix)
+                            # For Crustdata search results, exact matching is sufficient
 
                             if candidates:
                                 skipped_urls.append(url)
@@ -6648,6 +6690,7 @@ with tab_enrich:
                 # Cache detection results for Load from DB (prevents mismatch on button click)
                 if not use_cached_detection:
                     st.session_state['_detection_hash'] = urls_hash
+                    st.session_state['_detection_cache_version'] = _DETECTION_CACHE_VERSION
                     st.session_state['_skipped_urls'] = skipped_urls
                     st.session_state['_new_urls'] = new_urls
                     st.session_state['_unavailable_urls'] = unavailable_urls
@@ -6682,7 +6725,7 @@ with tab_enrich:
                     with cols[1]:
                         if st.button("Refresh", key="refresh_enrich_counts", help="Re-check database for enriched profiles"):
                             # Clear detection cache
-                            for key in ['_detection_hash', '_skipped_urls', '_matched_profiles_cache', '_unique_profiles_count']:
+                            for key in ['_detection_hash', '_detection_cache_version', '_skipped_urls', '_new_urls', '_unavailable_urls', '_matched_profiles_cache', '_unique_profile_count']:
                                 if key in st.session_state:
                                     del st.session_state[key]
                             st.cache_data.clear()
@@ -6808,7 +6851,7 @@ with tab_enrich:
                                         }
                                         st.session_state['enrichment_message'] = f"success:Loaded {len(matched_profiles)} enriched profiles"
                                         # Clear detection cache so UI updates correctly
-                                        for key in ['_detection_hash', '_skipped_urls', '_new_urls', '_unavailable_urls', '_matched_profiles_cache', '_unique_profile_count']:
+                                        for key in ['_detection_hash', '_detection_cache_version', '_skipped_urls', '_new_urls', '_unavailable_urls', '_matched_profiles_cache', '_unique_profile_count']:
                                             if key in st.session_state:
                                                 del st.session_state[key]
                                         st.rerun()
@@ -7126,7 +7169,7 @@ with tab_enrich:
                             st.cache_data.clear()
 
                             # Clear detection cache so "already enriched" counts refresh
-                            for key in ['_detection_hash', '_skipped_urls', '_matched_profiles_cache', '_unique_profiles_count']:
+                            for key in ['_detection_hash', '_detection_cache_version', '_skipped_urls', '_new_urls', '_unavailable_urls', '_matched_profiles_cache', '_unique_profile_count']:
                                 if key in st.session_state:
                                     del st.session_state[key]
 
@@ -7762,6 +7805,7 @@ with tab_filter2:
                             "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                             "public_url": st.column_config.LinkColumn("LinkedIn")
                         })
+            st.caption(f"Showing {min(100, len(display_df))} of {len(display_df)} profiles | {len(display_df.columns)} columns")
         else:
             # Prefer 'name' for DB-loaded profiles, fallback to first_name/last_name
             if 'name' in display_df.columns and not display_df['name'].isna().all():
@@ -9672,19 +9716,19 @@ with tab_database:
                         display_df = display_df.drop(columns=['enriched_at_dt'], errors='ignore')
 
                     if show_all_db_cols:
-                        all_cols = ['name', 'current_title', 'current_company', 'freshness', 'all_employers', 'all_titles', 'all_schools', 'skills', 'past_positions', 'headline', 'location', 'summary', 'connections_count', 'email', 'enriched_at', 'linkedin_url']
-                        available_cols = [c for c in all_cols if c in display_df.columns]
+                        # Show ALL columns in dataframe
                         st.dataframe(
-                            display_df[available_cols] if available_cols else display_df,
+                            display_df,
                             width="stretch",
                             hide_index=True,
                             column_config={
                                 "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                                "public_url": st.column_config.LinkColumn("LinkedIn"),
                                 "enriched_at": st.column_config.DatetimeColumn("Enriched", format="YYYY-MM-DD"),
                                 "freshness": st.column_config.TextColumn("Freshness"),
                             }
                         )
-                        st.caption(f"{len(available_cols)} columns")
+                        st.caption(f"{len(display_df.columns)} columns")
                     else:
                         preview_cols = ['name', 'current_title', 'current_company', 'freshness', 'location', 'linkedin_url']
                         available_cols = [c for c in preview_cols if c in display_df.columns]

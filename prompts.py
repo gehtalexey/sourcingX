@@ -319,7 +319,7 @@ FULLSTACK_TEAMLEAD_ISRAEL = {
         'fullstack tech lead', 'full-stack tech lead',
         'israel', 'tel aviv',
     ],
-    'prompt': """You screen Fullstack Team Leads for Israeli startups. This role requires BOTH fullstack development skills AND team leadership.
+    'prompt': """You screen Fullstack Team Leads for Israeli startups. This role requires BOTH fullstack development skills AND team leadership at a SOFTWARE PRODUCT company.
 
 ## CRITICAL: Fullstack Requirement
 This is a FULLSTACK role. Candidate MUST have evidence of BOTH:
@@ -329,32 +329,53 @@ This is a FULLSTACK role. Candidate MUST have evidence of BOTH:
 If candidate is Backend-only OR Frontend-only → AUTO-REJECT (score ≤2)
 Check their skills array and job titles carefully. "Backend Team Lead" or "Frontend Team Lead" = REJECT.
 
-## Stability Check (do FIRST)
+## CRITICAL: Company Type Validation (CHECK CAREFULLY)
+Read `employer_description` for EACH employer. This role requires experience at SOFTWARE PRODUCT companies or startups.
+
+**REJECT if current/recent companies are:**
+- Call centers, BPO, customer service companies
+- Banks, insurance, financial services (non-fintech)
+- Telecom operators (Bezeq, Cellcom, Partner, Pelephone)
+- IT consulting, body shops, outsourcing (Ness, Matrix, Bynet, Malam Team)
+- Hardware companies (chip design, electronics manufacturing)
+- Project-based companies (defense contractors doing project work)
+- Traditional enterprises (retail chains, manufacturing, logistics)
+- Agencies (marketing agencies, web agencies)
+
+**ACCEPT:**
+- Software product companies (SaaS, apps, platforms)
+- Tech startups (seed to IPO)
+- Cybersecurity companies
+- Fintech (software-focused)
+- Top tech companies (Google, Microsoft, Meta, Wix, Monday, etc.)
+
+If candidate's CURRENT or PRIMARY experience is at non-software companies → score ≤3
+Output: "Company check: [company name] is [type] → [PASS/FAIL]"
+
+## Stability Check (MANDATORY - do FIRST)
 A STABILITY SUMMARY is pre-calculated above. Use those numbers directly:
 1. Read the short-stint companies count from the STABILITY SUMMARY
 2. If 3+ short-stint companies → max score 4 (even if top company)
-3. Read the current company duration from the STABILITY SUMMARY. If <6 months → max score 5
-Output: "Stability: X short-stint companies, current role = Y months"
+3. Read the current company duration from the STABILITY SUMMARY. If <6 months → HARD CAP at score 5 (no exceptions!)
+Output: "Stability: X short-stint companies, current role = Y months → [PASS/CAPPED]"
 
 ## Scoring (be strict)
 - **9-10**: Led fullstack team at top company (Wiz, Monday, Snyk) + 6+ years SW + React+Node + still hands-on coding
-- **7-8**: Good company + led 3+ engineers + clear fullstack depth both sides + hands-on
+- **7-8**: Good software product company + led 3+ engineers + clear fullstack depth both sides + hands-on
 - **5-6**: Senior fullstack engineer ready to lead, or lead with limited team size, or slightly weak on one stack side
-- **3-4**: Limited leadership OR weak fullstack evidence (strong on only one side)
-- **1-2**: Backend-only team lead, Frontend-only team lead, no leadership experience, or wrong domain entirely
+- **3-4**: Limited leadership OR weak fullstack evidence OR non-software company background
+- **1-2**: Backend-only team lead, Frontend-only team lead, no leadership experience, wrong company type, or wrong domain
 
 ## Experience Calculation (CRITICAL)
 Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
-- Count FULL: Fullstack Engineer, Full Stack Developer, Software Engineer (at Israeli startup = usually fullstack), Tech Lead, Team Lead, Staff Engineer
+- Count FULL: Fullstack Engineer, Full Stack Developer, Software Engineer (at software product company), Tech Lead, Team Lead, Staff Engineer
 - Count HALF: Backend Engineer, Frontend Engineer (shows coding but not fullstack)
 - Count HALF: DevOps/SRE (only if also shows coding/fullstack overlap)
 - DO NOT count: Military (use pre-calculated half-credit), QA, Project Manager, PMO, Customer Success, IT
+- DO NOT count: Experience at non-software companies (call centers, banks, telecom, consulting)
 - IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
 - If JD requires "X+ years" and candidate has less, score 5-6 max
 - Show your work: list which roles you counted and excluded
-
-## Company Context
-Read `employer_description` to understand what each company does. Don't guess company type from name alone.
 
 ## Leadership Scope
 Real TL = led 3+ engineers, hired/grew team, still codes 30-50%, owns technical decisions
@@ -381,14 +402,15 @@ If profile shows ONLY frontend skills (React, CSS, no backend) → REJECT
 - Only one side of the stack in skills (no cross-stack evidence)
 - Pure manager, hasn't coded in 3+ years
 - QA/Automation background only
+- Current/primary employer is NOT a software product company
 
 ## Auto-Reject (score ≤4)
 - Job hopper (3+ companies with <1 year total each)
 
 ## Auto-Reject (score ≤5)
-- Current role <6 months (too new, not settled)
+- Current role <6 months (HARD CAP - no exceptions, even for great candidates)
 
-Output your fullstack evidence check AND experience calculation in the response.""",
+Output your COMPANY CHECK, fullstack evidence check, AND experience calculation in the response.""",
 }
 
 PRODUCT_ISRAEL = {

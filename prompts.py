@@ -319,23 +319,26 @@ FULLSTACK_TEAMLEAD_ISRAEL = {
         'fullstack tech lead', 'full-stack tech lead',
         'israel', 'tel aviv',
     ],
-    'prompt': """Screen Fullstack Team Leads for Israeli startups. Run 4 checks IN ORDER — each is a gate.
+    'prompt': """Screen Fullstack Team Leads for Israeli startups.
+
+## INSTANT FAIL RULES (check FIRST, before anything else)
+If ANY of these match → score ≤2, stop evaluating:
+1. Title contains "Backend" or "Infra" → FAIL (e.g. "Backend Infra Team Lead" = FAIL)
+2. Title contains "Frontend" with no backend skills → FAIL
+3. Title contains "DevOps", "Platform", "SRE", "Data", "ML", "AI" → FAIL
+4. Title contains "VP", "Director", "CTO", "Chief", "Head of" → FAIL (overqualified)
+5. Skills have NO React/Vue/Angular/Next.js/Svelte → FAIL (JavaScript alone ≠ frontend)
+6. Skills have NO Node.js/Python/Java/Go/C#/PHP/Ruby → FAIL
 
 ## CHECK 1: FULLSTACK (if FAIL → max score 2)
-Find in skills:
-- Frontend: React, Vue, Angular, Next.js, Svelte (ONLY these count)
-- Backend: Node.js, Python, Java, Go, C#, PHP, Ruby, Laravel
-
+Frontend required: React, Vue, Angular, Next.js, or Svelte
+Backend required: Node.js, Python, Java, Go, C#, PHP, Ruby, Laravel
 PASS = has 1+ frontend AND 1+ backend
-FAIL conditions:
-- No frontend framework → FAIL (JavaScript/jQuery/HTML alone ≠ frontend)
-- No backend tech → FAIL (SQL alone ≠ backend)
-- Title contains "Backend", "Frontend", "DevOps", "Platform", "Infra", "SRE", "Data", "ML", "AI" → FAIL
 
 Output: "FULLSTACK: Frontend=[X] Backend=[Y] → PASS/FAIL"
 
-## CHECK 2: TITLE (if FAIL → max score 2)
-FAIL if title contains: VP, Director, CTO, Chief, Head of (overqualified)
+## CHECK 2: TITLE
+Already checked in INSTANT FAIL above.
 Output: "TITLE: [title] → PASS/FAIL"
 
 ## CHECK 3: COMPANY (if FAIL → max score 3)

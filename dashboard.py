@@ -8170,6 +8170,7 @@ with tab_screening:
             # For compatibility with rest of code
             job_description = f"MUST-HAVES: {must_haves}\nNICE-TO-HAVES: {nice_to_haves}\nREJECT-IFS: {reject_ifs}"
             role_prompt = None  # Structured mode uses its own system prompt
+            selected_role = "Structured"  # For display purposes
 
         else:
             # ===== CLASSIC MODE: JD text area + role prompts =====
@@ -8261,8 +8262,11 @@ with tab_screening:
         st.caption("Detailed mode: score, fit, and summary with experience calc")
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
-        role_display = selected_role if selected_role != 'General (auto)' else 'General'
-        st.info(f"Role: **{role_display}** | Model: **{ai_model}** | Est. cost: **${est_cost:.3f}**")
+        if use_structured_mode:
+            role_display = "Structured"
+        else:
+            role_display = selected_role if selected_role != 'General (auto)' else 'General'
+        st.info(f"Mode: **{role_display}** | Model: **{ai_model}** | Est. cost: **${est_cost:.3f}**")
 
         # Debug: Show available fields and test single profile
         with st.expander("Debug: Profile Fields & Test"):

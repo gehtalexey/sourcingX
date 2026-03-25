@@ -86,6 +86,18 @@ try:
 except ImportError:
     HAS_DATABASE = False
 
+# Structured screening module
+try:
+    from screening_prompt_builder import (
+        STRUCTURED_SYSTEM_PROMPT,
+        build_user_prompt,
+        screen_with_structured_prompt,
+        screen_batch_structured,
+    )
+    HAS_STRUCTURED_SCREENING = True
+except ImportError:
+    HAS_STRUCTURED_SCREENING = False
+
 # Usage tracking module
 try:
     from usage_tracker import UsageTracker, calculate_openai_cost
@@ -4283,8 +4295,8 @@ _profile_count = get_profile_count()
 st.info(f"📊 **{_profile_count}** profiles loaded" if _profile_count else "No profiles loaded — start from the Load tab")
 
 # Create tabs
-tab_search, tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_structured, tab_database, tab_usage = st.tabs([
-    "0. Search", "1. Load", "2. Filter", "3. Enrich", "4. Filter+", "5. AI Screen", "6. Structured", "7. Database", "8. Usage"
+tab_search, tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_database, tab_usage = st.tabs([
+    "0. Search", "1. Load", "2. Filter", "3. Enrich", "4. Filter+", "5. AI Screen", "6. Database", "7. Usage"
 ])
 
 # ========== TAB 0: Search (Crustdata People DB) ==========
@@ -8044,47 +8056,161 @@ with tab_screening:
 
         num_profiles = len(profiles_df)
 
-        # AI Screening Requirements Input
-        st.markdown("### AI Screening Requirements")
-        job_description = st.text_area(
-            "Paste the screening requirements",
-            height=150,
-            key="jd_screening",
-            placeholder="Paste the job description, must-haves, and any specific criteria for AI screening..."
-        )
-
-        # Role-specific prompt selection (like having different Custom GPTs)
-        st.markdown("### Role Prompt")
-
-        # Build role options from prompts.py
-        role_options = ['General (auto)']
-        role_map = {'General (auto)': None}  # Maps display name to prompt
-        try:
-            for role_key, role_data in DEFAULT_PROMPTS.items():
-                name = role_data.get('name', role_key.title())
-                role_options.append(name)
-                role_map[name] = role_data.get('prompt')
-        except:
-            pass  # If prompts not available, just use General
-
-        selected_role = st.selectbox(
-            "Select role type",
-            options=role_options,
+        # Screening Mode Toggle
+        st.markdown("### Screening Mode")
+        screening_mode_choice = st.radio(
+            "Choose screening approach",
+            options=["Structured (Recommended)", "Classic"],
             index=0,
-            key="screening_role_select",
-            help="Like having different Custom GPTs for each role. Saves time - no need to paste full instructions in JD."
+            horizontal=True,
+            key="screening_mode_toggle",
+            help="Structured: Define must-haves in text boxes, AI checks each one. Classic: Use predefined role prompts."
         )
+        use_structured_mode = screening_mode_choice == "Structured (Recommended)"
 
-        # Get the role prompt
-        role_prompt = role_map.get(selected_role)
-        st.session_state['active_role_prompt'] = role_prompt
-        st.session_state['active_role_name'] = selected_role
+        if use_structured_mode:
+            # ===== STRUCTURED MODE: Text boxes for requirements =====
+            st.markdown("### Requirements")
+            st.caption("Define what the AI should check. Each must-have is a gate - fail any = No Fit.")
 
-        if role_prompt:
-            with st.expander(f"View {selected_role} prompt ({len(role_prompt)} chars)"):
-                st.code(role_prompt, language=None)
+            # Must-Haves Section
+            st.markdown("**Must-Have Requirements** (all required)")
+
+            # Initialize session state for must-haves
+            if 'must_have_inputs' not in st.session_state:
+                st.session_state['must_have_inputs'] = [
+                    "Has modern frontend framework (React, Vue, Angular, Next.js, or Svelte)",
+                    "Has backend technology (Node.js, Python, Java, Go, or C#)",
+                    "Has 2+ years team leadership experience (current or past roles)",
+                    "Current company is a software product company (not consulting/outsourcing)",
+                ]
+
+            must_haves = []
+            for i in range(6):  # Allow up to 6 must-haves
+                default_val = st.session_state['must_have_inputs'][i] if i < len(st.session_state['must_have_inputs']) else ""
+                val = st.text_input(
+                    f"Must-have {i+1}",
+                    value=default_val,
+                    key=f"must_have_{i}",
+                    placeholder="e.g., Has React or Vue experience",
+                    label_visibility="collapsed" if i > 0 else "visible"
+                )
+                if val.strip():
+                    must_haves.append(val.strip())
+
+            st.markdown("---")
+
+            # Nice-to-Haves Section
+            st.markdown("**Nice-to-Have** (bonus points)")
+
+            if 'nice_to_have_inputs' not in st.session_state:
+                st.session_state['nice_to_have_inputs'] = [
+                    {"text": "Top company (Wiz, Monday, Snyk, Wix)", "points": 2},
+                    {"text": "8200/Mamram/Talpiot military background", "points": 2},
+                    {"text": "CS degree from Technion/TAU", "points": 1},
+                ]
+
+            nice_to_haves = []
+            for i in range(4):  # Allow up to 4 nice-to-haves
+                cols = st.columns([4, 1])
+                default_text = st.session_state['nice_to_have_inputs'][i]["text"] if i < len(st.session_state['nice_to_have_inputs']) else ""
+                default_pts = st.session_state['nice_to_have_inputs'][i]["points"] if i < len(st.session_state['nice_to_have_inputs']) else 1
+
+                with cols[0]:
+                    text = st.text_input(
+                        f"Nice-to-have {i+1}",
+                        value=default_text,
+                        key=f"nice_to_have_text_{i}",
+                        placeholder="e.g., Top company background",
+                        label_visibility="collapsed"
+                    )
+                with cols[1]:
+                    pts = st.number_input(
+                        "Pts",
+                        min_value=1, max_value=3, value=default_pts,
+                        key=f"nice_to_have_pts_{i}",
+                        label_visibility="collapsed"
+                    )
+                if text.strip():
+                    nice_to_haves.append({"text": text.strip(), "points": pts})
+
+            st.markdown("---")
+
+            # Reject-If Section
+            st.markdown("**Reject If** (instant disqualifiers)")
+
+            if 'reject_if_inputs' not in st.session_state:
+                st.session_state['reject_if_inputs'] = [
+                    "Title contains 'Backend' or 'Infra' (e.g., Backend Infra Team Lead)",
+                    "Title contains 'DevOps', 'Platform', 'SRE', or 'Data'",
+                    "Current company is consulting/outsourcing (Ness, Matrix, Malam Team)",
+                ]
+
+            reject_ifs = []
+            for i in range(4):  # Allow up to 4 reject-ifs
+                default_val = st.session_state['reject_if_inputs'][i] if i < len(st.session_state['reject_if_inputs']) else ""
+                val = st.text_input(
+                    f"Reject if {i+1}",
+                    value=default_val,
+                    key=f"reject_if_{i}",
+                    placeholder="e.g., Title contains 'DevOps'",
+                    label_visibility="collapsed"
+                )
+                if val.strip():
+                    reject_ifs.append(val.strip())
+
+            # Store structured requirements in session state
+            st.session_state['structured_must_haves'] = must_haves
+            st.session_state['structured_nice_to_haves'] = nice_to_haves
+            st.session_state['structured_reject_ifs'] = reject_ifs
+
+            # Show summary
+            st.info(f"**{len(must_haves)}** must-haves | **{len(nice_to_haves)}** nice-to-haves | **{len(reject_ifs)}** reject-ifs")
+
+            # For compatibility with rest of code
+            job_description = f"MUST-HAVES: {must_haves}\nNICE-TO-HAVES: {nice_to_haves}\nREJECT-IFS: {reject_ifs}"
+            role_prompt = None  # Structured mode uses its own system prompt
+
         else:
-            st.caption("General mode: AI uses your JD as the full instructions")
+            # ===== CLASSIC MODE: JD text area + role prompts =====
+            st.markdown("### Job Description")
+            job_description = st.text_area(
+                "Paste the screening requirements",
+                height=150,
+                key="jd_screening",
+                placeholder="Paste the job description, must-haves, and any specific criteria for AI screening..."
+            )
+
+            # Role-specific prompt selection
+            st.markdown("### Role Prompt")
+
+            role_options = ['General (auto)']
+            role_map = {'General (auto)': None}
+            try:
+                for role_key, role_data in DEFAULT_PROMPTS.items():
+                    name = role_data.get('name', role_key.title())
+                    role_options.append(name)
+                    role_map[name] = role_data.get('prompt')
+            except:
+                pass
+
+            selected_role = st.selectbox(
+                "Select role type",
+                options=role_options,
+                index=0,
+                key="screening_role_select",
+                help="Like having different Custom GPTs for each role."
+            )
+
+            role_prompt = role_map.get(selected_role)
+            st.session_state['active_role_prompt'] = role_prompt
+            st.session_state['active_role_name'] = selected_role
+
+            if role_prompt:
+                with st.expander(f"View {selected_role} prompt ({len(role_prompt)} chars)"):
+                    st.code(role_prompt, language=None)
+            else:
+                st.caption("General mode: AI uses your JD as the full instructions")
 
         # Screening Configuration
         st.markdown("### Screening Configuration")
@@ -8331,6 +8457,11 @@ with tab_screening:
                 batch_size = 50  # Tier 3: 50 parallel requests, 50 × 15KB = ~750KB memory
                 current_batch = batch_state.get('current_batch', 0)
                 all_results = batch_state.get('results', [])
+                # Structured mode parameters
+                use_structured = batch_state.get('use_structured', False)
+                batch_must_haves = batch_state.get('must_haves', [])
+                batch_nice_to_haves = batch_state.get('nice_to_haves', [])
+                batch_reject_ifs = batch_state.get('reject_ifs', [])
 
                 # Build raw_data index once (first batch only), reuse for all batches
                 # Performance: Cache raw_index across screening sessions if enriched_df unchanged
@@ -8391,18 +8522,63 @@ with tab_screening:
                                     batch_progress['partial'] += 1
 
                         # Screen this batch - use dynamic workers (scales with concurrent users)
-                        batch_results = screen_profiles_batch(
-                            batch_profiles,
-                            job_desc,
-                            openai_key,
-                            max_workers=min(max_workers, len(batch_profiles)),
-                            mode=screen_mode,
-                            ai_model=batch_ai_model,
-                            role_prompt=batch_role_prompt,
-                            progress_callback=_on_profile_screened,
-                            ai_provider=batch_ai_provider,
-                            api_key=batch_api_key
-                        )
+                        if use_structured and HAS_STRUCTURED_SCREENING and batch_ai_provider == "anthropic":
+                            # Use structured screening with text box requirements
+                            structured_client = anthropic.Anthropic(api_key=batch_api_key)
+
+                            # Convert profiles to raw format for structured screening
+                            structured_profiles = []
+                            for p in batch_profiles:
+                                raw = p.get('raw_crustdata') or p.get('raw_data') or p
+                                if isinstance(raw, str):
+                                    import json as json_module
+                                    try:
+                                        raw = json_module.loads(raw)
+                                    except:
+                                        raw = p
+                                structured_profiles.append(raw)
+
+                            # Run structured screening
+                            structured_results = screen_batch_structured(
+                                profiles=structured_profiles,
+                                must_haves=batch_must_haves,
+                                nice_to_haves=batch_nice_to_haves,
+                                reject_ifs=batch_reject_ifs,
+                                client=structured_client,
+                                model=batch_ai_model,
+                                max_workers=min(max_workers, len(batch_profiles)),
+                            )
+
+                            # Convert structured results to standard format
+                            batch_results = []
+                            for i, sr in enumerate(structured_results):
+                                profile = batch_profiles[i] if i < len(batch_profiles) else {}
+                                batch_results.append({
+                                    'name': sr.get('name', profile.get('name', 'Unknown')),
+                                    'linkedin_url': profile.get('linkedin_url', ''),
+                                    'current_title': profile.get('current_title', ''),
+                                    'current_company': profile.get('current_company', ''),
+                                    'score': sr.get('score', 0),
+                                    'fit': sr.get('category', 'Unknown'),
+                                    'summary': sr.get('reasoning', '')[:500],
+                                })
+                                # Trigger progress callback
+                                if _on_profile_screened:
+                                    _on_profile_screened(i + 1, len(structured_profiles), batch_results[-1])
+                        else:
+                            # Use classic screening with role prompts
+                            batch_results = screen_profiles_batch(
+                                batch_profiles,
+                                job_desc,
+                                openai_key,
+                                max_workers=min(max_workers, len(batch_profiles)),
+                                mode=screen_mode,
+                                ai_model=batch_ai_model,
+                                role_prompt=batch_role_prompt,
+                                progress_callback=_on_profile_screened,
+                                ai_provider=batch_ai_provider,
+                                api_key=batch_api_key
+                            )
                         all_results.extend(batch_results)
 
                         # Show batch summary with progress stats
@@ -8606,6 +8782,11 @@ with tab_screening:
                     'results': initial_results,  # Start with existing results if re-screening selected
                     'is_continue': False,  # Always fresh screening
                     'max_workers': max_workers,
+                    # Structured mode parameters
+                    'use_structured': use_structured_mode,
+                    'must_haves': st.session_state.get('structured_must_haves', []) if use_structured_mode else [],
+                    'nice_to_haves': st.session_state.get('structured_nice_to_haves', []) if use_structured_mode else [],
+                    'reject_ifs': st.session_state.get('structured_reject_ifs', []) if use_structured_mode else [],
                 }
                 st.session_state['screening_batch_progress'] = {
                     'completed': len(initial_results),
@@ -9502,97 +9683,7 @@ with tab_screening:
                                 st.session_state['email_generation_results'] = []
                                 st.session_state['email_test_approved'] = False
                                 st.rerun()
-
-# ========== TAB 6: Structured Screening (NEW) ==========
-with tab_structured:
-    st.markdown("### Structured Screening")
-    st.caption("Describe what you're looking for, and the AI will extract requirements. Each requirement is checked independently - no trade-offs.")
-
-    try:
-        from structured_screening import (
-            parse_requirements,
-            screen_profile_structured,
-            screen_profiles_batch_structured,
-            create_default_fullstack_requirements,
-            Requirement,
-            RequirementType
-        )
-        from structured_screening_ui import (
-            render_chat_input,
-            render_requirements_editor,
-            render_screening_results,
-            get_current_requirements
-        )
-        HAS_STRUCTURED_SCREENING = True
-    except ImportError as e:
-        HAS_STRUCTURED_SCREENING = False
-        st.error(f"Structured screening module not available: {e}")
-
-    if HAS_STRUCTURED_SCREENING:
-        # Initialize Anthropic client for parsing
-        anthropic_client = None
-        if config.get('anthropic_api_key'):
-            try:
-                import anthropic
-                anthropic_client = anthropic.Anthropic(api_key=config['anthropic_api_key'])
-            except:
-                pass
-
-        col1, col2 = st.columns([1, 1])
-
-        with col1:
-            st.markdown("#### 1. Describe Your Requirements")
-            render_chat_input(anthropic_client)
-
-            st.markdown("---")
-            st.markdown("#### 2. Review & Edit Requirements")
-            requirements = render_requirements_editor()
-
-        with col2:
-            st.markdown("#### 3. Screen Profiles")
-
-            if not requirements or not any(requirements.values()):
-                st.info("Parse or add requirements first, then select profiles to screen.")
-            else:
-                # Get profiles from session state
-                profiles_to_screen = st.session_state.get('uploaded_data', [])
-
-                if not profiles_to_screen:
-                    st.warning("No profiles loaded. Go to Load tab first.")
-                else:
-                    st.write(f"**{len(profiles_to_screen)}** profiles available")
-
-                    # Limit for testing
-                    max_profiles = st.slider("Profiles to screen", 1, min(50, len(profiles_to_screen)), min(10, len(profiles_to_screen)))
-
-                    if st.button("Run Structured Screening", type="primary", key="run_structured"):
-                        profiles_subset = profiles_to_screen[:max_profiles]
-
-                        # Convert to raw format if needed
-                        screening_profiles = []
-                        for p in profiles_subset:
-                            raw = p.get('raw_crustdata') or p.get('raw_data') or p
-                            if isinstance(raw, str):
-                                import json
-                                raw = json.loads(raw)
-                            screening_profiles.append(raw)
-
-                        with st.spinner(f"Screening {len(screening_profiles)} profiles..."):
-                            results = screen_profiles_batch_structured(
-                                screening_profiles,
-                                requirements,
-                                anthropic_client,
-                                max_workers=5
-                            )
-
-                        st.session_state['structured_results'] = results
-                        st.success(f"Screened {len(results)} profiles")
-
-                    # Show results
-                    if 'structured_results' in st.session_state:
-                        render_screening_results(st.session_state['structured_results'])
-
-# ========== TAB 7: Database ==========
+# ========== TAB 6: Database ==========
 with tab_database:
     st.markdown("### Profile Database")
     st.caption("View and manage all profiles stored in Supabase")
@@ -10340,7 +10431,7 @@ with tab_database:
         except Exception as e:
             st.error(f"Database error: {e}")
 
-# ========== TAB 8: Usage ==========
+# ========== TAB 7: Usage ==========
 with tab_usage:
     st.markdown("### API Usage Dashboard")
     st.caption("Track API consumption across all providers")

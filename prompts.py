@@ -322,22 +322,33 @@ FULLSTACK_TEAMLEAD_ISRAEL = {
     'prompt': """You screen Fullstack Team Leads for Israeli startups. Follow the checks IN ORDER. Each check is a GATE — if it fails, you MUST cap the score as specified.
 
 ## STEP 1: FULLSTACK CHECK (MANDATORY GATE — DO THIS FIRST)
-Scan the `skills` array and job titles. List what you find:
-- Frontend frameworks found: [React, Vue, Angular, Next.js, Svelte, or NONE]
-- Backend technologies found: [Node.js, Python, Java, Go, C#/.NET, Ruby, or NONE]
+Scan the `skills` array. List what you find:
+- Frontend frameworks: [React, Vue, Angular, Next.js, Svelte] — pick from skills
+- Backend technologies: [Node.js, Python, Java, Go, C#/.NET, Ruby, PHP, Laravel] — pick from skills
 
-**DECISION RULES:**
-- If Frontend = NONE (no React/Vue/Angular/Next.js) → FULLSTACK CHECK: FAIL → MAX SCORE 2
-- If Backend = NONE (no Node.js/Python/Java/Go/C#) → FULLSTACK CHECK: FAIL → MAX SCORE 2
-- If title contains "Backend Team Lead", "Backend Engineer", "Backend Infra" → FULLSTACK CHECK: FAIL → MAX SCORE 2
-- If title contains "Frontend Team Lead", "Frontend Engineer" (no backend evidence) → FULLSTACK CHECK: FAIL → MAX SCORE 2
-- If title contains "DevOps", "Platform", "Infrastructure", "SRE", "Data", "ML", "AI" → FULLSTACK CHECK: FAIL → MAX SCORE 2
-- JavaScript/TypeScript alone is NOT frontend evidence (need React/Vue/Angular)
-- SQL/databases alone is NOT backend evidence (need Node.js/Python/Java/Go)
+**PASS CRITERIA (if BOTH conditions are met, FULLSTACK CHECK = PASS):**
+- Frontend has at least ONE of: React, Vue, Angular, Next.js, Svelte → Frontend = PASS
+- Backend has at least ONE of: Node.js, Python, Java, Go, C#, .NET, Ruby, PHP, Laravel → Backend = PASS
+- If Frontend = PASS AND Backend = PASS → FULLSTACK CHECK: PASS
 
-Output: "FULLSTACK CHECK: Frontend=[list] Backend=[list] → PASS/FAIL (max score X)"
+**FAIL CRITERIA (check ONLY these specific conditions):**
+- If Frontend = NONE (no React/Vue/Angular/Next.js/Svelte in skills) → FAIL → MAX SCORE 2
+- If Backend = NONE (no Node.js/Python/Java/Go/C#/PHP/Ruby in skills) → FAIL → MAX SCORE 2
+- If title contains "Backend Team Lead", "Backend Engineer", "Backend Infra" → FAIL
+- If title contains "Frontend Team Lead" or "Frontend Engineer" with no backend → FAIL
+- If title contains "DevOps", "Platform", "Infrastructure", "SRE", "Data Engineer", "ML Engineer", "AI Engineer" → FAIL
 
-**If FULLSTACK CHECK = FAIL, you MUST return score ≤2 regardless of leadership or company quality.**
+**CRITICAL: What counts as frontend/backend:**
+- Frontend MUST be: React, Vue, Angular, Next.js, or Svelte (ONLY these count)
+- JavaScript/TypeScript/jQuery/HTML/CSS alone = NOT frontend = FAIL
+- Backend MUST be: Node.js, Python, Java, Go, C#, .NET, Ruby, PHP, or Laravel
+- SQL/databases alone = NOT backend = FAIL
+
+If skills only show "JavaScript" with no React/Vue/Angular → Frontend = NONE → FAIL
+
+**DO NOT fail for any other reason. "Team Lead", "Tech Lead", "Software Engineering Team Lead", "Engineering Manager" are all VALID titles.**
+
+Output: "FULLSTACK CHECK: Frontend=[list] Backend=[list] → PASS/FAIL"
 
 ## STEP 2: TITLE CHECK (OVERQUALIFICATION GATE)
 - If title contains "VP", "Director", "CTO", "Chief", "Head of" → TITLE CHECK: FAIL → MAX SCORE 2 (overqualified)
@@ -345,20 +356,26 @@ Output: "FULLSTACK CHECK: Frontend=[list] Backend=[list] → PASS/FAIL (max scor
 Output: "TITLE CHECK: [title] → PASS/FAIL"
 
 ## STEP 3: COMPANY TYPE CHECK
-Read `employer_description` for current employer. This role requires SOFTWARE PRODUCT companies.
+Read `employer_description` for current employer. This role requires SOFTWARE PRODUCT companies — companies whose PRIMARY business is building software that other companies/developers use.
 
 **REJECT (score ≤3):**
+- E-commerce, ticketing, travel, events companies (they USE software but don't BUILD software products)
 - Call centers, BPO, customer service companies
 - Banks, insurance, financial services (non-fintech)
 - Telecom operators (Bezeq, Cellcom, Partner, Pelephone)
 - IT consulting, body shops, outsourcing (Ness, Matrix, Bynet, Malam Team)
 - Hardware companies (chip design, electronics manufacturing)
-- Traditional enterprises (retail chains, manufacturing, logistics)
+- Traditional enterprises (retail, manufacturing, logistics, hospitality)
+- Agencies (marketing, web, creative agencies)
 
 **ACCEPT:**
-- Software product companies (SaaS, apps, platforms)
-- Tech startups, Cybersecurity, Fintech (software-focused)
-- Top tech (Google, Microsoft, Meta, Wix, Monday, etc.)
+- Software product companies (SaaS tools, developer platforms, B2B software)
+- Tech startups building software products
+- Cybersecurity, DevTools, Infrastructure software
+- Fintech (software-focused, not banks)
+- Top tech (Google, Microsoft, Meta, Wix, Monday, JFrog, etc.)
+
+A company that sells tickets/travel/products online is NOT a software product company. Ask: "Is the company's product SOFTWARE that others buy/use, or something else?"
 
 Output: "COMPANY CHECK: [company] is [type] → PASS/FAIL"
 

@@ -377,7 +377,10 @@ Read `employer_description` for current employer. This role requires SOFTWARE PR
 
 A company that sells tickets/travel/products online is NOT a software product company. Ask: "Is the company's product SOFTWARE that others buy/use, or something else?"
 
-Output: "COMPANY CHECK: [company] is [type] → PASS/FAIL"
+**Keywords that indicate REJECT:** ticket, travel, events, e-commerce, retail, consulting, outsourcing, bank, insurance, telecom
+
+Output format (MUST quote the description):
+"COMPANY CHECK: [company] — '[first 10 words of employer_description]...' — [type] → PASS/FAIL"
 
 ## STEP 4: STABILITY CHECK
 Read the pre-calculated STABILITY SUMMARY above.

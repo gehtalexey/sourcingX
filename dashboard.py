@@ -4283,8 +4283,8 @@ _profile_count = get_profile_count()
 st.info(f"📊 **{_profile_count}** profiles loaded" if _profile_count else "No profiles loaded — start from the Load tab")
 
 # Create tabs
-tab_search, tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_database, tab_usage = st.tabs([
-    "0. Search", "1. Load", "2. Filter", "3. Enrich", "4. Filter+", "5. AI Screen", "6. Database", "7. Usage"
+tab_search, tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_structured, tab_database, tab_usage = st.tabs([
+    "0. Search", "1. Load", "2. Filter", "3. Enrich", "4. Filter+", "5. AI Screen", "6. Structured", "7. Database", "8. Usage"
 ])
 
 # ========== TAB 0: Search (Crustdata People DB) ==========
@@ -9503,7 +9503,96 @@ with tab_screening:
                                 st.session_state['email_test_approved'] = False
                                 st.rerun()
 
-# ========== TAB 6: Database ==========
+# ========== TAB 6: Structured Screening (NEW) ==========
+with tab_structured:
+    st.markdown("### Structured Screening")
+    st.caption("Describe what you're looking for, and the AI will extract requirements. Each requirement is checked independently - no trade-offs.")
+
+    try:
+        from structured_screening import (
+            parse_requirements,
+            screen_profile_structured,
+            screen_profiles_batch_structured,
+            create_default_fullstack_requirements,
+            Requirement,
+            RequirementType
+        )
+        from structured_screening_ui import (
+            render_chat_input,
+            render_requirements_editor,
+            render_screening_results,
+            get_current_requirements
+        )
+        HAS_STRUCTURED_SCREENING = True
+    except ImportError as e:
+        HAS_STRUCTURED_SCREENING = False
+        st.error(f"Structured screening module not available: {e}")
+
+    if HAS_STRUCTURED_SCREENING:
+        # Initialize Anthropic client for parsing
+        anthropic_client = None
+        if config.get('anthropic_api_key'):
+            try:
+                import anthropic
+                anthropic_client = anthropic.Anthropic(api_key=config['anthropic_api_key'])
+            except:
+                pass
+
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            st.markdown("#### 1. Describe Your Requirements")
+            render_chat_input(anthropic_client)
+
+            st.markdown("---")
+            st.markdown("#### 2. Review & Edit Requirements")
+            requirements = render_requirements_editor()
+
+        with col2:
+            st.markdown("#### 3. Screen Profiles")
+
+            if not requirements or not any(requirements.values()):
+                st.info("Parse or add requirements first, then select profiles to screen.")
+            else:
+                # Get profiles from session state
+                profiles_to_screen = st.session_state.get('uploaded_data', [])
+
+                if not profiles_to_screen:
+                    st.warning("No profiles loaded. Go to Load tab first.")
+                else:
+                    st.write(f"**{len(profiles_to_screen)}** profiles available")
+
+                    # Limit for testing
+                    max_profiles = st.slider("Profiles to screen", 1, min(50, len(profiles_to_screen)), min(10, len(profiles_to_screen)))
+
+                    if st.button("Run Structured Screening", type="primary", key="run_structured"):
+                        profiles_subset = profiles_to_screen[:max_profiles]
+
+                        # Convert to raw format if needed
+                        screening_profiles = []
+                        for p in profiles_subset:
+                            raw = p.get('raw_crustdata') or p.get('raw_data') or p
+                            if isinstance(raw, str):
+                                import json
+                                raw = json.loads(raw)
+                            screening_profiles.append(raw)
+
+                        with st.spinner(f"Screening {len(screening_profiles)} profiles..."):
+                            results = screen_profiles_batch_structured(
+                                screening_profiles,
+                                requirements,
+                                anthropic_client,
+                                max_workers=5
+                            )
+
+                        st.session_state['structured_results'] = results
+                        st.success(f"Screened {len(results)} profiles")
+
+                    # Show results
+                    if 'structured_results' in st.session_state:
+                        render_screening_results(st.session_state['structured_results'])
+
+# ========== TAB 7: Database ==========
 with tab_database:
     st.markdown("### Profile Database")
     st.caption("View and manage all profiles stored in Supabase")
@@ -10251,7 +10340,7 @@ with tab_database:
         except Exception as e:
             st.error(f"Database error: {e}")
 
-# ========== TAB 7: Usage ==========
+# ========== TAB 8: Usage ==========
 with tab_usage:
     st.markdown("### API Usage Dashboard")
     st.caption("Track API consumption across all providers")

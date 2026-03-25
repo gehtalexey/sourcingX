@@ -319,105 +319,52 @@ FULLSTACK_TEAMLEAD_ISRAEL = {
         'fullstack tech lead', 'full-stack tech lead',
         'israel', 'tel aviv',
     ],
-    'prompt': """You screen Fullstack Team Leads for Israeli startups. Follow the checks IN ORDER. Each check is a GATE — if it fails, you MUST cap the score as specified.
+    'prompt': """Screen Fullstack Team Leads for Israeli startups. Run 4 checks IN ORDER — each is a gate.
 
-## STEP 1: FULLSTACK CHECK (MANDATORY GATE — DO THIS FIRST)
-Scan the `skills` array. List what you find:
-- Frontend frameworks: [React, Vue, Angular, Next.js, Svelte] — pick from skills
-- Backend technologies: [Node.js, Python, Java, Go, C#/.NET, Ruby, PHP, Laravel] — pick from skills
+## CHECK 1: FULLSTACK (if FAIL → max score 2)
+Find in skills:
+- Frontend: React, Vue, Angular, Next.js, Svelte (ONLY these count)
+- Backend: Node.js, Python, Java, Go, C#, PHP, Ruby, Laravel
 
-**PASS CRITERIA (if BOTH conditions are met, FULLSTACK CHECK = PASS):**
-- Frontend has at least ONE of: React, Vue, Angular, Next.js, Svelte → Frontend = PASS
-- Backend has at least ONE of: Node.js, Python, Java, Go, C#, .NET, Ruby, PHP, Laravel → Backend = PASS
-- If Frontend = PASS AND Backend = PASS → FULLSTACK CHECK: PASS
+PASS = has 1+ frontend AND 1+ backend
+FAIL conditions:
+- No frontend framework → FAIL (JavaScript/jQuery/HTML alone ≠ frontend)
+- No backend tech → FAIL (SQL alone ≠ backend)
+- Title contains "Backend", "Frontend", "DevOps", "Platform", "Infra", "SRE", "Data", "ML", "AI" → FAIL
 
-**FAIL CRITERIA (check ONLY these specific conditions):**
-- If Frontend = NONE (no React/Vue/Angular/Next.js/Svelte in skills) → FAIL → MAX SCORE 2
-- If Backend = NONE (no Node.js/Python/Java/Go/C#/PHP/Ruby in skills) → FAIL → MAX SCORE 2
-- If title contains "Backend Team Lead", "Backend Engineer", "Backend Infra" → FAIL
-- If title contains "Frontend Team Lead" or "Frontend Engineer" with no backend → FAIL
-- If title contains "DevOps", "Platform", "Infrastructure", "SRE", "Data Engineer", "ML Engineer", "AI Engineer" → FAIL
+Output: "FULLSTACK: Frontend=[X] Backend=[Y] → PASS/FAIL"
 
-**CRITICAL: What counts as frontend/backend:**
-- Frontend MUST be: React, Vue, Angular, Next.js, or Svelte (ONLY these count)
-- JavaScript/TypeScript/jQuery/HTML/CSS alone = NOT frontend = FAIL
-- Backend MUST be: Node.js, Python, Java, Go, C#, .NET, Ruby, PHP, or Laravel
-- SQL/databases alone = NOT backend = FAIL
+## CHECK 2: TITLE (if FAIL → max score 2)
+FAIL if title contains: VP, Director, CTO, Chief, Head of (overqualified)
+Output: "TITLE: [title] → PASS/FAIL"
 
-If skills only show "JavaScript" with no React/Vue/Angular → Frontend = NONE → FAIL
+## CHECK 3: COMPANY (if FAIL → max score 3)
+Read `employer_description`. MUST quote it.
 
-**DO NOT fail for any other reason. "Team Lead", "Tech Lead", "Software Engineering Team Lead", "Engineering Manager" are all VALID titles.**
+REJECT keywords: ticket, travel, events, e-commerce, retail, consulting, outsourcing, bank, insurance, telecom, agency
+ACCEPT: SaaS, DevTools, Cybersecurity, Fintech (software), top tech (Wix, Monday, JFrog)
 
-Output: "FULLSTACK CHECK: Frontend=[list] Backend=[list] → PASS/FAIL"
+Ask: "Is the product SOFTWARE, or something else (tickets/travel/products)?"
+Output: "COMPANY: [name] — '[first 10 words of description]...' → PASS/FAIL"
 
-## STEP 2: TITLE CHECK (OVERQUALIFICATION GATE)
-- If title contains "VP", "Director", "CTO", "Chief", "Head of" → TITLE CHECK: FAIL → MAX SCORE 2 (overqualified)
+## CHECK 4: STABILITY
+From pre-calculated STABILITY SUMMARY:
+- 3+ short stints → max score 4
+- Current role <6 months → max score 5
 
-Output: "TITLE CHECK: [title] → PASS/FAIL"
+Output: "STABILITY: X stints, current=Y mo → PASS/CAPPED"
 
-## STEP 3: COMPANY TYPE CHECK
-Read `employer_description` for current employer. This role requires SOFTWARE PRODUCT companies — companies whose PRIMARY business is building software that other companies/developers use.
+## SCORING (after checks)
+Apply LOWEST cap, then:
+- 9-10: Top company (Wiz/Monday/Snyk) + React+Node + leads 3+ engineers + hands-on
+- 7-8: Good software company + fullstack depth both sides + real leadership
+- 5-6: Senior fullstack ready to lead, or limited team size
+- 3-4: Weak fullstack OR weak leadership OR bad company
+- 1-2: Failed CHECK 1, 2, or 3
 
-**REJECT (score ≤3):**
-- E-commerce, ticketing, travel, events companies (they USE software but don't BUILD software products)
-- Call centers, BPO, customer service companies
-- Banks, insurance, financial services (non-fintech)
-- Telecom operators (Bezeq, Cellcom, Partner, Pelephone)
-- IT consulting, body shops, outsourcing (Ness, Matrix, Bynet, Malam Team)
-- Hardware companies (chip design, electronics manufacturing)
-- Traditional enterprises (retail, manufacturing, logistics, hospitality)
-- Agencies (marketing, web, creative agencies)
+Boosters (if all pass): +2 Wiz/Monday/Wix/8200/Mamram/TAU, +1 Microsoft IL/CheckPoint/JFrog
 
-**ACCEPT:**
-- Software product companies (SaaS tools, developer platforms, B2B software)
-- Tech startups building software products
-- Cybersecurity, DevTools, Infrastructure software
-- Fintech (software-focused, not banks)
-- Top tech (Google, Microsoft, Meta, Wix, Monday, JFrog, etc.)
-
-A company that sells tickets/travel/products online is NOT a software product company. Ask: "Is the company's product SOFTWARE that others buy/use, or something else?"
-
-**Keywords that indicate REJECT:** ticket, travel, events, e-commerce, retail, consulting, outsourcing, bank, insurance, telecom
-
-Output format (MUST quote the description):
-"COMPANY CHECK: [company] — '[first 10 words of employer_description]...' — [type] → PASS/FAIL"
-
-## STEP 4: STABILITY CHECK
-Read the pre-calculated STABILITY SUMMARY above.
-- If 3+ short-stint companies → MAX SCORE 4
-- If current role <6 months → MAX SCORE 5 (HARD CAP)
-
-Output: "STABILITY CHECK: X short stints, current=Y months → PASS/CAPPED"
-
-## STEP 5: SCORING (only after all checks pass)
-Apply the LOWEST cap from all checks above, then score within that cap:
-
-- **9-10**: Led fullstack team at top company (Wiz, Monday, Snyk) + 6+ years SW + React+Node + still hands-on
-- **7-8**: Good software product company + led 3+ engineers + clear fullstack depth BOTH sides + hands-on
-- **5-6**: Senior fullstack engineer ready to lead, or lead with limited team size
-- **3-4**: Limited leadership OR weak fullstack evidence OR non-software company
-- **1-2**: Failed FULLSTACK CHECK, wrong title, wrong company type, or wrong domain
-
-## Experience Calculation
-Role durations are pre-calculated above. Use those numbers, do NOT recalculate.
-- Count FULL: Fullstack Engineer, Full Stack Developer, Software Engineer, Tech Lead, Team Lead
-- Count HALF: Backend-only or Frontend-only roles
-- DO NOT count: Military, QA, PM, IT, non-software company roles
-- Show your work: list roles counted and excluded
-
-## Leadership Scope
-Real TL = led 3+ engineers, hired/grew team, still codes 30-50%, owns technical decisions
-Weak = only 1-2 reports, pure manager, project coordinator
-
-## Boosters (only if all checks PASS)
-+2: Wiz, Monday, Snyk, Wix, AppsFlyer, 8200, Mamram, Technion, TAU
-+1: Microsoft IL, Check Point, JFrog, good tenure (2+ years)
-
-## CRITICAL REMINDER
-If FULLSTACK CHECK failed → your final score MUST be ≤2, even if the candidate has great leadership at Wix/Monday.
-Leadership quality CANNOT override missing fullstack skills for a FULLSTACK role.
-
-Output format: Show all 4 checks (FULLSTACK, TITLE, COMPANY, STABILITY) then your score.""",
+Use pre-calculated durations. Show all 4 checks then score.""",
 }
 
 PRODUCT_ISRAEL = {

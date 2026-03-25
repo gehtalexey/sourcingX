@@ -8167,6 +8167,13 @@ with tab_screening:
             # Show summary
             st.info(f"**{len(must_haves)}** must-haves | **{len(nice_to_haves)}** nice-to-haves | **{len(reject_ifs)}** reject-ifs")
 
+            # Show system prompt
+            if HAS_STRUCTURED_SCREENING:
+                with st.expander(f"View System Prompt ({len(STRUCTURED_SYSTEM_PROMPT)} chars)"):
+                    st.code(STRUCTURED_SYSTEM_PROMPT, language=None)
+            else:
+                st.warning("Structured screening module not loaded")
+
             # For compatibility with rest of code
             job_description = f"MUST-HAVES: {must_haves}\nNICE-TO-HAVES: {nice_to_haves}\nREJECT-IFS: {reject_ifs}"
             role_prompt = None  # Structured mode uses its own system prompt

@@ -321,53 +321,86 @@ FULLSTACK_TEAMLEAD_ISRAEL = {
     ],
     'prompt': """Screen Fullstack Team Leads for Israeli startups.
 
-## INSTANT FAIL RULES (check FIRST, before anything else)
-If ANY of these match → score ≤2, stop evaluating:
-1. Title contains "Backend" or "Infra" → FAIL (e.g. "Backend Infra Team Lead" = FAIL)
-2. Title contains "Frontend" with no backend skills → FAIL
-3. Title contains "DevOps", "Platform", "SRE", "Data", "ML", "AI" → FAIL
-4. Title contains "VP", "Director", "CTO", "Chief", "Head of" → FAIL (overqualified)
-5. Skills have NO React/Vue/Angular/Next.js/Svelte → FAIL (JavaScript alone ≠ frontend)
-6. Skills have NO Node.js/Python/Java/Go/C#/PHP/Ruby → FAIL
+# STEP 1: MUST-HAVE GATES (check ALL before scoring)
+You MUST check each gate and output PASS or FAIL. If ANY gate fails → "No Fit" (score 1-2).
 
-## CHECK 1: FULLSTACK (if FAIL → max score 2)
-Frontend required: React, Vue, Angular, Next.js, or Svelte
-Backend required: Node.js, Python, Java, Go, C#, PHP, Ruby, Laravel
-PASS = has 1+ frontend AND 1+ backend
+## GATE 1: FRONTEND FRAMEWORK
+Does candidate have modern frontend framework?
+- PASS if: React, Vue, Angular (2+), Next.js, Svelte
+- FAIL if: Only JavaScript/TypeScript (no framework), only jQuery, only AngularJS (v1)
+Output: "GATE 1 FRONTEND: [skills found or 'NONE'] → PASS/FAIL"
 
-Output: "FULLSTACK: Frontend=[X] Backend=[Y] → PASS/FAIL"
+## GATE 2: BACKEND TECHNOLOGY
+Does candidate have backend development experience?
+- PASS if: Node.js, Python, Java, Go, C#/.NET, PHP, Ruby
+- FAIL if: Only JavaScript (could be frontend), only SQL (database, not backend)
+Output: "GATE 2 BACKEND: [skills found or 'NONE'] → PASS/FAIL"
 
-## CHECK 2: TITLE
-Already checked in INSTANT FAIL above.
-Output: "TITLE: [title] → PASS/FAIL"
+## GATE 3: TITLE CHECK
+Is current title appropriate for fullstack team lead?
+- FAIL if title contains: "Backend" (e.g. "Backend Team Lead", "Backend Infra")
+- FAIL if title contains: "Frontend" without backend skills
+- FAIL if title contains: "DevOps", "Platform", "SRE", "Infrastructure", "Data", "ML", "AI"
+- FAIL if overqualified: "VP", "Director", "CTO", "Chief", "Head of"
+- PASS if: "Team Lead", "Tech Lead", "Engineering Lead", "Software Team Lead", "Development Lead"
+Output: "GATE 3 TITLE: '[current title]' → PASS/FAIL (reason)"
 
-## CHECK 3: COMPANY (if FAIL → max score 3)
-Read `employer_description`. MUST quote it.
+## GATE 4: COMPANY TYPE
+Read `employer_description` carefully. Is current company a software product company?
+- FAIL if: E-commerce/retail (selling products), Ticketing/travel/events, Banking/insurance (traditional), Telecom operator, IT consulting/outsourcing/body shop (Ness, Matrix, Malam), Marketing/creative agency
+- PASS if: SaaS/software product, Tech startup, Cybersecurity/DevTools, Fintech (software-focused), Top tech (Wix, Monday, Google, Microsoft)
+Output: "GATE 4 COMPANY: [company] — '[quote 10 words from description]' → PASS/FAIL"
 
-REJECT keywords: ticket, travel, events, e-commerce, retail, consulting, outsourcing, bank, insurance, telecom, agency
-ACCEPT: SaaS, DevTools, Cybersecurity, Fintech (software), top tech (Wix, Monday, JFrog)
+## GATE 5: LEADERSHIP EXPERIENCE
+Does candidate have 2+ years team leadership?
+Use pre-calculated durations. Look for: Team Lead, Tech Lead, Engineering Manager, CTO, VP
+Output: "GATE 5 LEADERSHIP: [X years found] → PASS/FAIL (need 2+ years)"
 
-Ask: "Is the product SOFTWARE, or something else (tickets/travel/products)?"
-Output: "COMPANY: [name] — '[first 10 words of description]...' → PASS/FAIL"
+---
 
-## CHECK 4: STABILITY
+# STEP 2: GATE SUMMARY
+Count results: "GATES: X/5 passed"
+- If ANY gate failed → Category: "No Fit", Score: 1-2, STOP HERE
+- If ALL gates passed → Continue to Step 3
+
+---
+
+# STEP 3: SCORING (only if all gates passed)
+Base score: 6 (all must-haves met)
+
+## NICE-TO-HAVE BOOSTERS (add points):
++2: Current/past at Wiz, Monday, Snyk, Wix, AppsFlyer, Fiverr
++1: 8200, Mamram, Talpiot military background
++1: Technion, TAU, Hebrew University CS degree
++1: 3+ years at current company (stability)
++1: Leads 5+ engineers
+
+## STABILITY CHECK (can cap score):
 From pre-calculated STABILITY SUMMARY:
-- 3+ short stints → max score 4
-- Current role <6 months → max score 5
+- 3+ short stints (<12mo each) → cap at 4
+- Current role <6 months → cap at 5
 
-Output: "STABILITY: X stints, current=Y mo → PASS/CAPPED"
+## FINAL CATEGORIES:
+- Score 9-10 (Category A): All must-haves + most nice-to-haves + top company
+- Score 7-8 (Category B): All must-haves + some nice-to-haves
+- Score 6 (Category C): All must-haves only
+- Score 1-2 (No Fit): Failed any must-have gate
 
-## SCORING (after checks)
-Apply LOWEST cap, then:
-- 9-10: Top company (Wiz/Monday/Snyk) + React+Node + leads 3+ engineers + hands-on
-- 7-8: Good software company + fullstack depth both sides + real leadership
-- 5-6: Senior fullstack ready to lead, or limited team size
-- 3-4: Weak fullstack OR weak leadership OR bad company
-- 1-2: Failed CHECK 1, 2, or 3
+---
 
-Boosters (if all pass): +2 Wiz/Monday/Wix/8200/Mamram/TAU, +1 Microsoft IL/CheckPoint/JFrog
+# OUTPUT FORMAT (required):
+```
+GATE 1 FRONTEND: [result] → PASS/FAIL
+GATE 2 BACKEND: [result] → PASS/FAIL
+GATE 3 TITLE: [result] → PASS/FAIL
+GATE 4 COMPANY: [result] → PASS/FAIL
+GATE 5 LEADERSHIP: [result] → PASS/FAIL
 
-Use pre-calculated durations. Show all 4 checks then score.""",
+GATES: X/5 passed
+CATEGORY: [A/B/C/No Fit]
+SCORE: [1-10]
+REASON: [1-2 sentences explaining score]
+```""",
 }
 
 PRODUCT_ISRAEL = {

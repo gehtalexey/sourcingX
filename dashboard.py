@@ -8057,26 +8057,54 @@ with tab_screening:
         num_profiles = len(profiles_df)
 
         # Screening Mode Toggle
-        st.markdown("### Screening Mode")
-        screening_mode_choice = st.radio(
-            "Choose screening approach",
-            options=["Structured (Recommended)", "Classic"],
+        # ===== STEP 1: Role Selection (system prompt) =====
+        st.markdown("### 1. Select Role")
+
+        role_options = ['General (auto)']
+        role_map = {'General (auto)': None}
+        try:
+            for role_key, role_data in DEFAULT_PROMPTS.items():
+                name = role_data.get('name', role_key.title())
+                role_options.append(name)
+                role_map[name] = role_data.get('prompt')
+        except:
+            pass
+
+        selected_role = st.selectbox(
+            "Role type (determines system prompt)",
+            options=role_options,
             index=0,
-            horizontal=True,
-            key="screening_mode_toggle",
-            help="Structured: Define must-haves in text boxes, AI checks each one. Classic: Use predefined role prompts."
+            key="screening_role_select",
+            help="Each role has specific evaluation criteria. The role prompt becomes the system prompt."
         )
-        use_structured_mode = screening_mode_choice == "Structured (Recommended)"
+
+        role_prompt = role_map.get(selected_role)
+        st.session_state['active_role_prompt'] = role_prompt
+        st.session_state['active_role_name'] = selected_role
+
+        if role_prompt:
+            with st.expander(f"View {selected_role} system prompt ({len(role_prompt)} chars)"):
+                st.code(role_prompt, language=None)
+        else:
+            st.caption("General mode: Uses generic evaluation")
+
+        # ===== STEP 2: Requirements Mode =====
+        st.markdown("### 2. Requirements")
+
+        use_structured_mode = st.checkbox(
+            "Use structured requirements (text boxes)",
+            value=True,
+            key="use_structured_checkbox",
+            help="Define must-haves in text boxes. These are added to the user prompt alongside the profile."
+        )
 
         if use_structured_mode:
-            # ===== STRUCTURED MODE: Text boxes for requirements =====
-            st.markdown("### Requirements")
-            st.caption("Define what the AI should check. Each must-have is a gate - fail any = No Fit.")
+            # Text boxes for requirements
+            st.caption("Define what the AI should check. These requirements are added to the profile data sent to AI.")
 
             # Must-Haves Section
             st.markdown("**Must-Have Requirements** (all required)")
 
-            # Initialize session state for must-haves
             if 'must_have_inputs' not in st.session_state:
                 st.session_state['must_have_inputs'] = [
                     "Has modern frontend framework (React, Vue, Angular, Next.js, or Svelte)",
@@ -8086,7 +8114,7 @@ with tab_screening:
                 ]
 
             must_haves = []
-            for i in range(6):  # Allow up to 6 must-haves
+            for i in range(6):
                 default_val = st.session_state['must_have_inputs'][i] if i < len(st.session_state['must_have_inputs']) else ""
                 val = st.text_input(
                     f"Must-have {i+1}",
@@ -8111,7 +8139,7 @@ with tab_screening:
                 ]
 
             nice_to_haves = []
-            for i in range(4):  # Allow up to 4 nice-to-haves
+            for i in range(4):
                 cols = st.columns([4, 1])
                 default_text = st.session_state['nice_to_have_inputs'][i]["text"] if i < len(st.session_state['nice_to_have_inputs']) else ""
                 default_pts = st.session_state['nice_to_have_inputs'][i]["points"] if i < len(st.session_state['nice_to_have_inputs']) else 1
@@ -8147,7 +8175,7 @@ with tab_screening:
                 ]
 
             reject_ifs = []
-            for i in range(4):  # Allow up to 4 reject-ifs
+            for i in range(4):
                 default_val = st.session_state['reject_if_inputs'][i] if i < len(st.session_state['reject_if_inputs']) else ""
                 val = st.text_input(
                     f"Reject if {i+1}",
@@ -8159,66 +8187,40 @@ with tab_screening:
                 if val.strip():
                     reject_ifs.append(val.strip())
 
-            # Store structured requirements in session state
+            # Store structured requirements
             st.session_state['structured_must_haves'] = must_haves
             st.session_state['structured_nice_to_haves'] = nice_to_haves
             st.session_state['structured_reject_ifs'] = reject_ifs
 
-            # Show summary
             st.info(f"**{len(must_haves)}** must-haves | **{len(nice_to_haves)}** nice-to-haves | **{len(reject_ifs)}** reject-ifs")
 
-            # Show system prompt
-            if HAS_STRUCTURED_SCREENING:
-                with st.expander(f"View System Prompt ({len(STRUCTURED_SYSTEM_PROMPT)} chars)"):
-                    st.code(STRUCTURED_SYSTEM_PROMPT, language=None)
-            else:
-                st.warning("Structured screening module not loaded")
+            # Build job_description from text boxes
+            job_description = f"""# REQUIREMENTS TO CHECK
 
-            # For compatibility with rest of code
-            job_description = f"MUST-HAVES: {must_haves}\nNICE-TO-HAVES: {nice_to_haves}\nREJECT-IFS: {reject_ifs}"
-            role_prompt = None  # Structured mode uses its own system prompt
-            selected_role = "Structured"  # For display purposes
+## MUST-HAVE (all required - any fail = No Fit, score 1-2)
+{chr(10).join(f'{i+1}. {mh}' for i, mh in enumerate(must_haves))}
+
+## NICE-TO-HAVE (bonus points if met)
+{chr(10).join(f'+{nth["points"]}: {nth["text"]}' for nth in nice_to_haves)}
+
+## REJECT IF (instant disqualifiers)
+{chr(10).join(f'- {ri}' for ri in reject_ifs)}
+
+Check each requirement and output PASS/FAIL for each must-have."""
 
         else:
-            # ===== CLASSIC MODE: JD text area + role prompts =====
-            st.markdown("### Job Description")
+            # Classic mode - just JD text area
+            st.caption("Paste job description or requirements as free text.")
             job_description = st.text_area(
-                "Paste the screening requirements",
+                "Job Description / Requirements",
                 height=150,
                 key="jd_screening",
-                placeholder="Paste the job description, must-haves, and any specific criteria for AI screening..."
+                placeholder="Paste the job description, must-haves, and any specific criteria..."
             )
-
-            # Role-specific prompt selection
-            st.markdown("### Role Prompt")
-
-            role_options = ['General (auto)']
-            role_map = {'General (auto)': None}
-            try:
-                for role_key, role_data in DEFAULT_PROMPTS.items():
-                    name = role_data.get('name', role_key.title())
-                    role_options.append(name)
-                    role_map[name] = role_data.get('prompt')
-            except:
-                pass
-
-            selected_role = st.selectbox(
-                "Select role type",
-                options=role_options,
-                index=0,
-                key="screening_role_select",
-                help="Like having different Custom GPTs for each role."
-            )
-
-            role_prompt = role_map.get(selected_role)
-            st.session_state['active_role_prompt'] = role_prompt
-            st.session_state['active_role_name'] = selected_role
-
-            if role_prompt:
-                with st.expander(f"View {selected_role} prompt ({len(role_prompt)} chars)"):
-                    st.code(role_prompt, language=None)
-            else:
-                st.caption("General mode: AI uses your JD as the full instructions")
+            # Clear structured requirements
+            st.session_state['structured_must_haves'] = []
+            st.session_state['structured_nice_to_haves'] = []
+            st.session_state['structured_reject_ifs'] = []
 
         # Screening Configuration
         st.markdown("### Screening Configuration")
@@ -8269,11 +8271,9 @@ with tab_screening:
         st.caption("Detailed mode: score, fit, and summary with experience calc")
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
-        if use_structured_mode:
-            role_display = "Structured"
-        else:
-            role_display = selected_role if selected_role != 'General (auto)' else 'General'
-        st.info(f"Mode: **{role_display}** | Model: **{ai_model}** | Est. cost: **${est_cost:.3f}**")
+        role_display = selected_role if selected_role != 'General (auto)' else 'General'
+        structured_tag = " + Structured" if use_structured_mode else ""
+        st.info(f"Role: **{role_display}{structured_tag}** | Model: **{ai_model}** | Est. cost: **${est_cost:.3f}**")
 
         # Debug: Show available fields and test single profile
         with st.expander("Debug: Profile Fields & Test"):

@@ -8533,63 +8533,21 @@ Check each requirement and output PASS/FAIL for each must-have."""
                                     batch_progress['partial'] += 1
 
                         # Screen this batch - use dynamic workers (scales with concurrent users)
-                        if use_structured and HAS_STRUCTURED_SCREENING and batch_ai_provider == "anthropic":
-                            # Use structured screening with text box requirements
-                            structured_client = anthropic.Anthropic(api_key=batch_api_key)
-
-                            # Convert profiles to raw format for structured screening
-                            structured_profiles = []
-                            for p in batch_profiles:
-                                raw = p.get('raw_crustdata') or p.get('raw_data') or p
-                                if isinstance(raw, str):
-                                    import json as json_module
-                                    try:
-                                        raw = json_module.loads(raw)
-                                    except:
-                                        raw = p
-                                structured_profiles.append(raw)
-
-                            # Run structured screening
-                            structured_results = screen_batch_structured(
-                                profiles=structured_profiles,
-                                must_haves=batch_must_haves,
-                                nice_to_haves=batch_nice_to_haves,
-                                reject_ifs=batch_reject_ifs,
-                                client=structured_client,
-                                model=batch_ai_model,
-                                max_workers=min(max_workers, len(batch_profiles)),
-                            )
-
-                            # Convert structured results to standard format
-                            batch_results = []
-                            for i, sr in enumerate(structured_results):
-                                profile = batch_profiles[i] if i < len(batch_profiles) else {}
-                                batch_results.append({
-                                    'name': sr.get('name', profile.get('name', 'Unknown')),
-                                    'linkedin_url': profile.get('linkedin_url', ''),
-                                    'current_title': profile.get('current_title', ''),
-                                    'current_company': profile.get('current_company', ''),
-                                    'score': sr.get('score', 0),
-                                    'fit': sr.get('category', 'Unknown'),
-                                    'summary': sr.get('reasoning', '')[:500],
-                                })
-                                # Trigger progress callback
-                                if _on_profile_screened:
-                                    _on_profile_screened(i + 1, len(structured_profiles), batch_results[-1])
-                        else:
-                            # Use classic screening with role prompts
-                            batch_results = screen_profiles_batch(
-                                batch_profiles,
-                                job_desc,
-                                openai_key,
-                                max_workers=min(max_workers, len(batch_profiles)),
-                                mode=screen_mode,
-                                ai_model=batch_ai_model,
-                                role_prompt=batch_role_prompt,
-                                progress_callback=_on_profile_screened,
-                                ai_provider=batch_ai_provider,
-                                api_key=batch_api_key
-                            )
+                        # Both structured and classic mode use the same screening function
+                        # Structured mode: job_desc contains text box requirements, role_prompt is system prompt
+                        # Classic mode: job_desc is free-form JD text, role_prompt is system prompt
+                        batch_results = screen_profiles_batch(
+                            batch_profiles,
+                            job_desc,
+                            openai_key,
+                            max_workers=min(max_workers, len(batch_profiles)),
+                            mode=screen_mode,
+                            ai_model=batch_ai_model,
+                            role_prompt=batch_role_prompt,
+                            progress_callback=_on_profile_screened,
+                            ai_provider=batch_ai_provider,
+                            api_key=batch_api_key
+                        )
                         all_results.extend(batch_results)
 
                         # Show batch summary with progress stats

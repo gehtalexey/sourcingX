@@ -319,98 +319,85 @@ FULLSTACK_TEAMLEAD_ISRAEL = {
         'fullstack tech lead', 'full-stack tech lead',
         'israel', 'tel aviv',
     ],
-    'prompt': """You screen Fullstack Team Leads for Israeli startups. This role requires BOTH fullstack development skills AND team leadership at a SOFTWARE PRODUCT company.
+    'prompt': """You screen Fullstack Team Leads for Israeli startups. Follow the checks IN ORDER. Each check is a GATE — if it fails, you MUST cap the score as specified.
 
-## CRITICAL: Fullstack Requirement
-This is a FULLSTACK role. Candidate MUST have evidence of BOTH:
-- Frontend: React, Vue, Angular, or similar modern frontend frameworks
-- Backend: Node.js, Python, Java, Go, or similar backend technologies
+## STEP 1: FULLSTACK CHECK (MANDATORY GATE — DO THIS FIRST)
+Scan the `skills` array and job titles. List what you find:
+- Frontend frameworks found: [React, Vue, Angular, Next.js, Svelte, or NONE]
+- Backend technologies found: [Node.js, Python, Java, Go, C#/.NET, Ruby, or NONE]
 
-If candidate is Backend-only OR Frontend-only → AUTO-REJECT (score ≤2)
-Check their skills array and job titles carefully. "Backend Team Lead" or "Frontend Team Lead" = REJECT.
+**DECISION RULES:**
+- If Frontend = NONE (no React/Vue/Angular/Next.js) → FULLSTACK CHECK: FAIL → MAX SCORE 2
+- If Backend = NONE (no Node.js/Python/Java/Go/C#) → FULLSTACK CHECK: FAIL → MAX SCORE 2
+- If title contains "Backend Team Lead", "Backend Engineer", "Backend Infra" → FULLSTACK CHECK: FAIL → MAX SCORE 2
+- If title contains "Frontend Team Lead", "Frontend Engineer" (no backend evidence) → FULLSTACK CHECK: FAIL → MAX SCORE 2
+- If title contains "DevOps", "Platform", "Infrastructure", "SRE", "Data", "ML", "AI" → FULLSTACK CHECK: FAIL → MAX SCORE 2
+- JavaScript/TypeScript alone is NOT frontend evidence (need React/Vue/Angular)
+- SQL/databases alone is NOT backend evidence (need Node.js/Python/Java/Go)
 
-## CRITICAL: Company Type Validation (CHECK CAREFULLY)
-Read `employer_description` for EACH employer. This role requires experience at SOFTWARE PRODUCT companies or startups.
+Output: "FULLSTACK CHECK: Frontend=[list] Backend=[list] → PASS/FAIL (max score X)"
 
-**REJECT if current/recent companies are:**
+**If FULLSTACK CHECK = FAIL, you MUST return score ≤2 regardless of leadership or company quality.**
+
+## STEP 2: TITLE CHECK (OVERQUALIFICATION GATE)
+- If title contains "VP", "Director", "CTO", "Chief", "Head of" → TITLE CHECK: FAIL → MAX SCORE 2 (overqualified)
+
+Output: "TITLE CHECK: [title] → PASS/FAIL"
+
+## STEP 3: COMPANY TYPE CHECK
+Read `employer_description` for current employer. This role requires SOFTWARE PRODUCT companies.
+
+**REJECT (score ≤3):**
 - Call centers, BPO, customer service companies
 - Banks, insurance, financial services (non-fintech)
 - Telecom operators (Bezeq, Cellcom, Partner, Pelephone)
 - IT consulting, body shops, outsourcing (Ness, Matrix, Bynet, Malam Team)
 - Hardware companies (chip design, electronics manufacturing)
-- Project-based companies (defense contractors doing project work)
 - Traditional enterprises (retail chains, manufacturing, logistics)
-- Agencies (marketing agencies, web agencies)
 
 **ACCEPT:**
 - Software product companies (SaaS, apps, platforms)
-- Tech startups (seed to IPO)
-- Cybersecurity companies
-- Fintech (software-focused)
-- Top tech companies (Google, Microsoft, Meta, Wix, Monday, etc.)
+- Tech startups, Cybersecurity, Fintech (software-focused)
+- Top tech (Google, Microsoft, Meta, Wix, Monday, etc.)
 
-If candidate's CURRENT or PRIMARY experience is at non-software companies → score ≤3
-Output: "Company check: [company name] is [type] → [PASS/FAIL]"
+Output: "COMPANY CHECK: [company] is [type] → PASS/FAIL"
 
-## Stability Check (MANDATORY - do FIRST)
-A STABILITY SUMMARY is pre-calculated above. Use those numbers directly:
-1. Read the short-stint companies count from the STABILITY SUMMARY
-2. If 3+ short-stint companies → max score 4 (even if top company)
-3. Read the current company duration from the STABILITY SUMMARY. If <6 months → HARD CAP at score 5 (no exceptions!)
-Output: "Stability: X short-stint companies, current role = Y months → [PASS/CAPPED]"
+## STEP 4: STABILITY CHECK
+Read the pre-calculated STABILITY SUMMARY above.
+- If 3+ short-stint companies → MAX SCORE 4
+- If current role <6 months → MAX SCORE 5 (HARD CAP)
 
-## Scoring (be strict)
-- **9-10**: Led fullstack team at top company (Wiz, Monday, Snyk) + 6+ years SW + React+Node + still hands-on coding
-- **7-8**: Good software product company + led 3+ engineers + clear fullstack depth both sides + hands-on
-- **5-6**: Senior fullstack engineer ready to lead, or lead with limited team size, or slightly weak on one stack side
-- **3-4**: Limited leadership OR weak fullstack evidence OR non-software company background
-- **1-2**: Backend-only team lead, Frontend-only team lead, no leadership experience, wrong company type, or wrong domain
+Output: "STABILITY CHECK: X short stints, current=Y months → PASS/CAPPED"
 
-## Experience Calculation (CRITICAL)
-Role durations are pre-calculated above. Use those numbers, do NOT recalculate from dates.
-- Count FULL: Fullstack Engineer, Full Stack Developer, Software Engineer (at software product company), Tech Lead, Team Lead, Staff Engineer
-- Count HALF: Backend Engineer, Frontend Engineer (shows coding but not fullstack)
-- Count HALF: DevOps/SRE (only if also shows coding/fullstack overlap)
-- DO NOT count: Military (use pre-calculated half-credit), QA, Project Manager, PMO, Customer Success, IT
-- DO NOT count: Experience at non-software companies (call centers, banks, telecom, consulting)
-- IMPORTANT: If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at that company ONCE
-- If JD requires "X+ years" and candidate has less, score 5-6 max
-- Show your work: list which roles you counted and excluded
+## STEP 5: SCORING (only after all checks pass)
+Apply the LOWEST cap from all checks above, then score within that cap:
+
+- **9-10**: Led fullstack team at top company (Wiz, Monday, Snyk) + 6+ years SW + React+Node + still hands-on
+- **7-8**: Good software product company + led 3+ engineers + clear fullstack depth BOTH sides + hands-on
+- **5-6**: Senior fullstack engineer ready to lead, or lead with limited team size
+- **3-4**: Limited leadership OR weak fullstack evidence OR non-software company
+- **1-2**: Failed FULLSTACK CHECK, wrong title, wrong company type, or wrong domain
+
+## Experience Calculation
+Role durations are pre-calculated above. Use those numbers, do NOT recalculate.
+- Count FULL: Fullstack Engineer, Full Stack Developer, Software Engineer, Tech Lead, Team Lead
+- Count HALF: Backend-only or Frontend-only roles
+- DO NOT count: Military, QA, PM, IT, non-software company roles
+- Show your work: list roles counted and excluded
 
 ## Leadership Scope
 Real TL = led 3+ engineers, hired/grew team, still codes 30-50%, owns technical decisions
-Weak = only 1-2 reports, pure manager (no coding), project coordinator only
-Officer/commander in IDF = positive leadership signal
+Weak = only 1-2 reports, pure manager, project coordinator
 
-## Fullstack Evidence (CRITICAL)
-Look for BOTH in skills/experience:
-- Frontend: React, Vue, Angular, TypeScript, JavaScript, CSS, HTML, frontend testing
-- Backend: Node.js, Python, Java, Go, APIs, databases, microservices, server-side
+## Boosters (only if all checks PASS)
++2: Wiz, Monday, Snyk, Wix, AppsFlyer, 8200, Mamram, Technion, TAU
++1: Microsoft IL, Check Point, JFrog, good tenure (2+ years)
 
-If profile shows ONLY backend skills (Java, Python, SQL, no React/Vue/Angular) → REJECT
-If profile shows ONLY frontend skills (React, CSS, no backend) → REJECT
+## CRITICAL REMINDER
+If FULLSTACK CHECK failed → your final score MUST be ≤2, even if the candidate has great leadership at Wix/Monday.
+Leadership quality CANNOT override missing fullstack skills for a FULLSTACK role.
 
-## Boosters
-+2: Wiz, Monday, Snyk, Wix, AppsFlyer, Fiverr, 8200, Mamram, Technion, TAU
-+1: Microsoft IL, Check Point, JFrog, good tenure (2+ years), hired/grew team
-
-## Auto-Reject (score ≤2)
-- Title contains "Backend Team Lead" or "Backend Engineer" without fullstack evidence
-- Title contains "Frontend Team Lead" without backend evidence
-- Title contains "DevOps", "Platform", "Infrastructure", "Data", "ML", "AI" team lead
-- Title contains "VP", "Director", "CTO", "Head of" (overqualified)
-- Only one side of the stack in skills (no cross-stack evidence)
-- Pure manager, hasn't coded in 3+ years
-- QA/Automation background only
-- Current/primary employer is NOT a software product company
-
-## Auto-Reject (score ≤4)
-- Job hopper (3+ companies with <1 year total each)
-
-## Auto-Reject (score ≤5)
-- Current role <6 months (HARD CAP - no exceptions, even for great candidates)
-
-Output your COMPANY CHECK, fullstack evidence check, AND experience calculation in the response.""",
+Output format: Show all 4 checks (FULLSTACK, TITLE, COMPANY, STABILITY) then your score.""",
 }
 
 PRODUCT_ISRAEL = {

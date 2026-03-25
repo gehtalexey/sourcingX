@@ -130,6 +130,87 @@ try:
 except ImportError:
     HAS_COOKIE_MANAGER = False
 
+import hashlib  # For performance caching
+
+# ===== Performance: on_click callbacks to avoid st.rerun() =====
+# These callbacks update session state directly; Streamlit auto-reruns after callbacks
+
+def _cb_logout():
+    """Logout callback - clears auth state."""
+    st.session_state['authentication_status'] = None
+    st.session_state['username'] = None
+    st.session_state['name'] = None
+
+def _cb_select_all(key: str, count: int):
+    """Select all items callback."""
+    st.session_state[key] = list(range(count))
+
+def _cb_deselect_all(key: str):
+    """Deselect all items callback."""
+    st.session_state[key] = []
+
+def _cb_clear_keys(keys: list):
+    """Clear multiple session state keys."""
+    for key in keys:
+        st.session_state.pop(key, None)
+
+def _cb_set_value(key: str, value):
+    """Set a session state value."""
+    st.session_state[key] = value
+
+def _cb_clear_screening_results():
+    """Clear screening results."""
+    st.session_state.pop('screening_results', None)
+
+def _cb_reset_phantom():
+    """Reset PhantomBuster launch state."""
+    st.session_state['pb_launch_status'] = 'idle'
+    st.session_state.pop('pb_launch_error', None)
+    st.session_state.pop('pb_launch_csv_name', None)
+    st.session_state['pb_progress_info'] = {}
+    st.session_state['pb_launch_skip_count'] = 0
+
+def _cb_toggle_exclude_preset(cat_keywords: list):
+    """Toggle exclude title preset category."""
+    current = st.session_state.get('exclude_title_presets', [])
+    if all(kw in current for kw in cat_keywords):
+        st.session_state['exclude_title_presets'] = [k for k in current if k not in cat_keywords]
+    else:
+        st.session_state['exclude_title_presets'] = list(set(current + cat_keywords))
+
+
+# ===== Performance: Module-level cached functions (avoid re-creating in tabs) =====
+# These were previously nested inside tab logic and re-created on every render
+
+@st.cache_data(ttl=300, max_entries=3)
+def _get_crustdata_credits_cached(_api_key: str):
+    """Cached Crustdata credits check - module level for efficiency."""
+    try:
+        from crustdata_search import check_credits as check_crustdata_credits
+        return check_crustdata_credits(api_key=_api_key)
+    except Exception as e:
+        return {"remaining": "?", "error": str(e)}
+
+@st.cache_data(ttl=120, max_entries=3)
+def _get_db_restore_counts_cached():
+    """Cached DB enriched profile count - module level for efficiency."""
+    try:
+        c = _get_db_client()
+        if c:
+            return c.count('profiles', {'status': 'eq.enriched'})
+        return 0
+    except Exception:
+        return 0
+
+@st.cache_data(ttl=300, max_entries=5)
+def _load_search_history_module(agent_id: str):
+    """Cached search history loader - module level for efficiency."""
+    try:
+        from db import get_search_history as load_search_history
+        return load_search_history(agent_id=agent_id)
+    except Exception:
+        return []
+
 
 def _start_keep_alive():
     """Ping the app's own URL every 10 minutes to prevent Streamlit Cloud from sleeping."""
@@ -246,14 +327,12 @@ if auth_config and HAS_AUTHENTICATOR:
         # Add logout button to sidebar
         with st.sidebar:
             st.write(f"Welcome, **{st.session_state.get('name', 'User')}**")
-            if st.button("Logout", key="logout_btn"):
-                # Clear cookie on logout
+            # Define logout callback with closure for cookie_manager
+            def _do_logout():
                 if cookie_manager:
                     cookie_manager.delete(auth_config['cookie']['name'])
-                st.session_state['authentication_status'] = None
-                st.session_state['username'] = None
-                st.session_state['name'] = None
-                st.rerun()
+                _cb_logout()
+            st.button("Logout", key="logout_btn", on_click=_do_logout)
 
 # Dark theme UI styling (StockPeers-inspired)
 st.markdown("""
@@ -516,6 +595,9 @@ def cleanup_memory():
     # Clear screening batch state if not actively screening
     if 'screening_batch_state' in st.session_state and not st.session_state.get('screening_batch_mode'):
         del st.session_state['screening_batch_state']
+
+    # Clear orphaned raw data caches (enriched_profiles_raw can accumulate)
+    st.session_state.pop('enriched_profiles_raw', None)
 
     gc.collect()
 
@@ -3334,6 +3416,40 @@ def _parse_date(d):
         return None
 
 
+# ===== Performance: Cache for compute_role_durations =====
+_duration_cache = {}
+_DURATION_CACHE_MAX = 1000
+
+def _hash_profile_for_cache(raw: dict) -> str:
+    """Create a stable hash key for caching duration calculations."""
+    key_parts = [
+        raw.get('linkedin_url', '') or raw.get('linkedin_flagship_url', ''),
+        str(len(raw.get('past_employers') or [])),
+        str(len(raw.get('current_employers') or [])),
+    ]
+    return hashlib.md5('|'.join(key_parts).encode()).hexdigest()
+
+def compute_role_durations_cached(raw: dict) -> str:
+    """Cached wrapper for compute_role_durations - avoids recomputing for same profile."""
+    if not isinstance(raw, dict):
+        return ""
+
+    cache_key = _hash_profile_for_cache(raw)
+    if cache_key in _duration_cache:
+        return _duration_cache[cache_key]
+
+    result = compute_role_durations(raw)
+
+    # LRU-style eviction when cache is full
+    if len(_duration_cache) >= _DURATION_CACHE_MAX:
+        keys_to_remove = list(_duration_cache.keys())[:100]
+        for k in keys_to_remove:
+            del _duration_cache[k]
+
+    _duration_cache[cache_key] = result
+    return result
+
+
 def compute_role_durations(raw):
     """Pre-calculate role durations from raw Crustdata JSON.
 
@@ -3668,7 +3784,7 @@ def screen_profile(profile: dict, job_description: str, client,
             }
 
     # Pre-compute durations and trim raw JSON (creates new objects, doesn't modify originals)
-    durations_text = compute_role_durations(raw)
+    durations_text = compute_role_durations_cached(raw)
     trimmed_raw = trim_raw_profile(raw)
 
     # JSON format based on mode
@@ -4186,15 +4302,8 @@ with tab_search:
         with credits_col1:
             st.caption("Search 100M+ professional profiles directly from Crustdata's database")
         with credits_col2:
-            # Cache credits check to avoid repeated API calls
-            @st.cache_data(ttl=300)  # 5 minute cache
-            def _get_crustdata_credits(_api_key: str):
-                try:
-                    return check_crustdata_credits(api_key=_api_key)
-                except Exception as e:
-                    return {"remaining": "?", "error": str(e)}
-
-            credits_info = _get_crustdata_credits(api_key)
+            # Use module-level cached function for efficiency
+            credits_info = _get_crustdata_credits_cached(api_key)
             if "error" not in credits_info:
                 st.metric("Credits", f"{credits_info.get('remaining', '?'):,}")
             else:
@@ -4588,13 +4697,11 @@ with tab_search:
                 # Select/Deselect all
                 sel_col1, sel_col2 = st.columns(2)
                 with sel_col1:
-                    if st.button("Select All", key="crust_select_all", use_container_width=True):
-                        st.session_state['crustdata_search_selected'] = list(range(len(results)))
-                        st.rerun()
+                    st.button("Select All", key="crust_select_all", use_container_width=True,
+                              on_click=_cb_select_all, args=('crustdata_search_selected', len(results)))
                 with sel_col2:
-                    if st.button("Deselect All", key="crust_deselect_all", use_container_width=True):
-                        st.session_state['crustdata_search_selected'] = []
-                        st.rerun()
+                    st.button("Deselect All", key="crust_deselect_all", use_container_width=True,
+                              on_click=_cb_deselect_all, args=('crustdata_search_selected',))
 
             # Build dataframe for display
             display_data = []
@@ -4819,12 +4926,8 @@ with tab_upload:
                     if db_client:
                         from db import get_profiles_by_status
 
-                        @st.cache_data(ttl=120, max_entries=3)
-                        def _get_db_restore_counts():
-                            c = _get_db_client()
-                            return c.count('profiles', {'status': 'eq.enriched'})
-
-                        enriched_count = _get_db_restore_counts()
+                        # Use module-level cached function for efficiency
+                        enriched_count = _get_db_restore_counts_cached()
 
                         if enriched_count > 0:
                             st.markdown("**From Database**")
@@ -5010,12 +5113,8 @@ with tab_upload:
             selected_agent = next((a for a in agents if a['name'] == selected_agent_name), None)
 
             if selected_agent:
-                # Load search history for this agent (cached to avoid DB call on every rerun)
-                @st.cache_data(ttl=300, max_entries=5)
-                def _load_search_history_cached(agent_id):
-                    return load_search_history(agent_id=agent_id)
-
-                search_history = _load_search_history_cached(agent_id=selected_agent['id'])
+                # Use module-level cached function for efficiency
+                search_history = _load_search_history_module(agent_id=selected_agent['id'])
 
                 if search_history:
                     # Build dropdown options from history (most recent first)
@@ -5073,7 +5172,7 @@ with tab_upload:
                                     )
                                     st.session_state['pb_confirm_delete'] = None
                                     if success:
-                                        _load_search_history_cached.clear()
+                                        _load_search_history_module.clear()
                                         st.success(f"Deleted {csv_to_delete}")
                                         st.rerun()
                                     else:
@@ -5433,13 +5532,7 @@ This can happen when:
 **Note:** You may need to update ALL your phantoms if they share the same LinkedIn account.
                 """)
 
-            if st.button("Reset", key="pb_reset_btn"):
-                st.session_state['pb_launch_status'] = 'idle'
-                st.session_state['pb_launch_error'] = None
-                st.session_state['pb_launch_csv_name'] = None
-                st.session_state['pb_progress_info'] = {}
-                st.session_state['pb_launch_skip_count'] = 0
-                st.rerun()
+            st.button("Reset", key="pb_reset_btn", on_click=_cb_reset_phantom)
 
         else:  # idle
             # Database deduplication info
@@ -5503,7 +5596,7 @@ This can happen when:
                                 search_name=search_name if search_name else None
                             )
                             # Clear cached search history so new entry shows up
-                            _load_search_history_cached.clear()
+                            _load_search_history_module.clear()
                     else:
                         st.session_state['pb_launch_status'] = 'error'
                         st.session_state['pb_launch_error'] = result.get('error', 'Unknown error')
@@ -5683,36 +5776,24 @@ with tab_filter:
             # Row 1: All + first 5 categories
             row1_cols = st.columns(6)
             with row1_cols[0]:
-                if st.button("All", key="exc_all", width="stretch"):
-                    st.session_state['exclude_title_presets'] = ALL_EXCLUDE_TITLES
-                    st.rerun()
+                st.button("All", key="exc_all", width="stretch",
+                          on_click=_cb_set_value, args=('exclude_title_presets', ALL_EXCLUDE_TITLES))
 
             category_items = list(EXCLUDE_CATEGORIES.items())
             for i, (cat_name, cat_keywords) in enumerate(category_items[:5]):
                 with row1_cols[i + 1]:
-                    if st.button(cat_name, key=f"exc_{cat_name}", width="stretch"):
-                        current = st.session_state.get('exclude_title_presets', [])
-                        if all(kw in current for kw in cat_keywords):
-                            st.session_state['exclude_title_presets'] = [k for k in current if k not in cat_keywords]
-                        else:
-                            st.session_state['exclude_title_presets'] = list(set(current + cat_keywords))
-                        st.rerun()
+                    st.button(cat_name, key=f"exc_{cat_name}", width="stretch",
+                              on_click=_cb_toggle_exclude_preset, args=(cat_keywords,))
 
             # Row 2: Remaining categories + Clear button
             row2_cols = st.columns(len(category_items) - 5 + 1)
             for i, (cat_name, cat_keywords) in enumerate(category_items[5:]):
                 with row2_cols[i]:
-                    if st.button(cat_name, key=f"exc_{cat_name}", width="stretch"):
-                        current = st.session_state.get('exclude_title_presets', [])
-                        if all(kw in current for kw in cat_keywords):
-                            st.session_state['exclude_title_presets'] = [k for k in current if k not in cat_keywords]
-                        else:
-                            st.session_state['exclude_title_presets'] = list(set(current + cat_keywords))
-                        st.rerun()
+                    st.button(cat_name, key=f"exc_{cat_name}", width="stretch",
+                              on_click=_cb_toggle_exclude_preset, args=(cat_keywords,))
             with row2_cols[-1]:
-                if st.button("Clear", key="exc_clear", width="stretch"):
-                    st.session_state['exclude_title_presets'] = []
-                    st.rerun()
+                st.button("Clear", key="exc_clear", width="stretch",
+                          on_click=_cb_set_value, args=('exclude_title_presets', []))
 
             selected_exclude = st.multiselect(
                 "Selected exclusions",
@@ -6627,7 +6708,9 @@ with tab_enrich:
 
                         # UNIFIED MATCHING: Fetch profiles and build lookup (same as Load from DB)
                         # MEMORY FIX: Exclude raw_data (20-50KB per profile) — not needed for URL matching or display
-                        cutoff = (datetime.utcnow() - timedelta(days=refresh_months * 30)).isoformat()
+                        # STABILITY FIX: Round cutoff to start of day to prevent inconsistent counts on refresh
+                        cutoff_date = (datetime.now(timezone.utc) - timedelta(days=refresh_months * 30)).replace(hour=0, minute=0, second=0, microsecond=0)
+                        cutoff = cutoff_date.isoformat()
                         _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,status,enriched_at,screened_at,contacted_at,screening_score,screening_fit_level,screening_summary'
                         all_profiles = db_client.select('profiles', _MATCH_COLUMNS,
                             filters={'enriched_at': f'gte.{cutoff}'}, limit=50000)
@@ -8250,14 +8333,22 @@ with tab_screening:
                 all_results = batch_state.get('results', [])
 
                 # Build raw_data index once (first batch only), reuse for all batches
-                # Note: raw_data is fetched from DB per-batch by fetch_raw_data_for_batch()
-                # so we only need the index as a fast pre-lookup cache
+                # Performance: Cache raw_index across screening sessions if enriched_df unchanged
                 raw_index = batch_state.get('raw_index')
                 if raw_index is None:
                     # Try enriched_df first (may have raw_data if fresh from API enrichment)
                     enriched_df_src = st.session_state.get('enriched_df')
                     if enriched_df_src is not None and not enriched_df_src.empty and 'raw_data' in enriched_df_src.columns:
-                        raw_index = build_raw_data_index(enriched_df_src.to_dict('records'))
+                        # Check if we can reuse cached raw_index (hash validation)
+                        enriched_urls = tuple(enriched_df_src.get('linkedin_url', []))
+                        enriched_hash = hash(enriched_urls)
+                        cached_hash = st.session_state.get('_raw_index_hash')
+                        if cached_hash == enriched_hash and '_raw_index_cache' in st.session_state:
+                            raw_index = st.session_state['_raw_index_cache']
+                        else:
+                            raw_index = build_raw_data_index(enriched_df_src.to_dict('records'))
+                            st.session_state['_raw_index_cache'] = raw_index
+                            st.session_state['_raw_index_hash'] = enriched_hash
                     else:
                         raw_index = {}  # DB fetch in fetch_raw_data_for_batch() will handle it
                     st.session_state['screening_batch_state']['raw_index'] = raw_index
@@ -8281,9 +8372,23 @@ with tab_screening:
                             fetched = missing_before - missing_after
                             st.write(f"📦 Fetched raw data for {fetched}/{missing_before} profiles from DB" + (f" ({missing_after} still missing)" if missing_after > 0 else ""))
 
-                        # Progress callback (DB save deferred to batch at end)
+                        # Thread-safe progress tracking for this batch
+                        batch_progress = {'completed': 0, 'strong': 0, 'good': 0, 'partial': 0, 'error': 0}
+                        batch_lock = threading.Lock()
+
                         def _on_profile_screened(completed, total, result):
-                            pass  # DB save happens in batch after screening completes
+                            """Update batch progress (thread-safe)."""
+                            with batch_lock:
+                                batch_progress['completed'] += 1
+                                fit = result.get('fit', '') if isinstance(result, dict) else ''
+                                if 'Strong' in fit:
+                                    batch_progress['strong'] += 1
+                                elif 'Good' in fit:
+                                    batch_progress['good'] += 1
+                                elif fit in ('Error', 'Skipped', ''):
+                                    batch_progress['error'] += 1
+                                else:
+                                    batch_progress['partial'] += 1
 
                         # Screen this batch - use dynamic workers (scales with concurrent users)
                         batch_results = screen_profiles_batch(
@@ -8299,6 +8404,12 @@ with tab_screening:
                             api_key=batch_api_key
                         )
                         all_results.extend(batch_results)
+
+                        # Show batch summary with progress stats
+                        status.update(
+                            label=f"Batch {current_batch + 1}: {batch_progress['completed']} screened | Strong: {batch_progress['strong']} | Good: {batch_progress['good']} | Partial: {batch_progress['partial']}",
+                            state="complete"
+                        )
 
                         # Memory cleanup: clear raw_crustdata from screened profiles
                         for p in batch_profiles:
@@ -8365,6 +8476,8 @@ with tab_screening:
                         # Clear screening_batch_state (stores profiles copy during screening)
                         if 'screening_batch_state' in st.session_state:
                             del st.session_state['screening_batch_state']
+                        # Clear orphaned raw data caches
+                        st.session_state.pop('enriched_profiles_raw', None)
                         # Keep original_results_df — needed for Reset Filters
                         # Clear debug data
                         for _debug_key in ['_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols']:
@@ -8845,9 +8958,7 @@ with tab_screening:
                 )
 
             with combo_col4:
-                if st.button("Clear Results", key="clear_screening"):
-                    del st.session_state['screening_results']
-                    st.rerun()
+                st.button("Clear Results", key="clear_screening", on_click=_cb_clear_screening_results)
 
             # Row 2: Individual fit levels
             with st.expander("Individual Fit Level Exports"):

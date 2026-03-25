@@ -166,54 +166,94 @@ def parse_requirements(job_description: str, client: anthropic.Anthropic) -> Dic
 # INDIVIDUAL CHECKERS - Each requirement type has its own checker
 # ============================================================================
 
-def check_skill_frontend(profile: Dict, requirement: Requirement) -> CheckResult:
-    """Check if profile has required frontend frameworks."""
-    skills = [s.lower() for s in profile.get("skills", [])]
+def check_skill_frontend(profile: Dict, requirement: Requirement, client=None) -> CheckResult:
+    """Check if profile has required frontend frameworks using AI."""
+    if not client:
+        # Fallback to simple check if no AI client
+        skills = [s.lower() for s in profile.get("skills", [])]
+        frontend_frameworks = ["react", "vue", "angular", "next.js", "svelte"]
+        found = [s for s in skills if any(f in s for f in frontend_frameworks)]
+        return CheckResult(
+            requirement=requirement,
+            passed=len(found) > 0,
+            reason=f"Frontend: {found}" if found else "No frontend framework found (no AI)",
+            evidence=found
+        )
 
-    # Frontend frameworks to look for
-    frontend_frameworks = ["react", "vue", "angular", "next.js", "svelte", "nextjs"]
-    if requirement.values:
-        frontend_frameworks = [v.lower() for v in requirement.values]
+    skills = profile.get("skills", [])
+    prompt = f"""Does this candidate have modern FRONTEND framework experience?
 
-    found = []
-    for skill in skills:
-        for framework in frontend_frameworks:
-            if framework in skill:
-                found.append(skill)
-                break
+Required: React, Vue, Angular, Next.js, or Svelte (modern web frameworks)
+NOT acceptable:
+- JavaScript/TypeScript alone (need actual framework)
+- jQuery (outdated)
+- AngularJS (outdated, different from Angular 2+)
+- React Native (mobile, not web frontend)
 
-    passed = len(found) > 0
-    return CheckResult(
-        requirement=requirement,
-        passed=passed,
-        reason=f"Frontend frameworks: {found}" if found else "No frontend framework (React/Vue/Angular) found",
-        evidence=found
-    )
+Candidate skills: {skills}
+
+Return JSON: {{"passed": true/false, "reason": "brief explanation", "evidence": ["skills found"]}}"""
+
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        result = json.loads(re.search(r'\{.*\}', response.content[0].text, re.DOTALL).group())
+        return CheckResult(
+            requirement=requirement,
+            passed=result.get("passed", False),
+            reason=result.get("reason", ""),
+            evidence=result.get("evidence", [])
+        )
+    except Exception as e:
+        return CheckResult(requirement=requirement, passed=False, reason=f"AI check failed: {e}", evidence=[])
 
 
-def check_skill_backend(profile: Dict, requirement: Requirement) -> CheckResult:
-    """Check if profile has required backend technologies."""
-    skills = [s.lower() for s in profile.get("skills", [])]
+def check_skill_backend(profile: Dict, requirement: Requirement, client=None) -> CheckResult:
+    """Check if profile has required backend technologies using AI."""
+    if not client:
+        skills = [s.lower() for s in profile.get("skills", [])]
+        backend_tech = ["node", "python", "java", "go", "c#", "php", "ruby", ".net"]
+        found = [s for s in skills if any(t in s for t in backend_tech) and "javascript" not in s]
+        return CheckResult(
+            requirement=requirement,
+            passed=len(found) > 0,
+            reason=f"Backend: {found}" if found else "No backend tech found (no AI)",
+            evidence=found
+        )
 
-    # Backend technologies to look for
-    backend_tech = ["node", "python", "java", "go", "c#", "php", "ruby", "laravel", ".net"]
-    if requirement.values:
-        backend_tech = [v.lower() for v in requirement.values]
+    skills = profile.get("skills", [])
+    prompt = f"""Does this candidate have BACKEND development experience?
 
-    found = []
-    for skill in skills:
-        for tech in backend_tech:
-            if tech in skill and "javascript" not in skill:  # Avoid matching JavaScript as backend
-                found.append(skill)
-                break
+Required: Node.js, Python, Java, Go, C#/.NET, PHP, Ruby, or similar server-side technologies
+NOT acceptable:
+- JavaScript alone (could be frontend only)
+- SQL alone (database, not backend programming)
+- HTML/CSS (frontend)
 
-    passed = len(found) > 0
-    return CheckResult(
-        requirement=requirement,
-        passed=passed,
-        reason=f"Backend tech: {found}" if found else "No backend tech (Node/Python/Java) found",
-        evidence=found
-    )
+Candidate skills: {skills}
+
+Return JSON: {{"passed": true/false, "reason": "brief explanation", "evidence": ["skills found"]}}"""
+
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        result = json.loads(re.search(r'\{.*\}', response.content[0].text, re.DOTALL).group())
+        return CheckResult(
+            requirement=requirement,
+            passed=result.get("passed", False),
+            reason=result.get("reason", ""),
+            evidence=result.get("evidence", [])
+        )
+    except Exception as e:
+        return CheckResult(requirement=requirement, passed=False, reason=f"AI check failed: {e}", evidence=[])
 
 
 def check_experience_years(profile: Dict, requirement: Requirement) -> CheckResult:
@@ -274,68 +314,134 @@ def check_leadership_years(profile: Dict, requirement: Requirement) -> CheckResu
     )
 
 
-def check_company_type(profile: Dict, requirement: Requirement, is_reject: bool = False) -> CheckResult:
-    """Check if current company matches required type."""
+def check_company_type(profile: Dict, requirement: Requirement, is_reject: bool = False, client=None) -> CheckResult:
+    """Check if current company is appropriate using AI."""
     current_employers = profile.get("current_employers", [])
     if not current_employers:
-        return CheckResult(
-            requirement=requirement,
-            passed=not is_reject,  # If no company info, pass for must-have, fail for reject
-            reason="No current employer info",
-            evidence=[]
-        )
+        return CheckResult(requirement=requirement, passed=not is_reject, reason="No current employer info", evidence=[])
 
     company = current_employers[0].get("employer_name", "")
-    description = (current_employers[0].get("employer_linkedin_description") or "").lower()
+    description = current_employers[0].get("employer_linkedin_description") or ""
 
-    # Keywords to check
-    check_values = [v.lower() for v in requirement.values]
-
-    found_keywords = []
-    for keyword in check_values:
-        if keyword in description or keyword in company.lower():
-            found_keywords.append(keyword)
+    if not client:
+        # Fallback to keyword check
+        desc_lower = description.lower()
+        check_values = [v.lower() for v in requirement.values]
+        found = [kw for kw in check_values if kw in desc_lower or kw in company.lower()]
+        if is_reject:
+            passed = len(found) == 0
+            reason = f"Company '{company}' contains: {found}" if found else f"Company '{company}' OK (no AI)"
+        else:
+            passed = len(found) > 0
+            reason = f"Company '{company}' matches: {found}" if found else f"Company '{company}' no match (no AI)"
+        return CheckResult(requirement=requirement, passed=passed, reason=reason, evidence=[company])
 
     if is_reject:
-        # For reject_if: FAIL if keywords found
-        passed = len(found_keywords) == 0
-        reason = f"Company '{company}' contains reject keywords: {found_keywords}" if found_keywords else f"Company '{company}' OK"
+        prompt = f"""Is this company a BAD fit for a fullstack team lead role?
+
+Company: {company}
+Description: {description[:500]}
+
+REJECT (return passed=false) if company is:
+- E-commerce/retail (selling products online, not building software)
+- Ticketing/travel/events (selling tickets, not software products)
+- Banking/insurance/financial services (traditional, not fintech)
+- Telecom operator (Bezeq, Cellcom, etc.)
+- IT consulting/outsourcing/body shop (Ness, Matrix, Malam Team)
+- Hardware company
+- Marketing/creative agency
+
+ACCEPT (return passed=true) if company is:
+- Software product company (SaaS, B2B software)
+- Tech startup
+- Cybersecurity, DevTools, Developer platforms
+- Fintech (software-focused)
+- Top tech (Google, Microsoft, Wix, Monday, etc.)
+
+Return JSON: {{"passed": true/false, "reason": "brief explanation"}}"""
     else:
-        # For must_have: PASS if keywords found
-        passed = len(found_keywords) > 0
-        reason = f"Company '{company}' matches: {found_keywords}" if found_keywords else f"Company '{company}' doesn't match required type"
+        prompt = f"""Is this company a GOOD fit for a fullstack team lead role?
 
-    return CheckResult(
-        requirement=requirement,
-        passed=passed,
-        reason=reason,
-        evidence=[company, description[:100]]
-    )
+Company: {company}
+Description: {description[:500]}
 
+ACCEPT if software product company, tech startup, cybersecurity, DevTools, fintech.
+REJECT if consulting, outsourcing, retail, banking, telecom, hardware.
 
-def check_title_reject(profile: Dict, requirement: Requirement) -> CheckResult:
-    """Check if current title contains rejected keywords."""
-    current_employers = profile.get("current_employers", [])
-    if not current_employers:
+Return JSON: {{"passed": true/false, "reason": "brief explanation"}}"""
+
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        result = json.loads(re.search(r'\{.*\}', response.content[0].text, re.DOTALL).group())
         return CheckResult(
             requirement=requirement,
-            passed=True,
-            reason="No current title info",
-            evidence=[]
+            passed=result.get("passed", False),
+            reason=result.get("reason", ""),
+            evidence=[company, description[:100]]
+        )
+    except Exception as e:
+        return CheckResult(requirement=requirement, passed=False, reason=f"AI check failed: {e}", evidence=[company])
+
+
+def check_title_reject(profile: Dict, requirement: Requirement, client=None) -> CheckResult:
+    """Check if current title indicates wrong specialization using AI."""
+    current_employers = profile.get("current_employers", [])
+    if not current_employers:
+        return CheckResult(requirement=requirement, passed=True, reason="No current title info", evidence=[])
+
+    title = current_employers[0].get("employee_title") or ""
+
+    if not client:
+        # Fallback to simple check
+        title_lower = title.lower()
+        reject_keywords = [v.lower() for v in requirement.values]
+        found = [kw for kw in reject_keywords if kw in title_lower]
+        return CheckResult(
+            requirement=requirement,
+            passed=len(found) == 0,
+            reason=f"Title '{title}' contains: {found}" if found else f"Title '{title}' OK (no AI)",
+            evidence=[title]
         )
 
-    title = (current_employers[0].get("employee_title") or "").lower()
+    prompt = f"""Is this job title appropriate for a FULLSTACK TEAM LEAD role?
 
-    reject_keywords = [v.lower() for v in requirement.values]
-    found = [kw for kw in reject_keywords if kw in title]
+Current title: "{title}"
 
-    passed = len(found) == 0
-    return CheckResult(
-        requirement=requirement,
-        passed=passed,
-        reason=f"Title '{title}' contains rejected keywords: {found}" if found else f"Title '{title}' OK",
-        evidence=[title]
-    )
+REJECT if title indicates:
+- Backend-only focus: "Backend Team Lead", "Backend Engineer", "Backend Infra"
+- Frontend-only focus: "Frontend Team Lead", "Frontend Engineer"
+- DevOps/Platform/Infra: "DevOps Lead", "Platform Team Lead", "Infrastructure Lead", "SRE"
+- Data/ML/AI: "Data Team Lead", "ML Engineer", "AI Lead"
+- Overqualified: "VP", "Director", "CTO", "Chief", "Head of"
+
+ACCEPT titles like:
+- "Team Lead", "Tech Lead", "Engineering Team Lead", "Software Team Lead"
+- "Full Stack Team Lead", "Development Team Lead"
+- "Engineering Manager" (if still hands-on)
+
+Return JSON: {{"passed": true/false, "reason": "brief explanation"}}"""
+
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        result = json.loads(re.search(r'\{.*\}', response.content[0].text, re.DOTALL).group())
+        return CheckResult(
+            requirement=requirement,
+            passed=result.get("passed", False),
+            reason=result.get("reason", ""),
+            evidence=[title]
+        )
+    except Exception as e:
+        return CheckResult(requirement=requirement, passed=False, reason=f"AI check failed: {e}", evidence=[title])
 
 
 def check_experience_max(profile: Dict, requirement: Requirement) -> CheckResult:
@@ -430,10 +536,12 @@ def screen_profile_structured(
     checks = []
     boost_points = 0
 
-    # 1. Check must-have requirements
+    # 1. Check must-have requirements (each gets its own AI call)
     for req in requirements.get("must_have", []):
         checker = CHECKER_MAP.get(req.type, check_custom)
-        if req.type == RequirementType.CUSTOM and checker == check_custom:
+        # Pass client to all checkers that support it
+        if req.type in [RequirementType.SKILL_FRONTEND, RequirementType.SKILL_BACKEND,
+                        RequirementType.TITLE_REJECT, RequirementType.COMPANY_TYPE, RequirementType.CUSTOM]:
             result = checker(profile, req, client)
         else:
             result = checker(profile, req)
@@ -442,10 +550,14 @@ def screen_profile_structured(
     # 2. Check reject-if requirements (inverted logic)
     for req in requirements.get("reject_if", []):
         if req.type == RequirementType.COMPANY_TYPE:
-            result = check_company_type(profile, req, is_reject=True)
+            result = check_company_type(profile, req, is_reject=True, client=client)
         else:
             checker = CHECKER_MAP.get(req.type, check_custom)
-            result = checker(profile, req)
+            if req.type in [RequirementType.SKILL_FRONTEND, RequirementType.SKILL_BACKEND,
+                            RequirementType.TITLE_REJECT, RequirementType.CUSTOM]:
+                result = checker(profile, req, client)
+            else:
+                result = checker(profile, req)
             # Invert for reject_if
             result = CheckResult(
                 requirement=result.requirement,
@@ -458,7 +570,8 @@ def screen_profile_structured(
     # 3. Check nice-to-have requirements (for boost points)
     for req in requirements.get("nice_to_have", []):
         checker = CHECKER_MAP.get(req.type, check_custom)
-        if req.type == RequirementType.CUSTOM and checker == check_custom:
+        if req.type in [RequirementType.SKILL_FRONTEND, RequirementType.SKILL_BACKEND,
+                        RequirementType.TITLE_REJECT, RequirementType.COMPANY_TYPE, RequirementType.CUSTOM]:
             result = checker(profile, req, client)
         else:
             result = checker(profile, req)

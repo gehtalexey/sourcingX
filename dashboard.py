@@ -4688,7 +4688,7 @@ with tab_search:
                         st.session_state['crustdata_search_total'] = 0
                         st.info("No profiles found matching your criteria. Try adjusting your filters.")
 
-                    _get_crustdata_credits.clear()
+                    _get_crustdata_credits_cached.clear()
 
                 except Exception as e:
                     st.error(f"Search failed: {str(e)}")
@@ -4873,7 +4873,7 @@ with tab_search:
                                     st.session_state['crustdata_search_selected'] = current_selected + new_indices
 
                                     st.success(f"Loaded {len(new_profiles)} more profiles")
-                                    _get_crustdata_credits.clear()
+                                    _get_crustdata_credits_cached.clear()
                                     st.rerun()
                                 else:
                                     st.info("No more results available.")
@@ -8099,114 +8099,161 @@ with tab_screening:
         )
 
         if use_structured_mode:
-            # Text boxes for requirements
-            st.caption("Define what the AI should check. These requirements are added to the profile data sent to AI.")
+            # Structured fields with paired accept/reject for each gate
+            st.caption("Fill in requirements. Leave empty to skip. Green = must have, Red = reject.")
 
-            # Must-Haves Section
-            st.markdown("**Must-Have Requirements** (all required)")
+            # === SKILLS ===
+            st.markdown("**Skills**")
+            skills_must = st.text_input(
+                "Must have skills",
+                key="struct_skills_must",
+                placeholder="e.g., React or Angular, Node.js, TypeScript",
+                help="Skills the candidate must have"
+            )
 
-            if 'must_have_inputs' not in st.session_state:
-                st.session_state['must_have_inputs'] = [
-                    "Has modern frontend framework (React, Vue, Angular, Next.js, or Svelte)",
-                    "Has backend technology (Node.js, Python, Java, Go, or C#)",
-                    "Has 2+ years team leadership experience (current or past roles)",
-                    "Current company is a software product company (not consulting/outsourcing)",
-                ]
-
-            must_haves = []
-            for i in range(6):
-                default_val = st.session_state['must_have_inputs'][i] if i < len(st.session_state['must_have_inputs']) else ""
-                val = st.text_input(
-                    f"Must-have {i+1}",
-                    value=default_val,
-                    key=f"must_have_{i}",
-                    placeholder="e.g., Has React or Vue experience",
-                    label_visibility="collapsed" if i > 0 else "visible"
+            # === EXPERIENCE ===
+            st.markdown("**Experience**")
+            col_exp_min, col_exp_max = st.columns(2)
+            with col_exp_min:
+                exp_min = st.text_input(
+                    "Minimum",
+                    key="struct_exp_min",
+                    placeholder="e.g., 5 years",
+                    help="Minimum experience required"
                 )
-                if val.strip():
-                    must_haves.append(val.strip())
+            with col_exp_max:
+                exp_max = st.text_input(
+                    "Maximum (reject if more)",
+                    key="struct_exp_max",
+                    placeholder="e.g., 20 years",
+                    help="Reject if experience exceeds this"
+                )
+
+            # === TITLE ===
+            st.markdown("**Title**")
+            col_title_accept, col_title_reject = st.columns(2)
+            with col_title_accept:
+                title_accept = st.text_input(
+                    "Accept titles",
+                    key="struct_title_accept",
+                    placeholder="e.g., Team Lead, Tech Lead, Senior Engineer",
+                    help="Acceptable titles"
+                )
+            with col_title_reject:
+                title_reject = st.text_input(
+                    "Reject titles",
+                    key="struct_title_reject",
+                    placeholder="e.g., VP, Director, CTO, CEO, Founder",
+                    help="Titles to reject"
+                )
+
+            # === COMPANY ===
+            st.markdown("**Company**")
+            col_company_accept, col_company_reject = st.columns(2)
+            with col_company_accept:
+                company_accept = st.text_input(
+                    "Must be",
+                    key="struct_company_accept",
+                    placeholder="e.g., tech product company, SaaS, startup",
+                    help="Required company types"
+                )
+            with col_company_reject:
+                company_reject = st.text_input(
+                    "Reject",
+                    key="struct_company_reject",
+                    placeholder="e.g., consulting, outsourcing, agency",
+                    help="Company types to reject"
+                )
+
+            # === LEADERSHIP ===
+            st.markdown("**Leadership**")
+            leadership_min = st.text_input(
+                "Minimum leadership experience",
+                key="struct_leadership_min",
+                placeholder="e.g., 2 years as team lead",
+                help="Required leadership experience"
+            )
+
+            # === OTHER MUST HAVE ===
+            st.markdown("**Other Must-Have**")
+            other_must = st.text_input(
+                "Other requirements",
+                key="struct_other_must",
+                placeholder="e.g., cloud experience (AWS/GCP), B2B SaaS background",
+                help="Any other must-have requirements"
+            )
+
+            # === OTHER REJECT ===
+            st.markdown("**Other Reject If**")
+            other_reject = st.text_input(
+                "Other reject conditions",
+                key="struct_other_reject",
+                placeholder="e.g., currently unemployed, job hopper (5+ companies in 5 years)",
+                help="Any other conditions that disqualify"
+            )
 
             st.markdown("---")
 
-            # Nice-to-Haves Section
-            st.markdown("**Nice-to-Have** (bonus points)")
+            # === NICE TO HAVE ===
+            nice_to_have = st.text_input(
+                "Nice to Have (bonus points)",
+                key="struct_nice_to_have",
+                placeholder="e.g., AWS, 8200/Mamram, Technion/TAU, Wiz/Monday/Snyk",
+                help="Not required, adds bonus points"
+            )
 
-            if 'nice_to_have_inputs' not in st.session_state:
-                st.session_state['nice_to_have_inputs'] = [
-                    {"text": "Top company (Wiz, Monday, Snyk, Wix)", "points": 2},
-                    {"text": "8200/Mamram/Talpiot military background", "points": 2},
-                    {"text": "CS degree from Technion/TAU", "points": 1},
-                ]
+            # Count active gates
+            active_gates = sum([
+                bool(skills_must.strip()),
+                bool(exp_min.strip() or exp_max.strip()),
+                bool(title_accept.strip() or title_reject.strip()),
+                bool(company_accept.strip() or company_reject.strip()),
+                bool(leadership_min.strip()),
+                bool(other_must.strip()),
+                bool(other_reject.strip()),
+            ])
+            st.info(f"**{active_gates}/7** gates active")
 
-            nice_to_haves = []
-            for i in range(4):
-                cols = st.columns([4, 1])
-                default_text = st.session_state['nice_to_have_inputs'][i]["text"] if i < len(st.session_state['nice_to_have_inputs']) else ""
-                default_pts = st.session_state['nice_to_have_inputs'][i]["points"] if i < len(st.session_state['nice_to_have_inputs']) else 1
+            # Store for batch processing compatibility
+            st.session_state['structured_must_haves'] = [skills_must] if skills_must.strip() else []
+            st.session_state['structured_nice_to_haves'] = [{"text": nice_to_have, "points": 1}] if nice_to_have.strip() else []
+            st.session_state['structured_reject_ifs'] = [title_reject, company_reject, other_reject]
 
-                with cols[0]:
-                    text = st.text_input(
-                        f"Nice-to-have {i+1}",
-                        value=default_text,
-                        key=f"nice_to_have_text_{i}",
-                        placeholder="e.g., Top company background",
-                        label_visibility="collapsed"
-                    )
-                with cols[1]:
-                    pts = st.number_input(
-                        "Pts",
-                        min_value=1, max_value=3, value=default_pts,
-                        key=f"nice_to_have_pts_{i}",
-                        label_visibility="collapsed"
-                    )
-                if text.strip():
-                    nice_to_haves.append({"text": text.strip(), "points": pts})
+            # Build job_description with exact format expected by system prompt
+            job_description = f"""=== STRUCTURED REQUIREMENTS ===
 
-            st.markdown("---")
+=== SKILLS: MUST HAVE ===
+{skills_must.strip() if skills_must.strip() else '(none specified)'}
 
-            # Reject-If Section
-            st.markdown("**Reject If** (instant disqualifiers)")
+=== EXPERIENCE: MINIMUM ===
+{exp_min.strip() if exp_min.strip() else '(none specified)'}
 
-            if 'reject_if_inputs' not in st.session_state:
-                st.session_state['reject_if_inputs'] = [
-                    "Title contains 'Backend' or 'Infra' (e.g., Backend Infra Team Lead)",
-                    "Title contains 'DevOps', 'Platform', 'SRE', or 'Data'",
-                    "Current company is consulting/outsourcing (Ness, Matrix, Malam Team)",
-                ]
+=== EXPERIENCE: MAXIMUM (reject if more) ===
+{exp_max.strip() if exp_max.strip() else '(none specified)'}
 
-            reject_ifs = []
-            for i in range(4):
-                default_val = st.session_state['reject_if_inputs'][i] if i < len(st.session_state['reject_if_inputs']) else ""
-                val = st.text_input(
-                    f"Reject if {i+1}",
-                    value=default_val,
-                    key=f"reject_if_{i}",
-                    placeholder="e.g., Title contains 'DevOps'",
-                    label_visibility="collapsed"
-                )
-                if val.strip():
-                    reject_ifs.append(val.strip())
+=== TITLE: ACCEPT ===
+{title_accept.strip() if title_accept.strip() else '(none specified)'}
 
-            # Store structured requirements
-            st.session_state['structured_must_haves'] = must_haves
-            st.session_state['structured_nice_to_haves'] = nice_to_haves
-            st.session_state['structured_reject_ifs'] = reject_ifs
+=== TITLE: REJECT ===
+{title_reject.strip() if title_reject.strip() else '(none specified)'}
 
-            st.info(f"**{len(must_haves)}** must-haves | **{len(nice_to_haves)}** nice-to-haves | **{len(reject_ifs)}** reject-ifs")
+=== COMPANY: MUST BE ===
+{company_accept.strip() if company_accept.strip() else '(none specified)'}
 
-            # Build job_description from text boxes
-            job_description = f"""# REQUIREMENTS TO CHECK
+=== COMPANY: REJECT ===
+{company_reject.strip() if company_reject.strip() else '(none specified)'}
 
-## MUST-HAVE (all required - any fail = No Fit, score 1-2)
-{chr(10).join(f'{i+1}. {mh}' for i, mh in enumerate(must_haves))}
+=== LEADERSHIP: MINIMUM ===
+{leadership_min.strip() if leadership_min.strip() else '(none specified)'}
 
-## NICE-TO-HAVE (bonus points if met)
-{chr(10).join(f'+{nth["points"]}: {nth["text"]}' for nth in nice_to_haves)}
+=== OTHER: MUST HAVE ===
+{other_must.strip() if other_must.strip() else '(none specified)'}
 
-## REJECT IF (instant disqualifiers)
-{chr(10).join(f'- {ri}' for ri in reject_ifs)}
+=== OTHER: REJECT IF ===
+{other_reject.strip() if other_reject.strip() else '(none specified)'}
 
-Check each requirement and output PASS/FAIL for each must-have."""
+=== NICE TO HAVE ===
+{nice_to_have.strip() if nice_to_have.strip() else '(none specified)'}"""
 
         else:
             # Classic mode - just JD text area

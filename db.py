@@ -1392,23 +1392,45 @@ def search_profiles_filtered(client: SupabaseClient, filters: dict, limit: int =
     if filters.get('location'):
         add_string_filter('location', filters['location'])
 
-    # Array columns - use 'ov' (overlaps) for OR matching (any of the terms)
-    # Note: This requires exact term match within array, not partial match
+    # Array columns - exact element matching
+    # 'cs' operator checks if array contains the exact element
+
     if filters.get('past_titles'):
+        # Search ONLY all_titles array (past titles, excludes current)
         terms = [t.strip() for t in filters['past_titles'].split(',') if t.strip()]
-        params['all_titles'] = f"ov.{{{','.join(terms)}}}"
+        if terms:
+            conditions = []
+            for t in terms:
+                # Exact array element match on all_titles
+                conditions.append(f"all_titles.cs.{{\"{t}\"}}")
+            or_groups.append(f"or({','.join(conditions)})")
 
     if filters.get('past_companies'):
+        # Search ONLY all_employers array (past companies, excludes current)
         terms = [t.strip() for t in filters['past_companies'].split(',') if t.strip()]
-        params['all_employers'] = f"ov.{{{','.join(terms)}}}"
+        if terms:
+            conditions = []
+            for t in terms:
+                # Exact array element match on all_employers
+                conditions.append(f"all_employers.cs.{{\"{t}\"}}")
+            or_groups.append(f"or({','.join(conditions)})")
 
     if filters.get('skills'):
         terms = [t.strip() for t in filters['skills'].split(',') if t.strip()]
-        params['skills'] = f"ov.{{{','.join(terms)}}}"
+        if terms:
+            conditions = []
+            for t in terms:
+                # Exact array element match
+                conditions.append(f"skills.cs.{{\"{t}\"}}")
+            or_groups.append(f"or({','.join(conditions)})")
 
     if filters.get('schools'):
         terms = [t.strip() for t in filters['schools'].split(',') if t.strip()]
-        params['all_schools'] = f"ov.{{{','.join(terms)}}}"
+        if terms:
+            conditions = []
+            for t in terms:
+                conditions.append(f"all_schools.cs.{{\"{t}\"}}")
+            or_groups.append(f"or({','.join(conditions)})")
 
     # Boolean and date filters
     if filters.get('has_email'):

@@ -8099,161 +8099,92 @@ with tab_screening:
         )
 
         if use_structured_mode:
-            # Structured fields with paired accept/reject for each gate
-            st.caption("Fill in requirements. Leave empty to skip. Green = must have, Red = reject.")
+            # Simple free-text fields - AI interprets naturally with context
+            st.caption("Write requirements naturally. AI will interpret context. Leave empty to skip.")
 
-            # === SKILLS ===
-            st.markdown("**Skills**")
-            skills_must = st.text_input(
-                "Must have skills",
-                key="struct_skills_must",
-                placeholder="e.g., React or Angular, Node.js, TypeScript",
-                help="Skills the candidate must have"
+            req_skills = st.text_input(
+                "Skills",
+                key="struct_skills",
+                placeholder="e.g., must have frontend (React, Angular, Vue) and backend (Node, Python, Java)",
+                help="What skills should the candidate have?"
             )
 
-            # === EXPERIENCE ===
-            st.markdown("**Experience**")
-            col_exp_min, col_exp_max = st.columns(2)
-            with col_exp_min:
-                exp_min = st.text_input(
-                    "Minimum",
-                    key="struct_exp_min",
-                    placeholder="e.g., 5 years",
-                    help="Minimum experience required"
-                )
-            with col_exp_max:
-                exp_max = st.text_input(
-                    "Maximum (reject if more)",
-                    key="struct_exp_max",
-                    placeholder="e.g., 20 years",
-                    help="Reject if experience exceeds this"
-                )
-
-            # === TITLE ===
-            st.markdown("**Title**")
-            col_title_accept, col_title_reject = st.columns(2)
-            with col_title_accept:
-                title_accept = st.text_input(
-                    "Accept titles",
-                    key="struct_title_accept",
-                    placeholder="e.g., Team Lead, Tech Lead, Senior Engineer",
-                    help="Acceptable titles"
-                )
-            with col_title_reject:
-                title_reject = st.text_input(
-                    "Reject titles",
-                    key="struct_title_reject",
-                    placeholder="e.g., VP, Director, CTO, CEO, Founder",
-                    help="Titles to reject"
-                )
-
-            # === COMPANY ===
-            st.markdown("**Company**")
-            col_company_accept, col_company_reject = st.columns(2)
-            with col_company_accept:
-                company_accept = st.text_input(
-                    "Must be",
-                    key="struct_company_accept",
-                    placeholder="e.g., tech product company, SaaS, startup",
-                    help="Required company types"
-                )
-            with col_company_reject:
-                company_reject = st.text_input(
-                    "Reject",
-                    key="struct_company_reject",
-                    placeholder="e.g., consulting, outsourcing, agency",
-                    help="Company types to reject"
-                )
-
-            # === LEADERSHIP ===
-            st.markdown("**Leadership**")
-            leadership_min = st.text_input(
-                "Minimum leadership experience",
-                key="struct_leadership_min",
-                placeholder="e.g., 2 years as team lead",
-                help="Required leadership experience"
+            req_experience = st.text_input(
+                "Experience",
+                key="struct_experience",
+                placeholder="e.g., minimum 5 years as software engineer, reject if more than 20 years",
+                help="Experience requirements and limits"
             )
 
-            # === OTHER MUST HAVE ===
-            st.markdown("**Other Must-Have**")
-            other_must = st.text_input(
-                "Other requirements",
-                key="struct_other_must",
-                placeholder="e.g., cloud experience (AWS/GCP), B2B SaaS background",
-                help="Any other must-have requirements"
+            req_title = st.text_input(
+                "Title",
+                key="struct_title",
+                placeholder="e.g., team lead level or senior engineer, reject executives (VP, Director, CTO)",
+                help="What title level? What to reject?"
             )
 
-            # === OTHER REJECT ===
-            st.markdown("**Other Reject If**")
-            other_reject = st.text_input(
-                "Other reject conditions",
-                key="struct_other_reject",
-                placeholder="e.g., currently unemployed, job hopper (5+ companies in 5 years)",
-                help="Any other conditions that disqualify"
+            req_company = st.text_input(
+                "Company",
+                key="struct_company",
+                placeholder="e.g., must be tech software product company, not consulting or outsourcing",
+                help="What company type? What to reject?"
+            )
+
+            req_leadership = st.text_input(
+                "Leadership",
+                key="struct_leadership",
+                placeholder="e.g., 2+ years leading a team",
+                help="Leadership experience requirements"
+            )
+
+            req_other = st.text_input(
+                "Other Requirements",
+                key="struct_other",
+                placeholder="e.g., must have cloud experience (AWS or GCP), reject if currently unemployed",
+                help="Any other must-haves or reject conditions"
             )
 
             st.markdown("---")
 
-            # === NICE TO HAVE ===
             nice_to_have = st.text_input(
                 "Nice to Have (bonus points)",
                 key="struct_nice_to_have",
-                placeholder="e.g., AWS, 8200/Mamram, Technion/TAU, Wiz/Monday/Snyk",
+                placeholder="e.g., 8200, Mamram, Technion, top companies (Wiz, Monday, Snyk)",
                 help="Not required, adds bonus points"
             )
 
-            # Count active gates
-            active_gates = sum([
-                bool(skills_must.strip()),
-                bool(exp_min.strip() or exp_max.strip()),
-                bool(title_accept.strip() or title_reject.strip()),
-                bool(company_accept.strip() or company_reject.strip()),
-                bool(leadership_min.strip()),
-                bool(other_must.strip()),
-                bool(other_reject.strip()),
+            # Count active fields
+            active_fields = sum([
+                bool(req_skills.strip()),
+                bool(req_experience.strip()),
+                bool(req_title.strip()),
+                bool(req_company.strip()),
+                bool(req_leadership.strip()),
+                bool(req_other.strip()),
             ])
-            st.info(f"**{active_gates}/7** gates active")
+            st.info(f"**{active_fields}/6** requirements set")
 
             # Store for batch processing compatibility
-            st.session_state['structured_must_haves'] = [skills_must] if skills_must.strip() else []
+            st.session_state['structured_must_haves'] = [req_skills] if req_skills.strip() else []
             st.session_state['structured_nice_to_haves'] = [{"text": nice_to_have, "points": 1}] if nice_to_have.strip() else []
-            st.session_state['structured_reject_ifs'] = [title_reject, company_reject, other_reject]
+            st.session_state['structured_reject_ifs'] = []
 
-            # Build job_description with exact format expected by system prompt
-            job_description = f"""=== STRUCTURED REQUIREMENTS ===
+            # Build job_description - simple sections, AI interprets naturally
+            job_description = f"""=== REQUIREMENTS ===
 
-=== SKILLS: MUST HAVE ===
-{skills_must.strip() if skills_must.strip() else '(none specified)'}
+SKILLS: {req_skills.strip() if req_skills.strip() else '(none specified)'}
 
-=== EXPERIENCE: MINIMUM ===
-{exp_min.strip() if exp_min.strip() else '(none specified)'}
+EXPERIENCE: {req_experience.strip() if req_experience.strip() else '(none specified)'}
 
-=== EXPERIENCE: MAXIMUM (reject if more) ===
-{exp_max.strip() if exp_max.strip() else '(none specified)'}
+TITLE: {req_title.strip() if req_title.strip() else '(none specified)'}
 
-=== TITLE: ACCEPT ===
-{title_accept.strip() if title_accept.strip() else '(none specified)'}
+COMPANY: {req_company.strip() if req_company.strip() else '(none specified)'}
 
-=== TITLE: REJECT ===
-{title_reject.strip() if title_reject.strip() else '(none specified)'}
+LEADERSHIP: {req_leadership.strip() if req_leadership.strip() else '(none specified)'}
 
-=== COMPANY: MUST BE ===
-{company_accept.strip() if company_accept.strip() else '(none specified)'}
+OTHER: {req_other.strip() if req_other.strip() else '(none specified)'}
 
-=== COMPANY: REJECT ===
-{company_reject.strip() if company_reject.strip() else '(none specified)'}
-
-=== LEADERSHIP: MINIMUM ===
-{leadership_min.strip() if leadership_min.strip() else '(none specified)'}
-
-=== OTHER: MUST HAVE ===
-{other_must.strip() if other_must.strip() else '(none specified)'}
-
-=== OTHER: REJECT IF ===
-{other_reject.strip() if other_reject.strip() else '(none specified)'}
-
-=== NICE TO HAVE ===
-{nice_to_have.strip() if nice_to_have.strip() else '(none specified)'}"""
+NICE TO HAVE: {nice_to_have.strip() if nice_to_have.strip() else '(none specified)'}"""
 
         else:
             # Classic mode - just JD text area
@@ -9763,9 +9694,11 @@ with tab_database:
                     # Row 2: Current Title, Past Titles
                     fcol3, fcol4 = st.columns(2)
                     with fcol3:
-                        f_current_title = st.text_input("Current Title", key="db_f_current_title", placeholder="backend, devops")
+                        f_current_title = st.text_input("Current Title", key="db_f_current_title", placeholder="backend, devops",
+                                                        help="Partial match on current title only")
                     with fcol4:
-                        f_past_titles = st.text_input("Past Titles", key="db_f_past_titles", placeholder="engineer, developer")
+                        f_past_titles = st.text_input("Past Titles", key="db_f_past_titles", placeholder="backend, team lead",
+                                                      help="Partial match on past titles (uses full-text search)")
 
                     # Row 3: Current Company, Past Companies
                     fcol5, fcol6 = st.columns(2)
@@ -9825,16 +9758,39 @@ with tab_database:
                     has_column_filters = any(af.get(k) for k in ['name', 'current_title', 'past_titles', 'current_company', 'past_companies',
                                                    'location', 'skills', 'schools', 'date_after', 'has_email']) or af.get('freshness', 'All') != 'All'
 
+                    # For past_titles and past_companies, we need full-text search for partial matching
+                    # Build a combined fulltext query if these filters are used
+                    array_field_query_parts = []
+                    if af.get('past_titles'):
+                        # Convert "backend, frontend" to "backend OR frontend"
+                        terms = [t.strip() for t in af['past_titles'].split(',') if t.strip()]
+                        if terms:
+                            array_field_query_parts.append(' OR '.join(terms))
+                    if af.get('past_companies'):
+                        terms = [t.strip() for t in af['past_companies'].split(',') if t.strip()]
+                        if terms:
+                            array_field_query_parts.append(' OR '.join(terms))
+
+                    # Combine with existing fulltext query
+                    if array_field_query_parts:
+                        array_query = ' AND '.join(f"({p})" for p in array_field_query_parts)
+                        if ft and ft.strip():
+                            ft = f"({ft}) AND ({array_query})"
+                        else:
+                            ft = array_query
+                        # Remove these from column filters since we're using fulltext
+                        af = {k: v for k, v in af.items() if k not in ['past_titles', 'past_companies']}
+
                     if ft and ft.strip():
-                        # Full-text search first
+                        # Full-text search (supports partial matching on all fields)
                         from db import search_profiles_fulltext
                         all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=50000)
                         st.caption(f"Full-text search: **{ft}**" + (" + column filters" if has_column_filters else ""))
                     elif has_column_filters:
-                        # Column filters only (server-side) with boolean query support
+                        # Column filters only (server-side)
                         from db import search_profiles_boolean
                         all_profiles = search_profiles_boolean(db_client, af, limit=50000)
-                        st.caption("Server-side filtered search (supports: OR, AND, NOT, \"phrases\")")
+                        st.caption("Server-side filtered search")
                     else:
                         # No filters - load all
                         all_profiles = get_all_profiles(db_client, limit=50000)

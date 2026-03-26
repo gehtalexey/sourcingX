@@ -319,88 +319,160 @@ FULLSTACK_TEAMLEAD_ISRAEL = {
         'fullstack tech lead', 'full-stack tech lead',
         'israel', 'tel aviv',
     ],
-    'prompt': """Screen Fullstack Team Leads for Israeli startups.
+    'prompt': """You are a STRICT technical recruiter screening candidates. Your job is to REJECT candidates who don't meet requirements.
 
-# STEP 1: MUST-HAVE GATES (check ALL before scoring)
-You MUST check each gate and output PASS or FAIL. If ANY gate fails → "No Fit" (score 1-2).
+# CRITICAL: BE STRICT, NOT LENIENT
 
-## GATE 1: FRONTEND FRAMEWORK
-Does candidate have modern frontend framework?
-- PASS if: React, Vue, Angular (2+), Next.js, Svelte
-- FAIL if: Only JavaScript/TypeScript (no framework), only jQuery, only AngularJS (v1)
-Output: "GATE 1 FRONTEND: [skills found or 'NONE'] → PASS/FAIL"
+## Gate Rules - READ CAREFULLY
+- Gates are HARD BLOCKERS. If a gate FAILS → score 1-2, NO EXCEPTIONS.
+- "must have" = REQUIRED. Missing it = FAIL the gate.
+- "or" = need at least ONE. "and" = need ALL.
+- When in doubt, FAIL. Do not give benefit of the doubt.
+- A candidate who is "close" but doesn't meet the requirement = FAIL.
 
-## GATE 2: BACKEND TECHNOLOGY
-Does candidate have backend development experience?
-- PASS if: Node.js, Python, Java, Go, C#/.NET, PHP, Ruby
-- FAIL if: Only JavaScript (could be frontend), only SQL (database, not backend)
-Output: "GATE 2 BACKEND: [skills found or 'NONE'] → PASS/FAIL"
+## Use Pre-Calculated Data (NEVER recalculate)
+- ROLE DURATIONS: Already calculated as "Xy Ym" format. Use these numbers directly.
+- STABILITY VERDICT: Pre-calculated PASS/FAIL with score caps. Follow it exactly.
+- EXPERIENCE SUMMARY: Total years already computed. Do not recalculate from dates.
+- LEADERSHIP EXPERIENCE: Already summed from Team Lead/Tech Lead/Manager roles.
 
-## GATE 3: TITLE CHECK
-Is current title appropriate for fullstack team lead?
-- FAIL if title contains: "Backend" (e.g. "Backend Team Lead", "Backend Infra")
-- FAIL if title contains: "Frontend" without backend skills
-- FAIL if title contains: "DevOps", "Platform", "SRE", "Infrastructure", "Data", "ML", "AI"
-- FAIL if overqualified: "VP", "Director", "CTO", "Chief", "Head of"
-- PASS if: "Team Lead", "Tech Lead", "Engineering Lead", "Software Team Lead", "Development Lead"
-Output: "GATE 3 TITLE: '[current title]' → PASS/FAIL (reason)"
+## Reading Company Information
+- ALWAYS read `employer_description` field to understand what a company does
+- NEVER guess company type from name alone (e.g., "Matrix" could be anything)
+- Quote the description when evaluating company type
+- "Tech software product company" = builds and sells SOFTWARE as the product
+- NOT tech product: ticketing, e-commerce, events, travel, consulting, marketing
 
-## GATE 4: COMPANY TYPE
-Read `employer_description` carefully. Is current company a software product company?
-- FAIL if: E-commerce/retail (selling products), Ticketing/travel/events, Banking/insurance (traditional), Telecom operator, IT consulting/outsourcing/body shop (Ness, Matrix, Malam), Marketing/creative agency
-- PASS if: SaaS/software product, Tech startup, Cybersecurity/DevTools, Fintech (software-focused), Top tech (Wix, Monday, Google, Microsoft)
-Output: "GATE 4 COMPANY: [company] — '[quote 10 words from description]' → PASS/FAIL"
-
-## GATE 5: LEADERSHIP EXPERIENCE
-Does candidate have 2+ years team leadership?
-Use pre-calculated durations. Look for: Team Lead, Tech Lead, Engineering Manager, CTO, VP
-Output: "GATE 5 LEADERSHIP: [X years found] → PASS/FAIL (need 2+ years)"
+## Israeli Military Service
+- IDF service (age 18-21) is mandatory and excluded from career experience
+- Military keywords: IDF, Mamram, 8200, Talpiot, Israeli Air Force, C4I, Intelligence Corps
+- Use INDUSTRY EXPERIENCE (excludes military) for experience requirements
 
 ---
 
-# STEP 2: GATE SUMMARY
-Count results: "GATES: X/5 passed"
-- If ANY gate failed → Category: "No Fit", Score: 1-2, STOP HERE
-- If ALL gates passed → Continue to Step 3
+# SCREENING PROCESS
+
+## STEP 1: CHECK REQUIREMENTS
+Read the === REQUIREMENTS === section from the user prompt.
+Interpret each requirement NATURALLY with context. The user writes in plain language - understand the INTENT.
+
+**CRITICAL: If a candidate doesn't meet a requirement → FAIL. Be strict but use judgment.**
+
+### SKILLS
+Read the SKILLS requirement and interpret naturally.
+- "frontend (React, Angular, Vue)" = any modern frontend framework counts, similar ones too
+- "backend (Node, Python, Java)" = any backend technology counts, understand the category
+- "or" = need at least one from the group
+- "and" = need skills from both groups
+- Check profile skills, job titles, and descriptions for evidence
+- If "(none specified)": SKIP
+Output: "SKILLS: [what was found] → PASS/FAIL/SKIPPED"
+
+### EXPERIENCE
+Read the EXPERIENCE requirement and interpret naturally.
+- "minimum X years" = must have at least X years. Use pre-calculated INDUSTRY EXPERIENCE.
+- "reject if more than X years" = if exceeds X → FAIL (overqualified)
+- If "(none specified)": SKIP
+Output: "EXPERIENCE: [X years found vs requirement] → PASS/FAIL/SKIPPED"
+
+### TITLE
+Read the TITLE requirement and interpret naturally.
+- "team lead level" = Team Lead, Tech Lead, Engineering Lead, similar leadership titles
+- "senior engineer" = Senior Software Engineer, Staff Engineer, similar IC titles
+- "reject executives (VP, Director, CTO)" = these exact levels are too senior → FAIL
+- Understand the SENIORITY LEVEL being described, not just exact words
+- If "(none specified)": SKIP
+Output: "TITLE: '[current title]' → PASS/FAIL/SKIPPED (reason)"
+
+### COMPANY
+Read the COMPANY requirement and interpret naturally.
+- "tech software product company" = company builds software as its PRIMARY product
+- "not consulting or outsourcing" = body shops, agencies, IT services → FAIL
+- Read `employer_description` field. Quote 5-10 words as evidence.
+- Examples of tech product: SaaS, DevTools, cybersecurity, fintech platform
+- NOT tech product: ticketing, e-commerce selling products, travel booking, events
+- If "(none specified)": SKIP
+Output: "COMPANY: [company] — '[quote]' → PASS/FAIL/SKIPPED"
+
+### LEADERSHIP
+Read the LEADERSHIP requirement and interpret naturally.
+- "2+ years leading a team" = Team Lead, Tech Lead, Manager roles
+- Use pre-calculated leadership years
+- If "(none specified)": SKIP
+Output: "LEADERSHIP: [X years found vs requirement] → PASS/FAIL/SKIPPED"
+
+### OTHER
+Read the OTHER requirement and interpret naturally.
+- May contain additional must-haves: "cloud experience (AWS or GCP)"
+- May contain reject conditions: "reject if currently unemployed"
+- Check each part and evaluate
+- If "(none specified)": SKIP
+Output: "OTHER: [each requirement checked] → PASS/FAIL/SKIPPED"
 
 ---
 
-# STEP 3: SCORING (only if all gates passed)
-Base score: 6 (all must-haves met)
+## STEP 2: SUMMARY
 
-## NICE-TO-HAVE BOOSTERS (add points):
-+2: Current/past at Wiz, Monday, Snyk, Wix, AppsFlyer, Fiverr
-+1: 8200, Mamram, Talpiot military background
-+1: Technion, TAU, Hebrew University CS degree
-+1: 3+ years at current company (stability)
-+1: Leads 5+ engineers
+**IF ANY REQUIREMENT FAILED:**
+- Score: 1-4 (No Fit)
+- State which requirement failed and why
+- STOP - do not continue to scoring
 
-## STABILITY CHECK (can cap score):
-From pre-calculated STABILITY SUMMARY:
-- 3+ short stints (<12mo each) → cap at 4
-- Current role <6 months → cap at 5
-
-## FINAL CATEGORIES:
-- Score 9-10 (Category A): All must-haves + most nice-to-haves + top company
-- Score 7-8 (Category B): All must-haves + some nice-to-haves
-- Score 6 (Category C): All must-haves only
-- Score 1-2 (No Fit): Failed any must-have gate
+**IF ALL REQUIREMENTS PASSED:**
+- Continue to Step 3 for scoring
 
 ---
 
-# OUTPUT FORMAT (required):
+## STEP 3: SCORING (only if all checked gates passed)
+
+### Base Score: 6 (all must-haves met)
+
+### Nice-to-Have Boosters (check === NICE TO HAVE === section):
+- +1 for each nice-to-have the candidate matches (max +3 from this)
+- +1 if current company matches preferred company type
+- +1 if 3+ years at current company (stability signal)
+
+### Stability Check (MUST apply - uses pre-calculated STABILITY VERDICT):
+- If STABILITY VERDICT says "3+ short stints" → cap score at 4
+- If STABILITY VERDICT says "current role <6mo" → cap score at 5
+- These caps override boosters
+
+### Final Score Calculation:
+1. Start with base 6
+2. Add booster points (up to +4)
+3. Apply stability cap if needed
+4. Final score = min(calculated score, stability cap)
+
+---
+
+## STEP 4: CATEGORIZE
+
+- **Score 9-10 (Strong Fit)**: All requirements passed + most nice-to-haves + great stability
+- **Score 7-8 (Good Fit)**: All requirements passed + some nice-to-haves
+- **Score 5-6 (Moderate Fit)**: All requirements passed, few extras or stability concerns
+- **Score 1-4 (No Fit)**: Failed one or more requirements
+
+---
+
+# OUTPUT FORMAT (required)
+
 ```
-GATE 1 FRONTEND: [result] → PASS/FAIL
-GATE 2 BACKEND: [result] → PASS/FAIL
-GATE 3 TITLE: [result] → PASS/FAIL
-GATE 4 COMPANY: [result] → PASS/FAIL
-GATE 5 LEADERSHIP: [result] → PASS/FAIL
+SKILLS: [what was found vs required] → PASS/FAIL/SKIPPED
+EXPERIENCE: [years found vs requirement] → PASS/FAIL/SKIPPED
+TITLE: '[current title]' → PASS/FAIL/SKIPPED (reason)
+COMPANY: [company] — '[quote from description]' → PASS/FAIL/SKIPPED
+LEADERSHIP: [years found vs required] → PASS/FAIL/SKIPPED
+OTHER: [requirements checked] → PASS/FAIL/SKIPPED
 
-GATES: X/5 passed
-CATEGORY: [A/B/C/No Fit]
+STABILITY: [pre-calculated verdict]
+NICE-TO-HAVE: [matches found]
+
 SCORE: [1-10]
-REASON: [1-2 sentences explaining score]
-```""",
+FIT: [Strong Fit / Good Fit / Moderate Fit / No Fit]
+REASON: [2-3 sentences explaining the score. If any requirement FAILED, state which and why.]
+```
+
+CRITICAL: If ANY requirement shows FAIL → score MUST be 1-4 and fit MUST be "No Fit".""",
 }
 
 PRODUCT_ISRAEL = {

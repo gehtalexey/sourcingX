@@ -8088,117 +8088,15 @@ with tab_screening:
         else:
             st.caption("General mode: Uses generic evaluation")
 
-        # ===== STEP 2: Requirements Mode =====
-        st.markdown("### 2. Requirements")
-
-        use_structured_mode = st.checkbox(
-            "Use structured requirements (text boxes)",
-            value=True,
-            key="use_structured_checkbox",
-            help="Define must-haves in text boxes. These are added to the user prompt alongside the profile."
+        # ===== STEP 2: Job Description =====
+        st.markdown("### 2. Job Description / Requirements")
+        st.caption("Paste job description or requirements as free text.")
+        job_description = st.text_area(
+            "Job Description / Requirements",
+            height=200,
+            key="jd_screening",
+            placeholder="Paste the job description, must-haves, nice-to-haves, and any specific criteria..."
         )
-
-        if use_structured_mode:
-            # Simple free-text fields - AI interprets naturally with context
-            st.caption("Write requirements naturally. AI will interpret context. Leave empty to skip.")
-
-            req_skills = st.text_input(
-                "Skills",
-                key="struct_skills",
-                placeholder="e.g., must have frontend (React, Angular, Vue) and backend (Node, Python, Java)",
-                help="What skills should the candidate have?"
-            )
-
-            req_experience = st.text_input(
-                "Experience",
-                key="struct_experience",
-                placeholder="e.g., minimum 5 years as software engineer, reject if more than 20 years",
-                help="Experience requirements and limits"
-            )
-
-            req_title = st.text_input(
-                "Title",
-                key="struct_title",
-                placeholder="e.g., team lead level or senior engineer, reject executives (VP, Director, CTO)",
-                help="What title level? What to reject?"
-            )
-
-            req_company = st.text_input(
-                "Company",
-                key="struct_company",
-                placeholder="e.g., must be tech software product company, not consulting or outsourcing",
-                help="What company type? What to reject?"
-            )
-
-            req_leadership = st.text_input(
-                "Leadership",
-                key="struct_leadership",
-                placeholder="e.g., 2+ years leading a team",
-                help="Leadership experience requirements"
-            )
-
-            req_other = st.text_input(
-                "Other Requirements",
-                key="struct_other",
-                placeholder="e.g., must have cloud experience (AWS or GCP), reject if currently unemployed",
-                help="Any other must-haves or reject conditions"
-            )
-
-            st.markdown("---")
-
-            nice_to_have = st.text_input(
-                "Nice to Have (bonus points)",
-                key="struct_nice_to_have",
-                placeholder="e.g., 8200, Mamram, Technion, top companies (Wiz, Monday, Snyk)",
-                help="Not required, adds bonus points"
-            )
-
-            # Count active fields
-            active_fields = sum([
-                bool(req_skills.strip()),
-                bool(req_experience.strip()),
-                bool(req_title.strip()),
-                bool(req_company.strip()),
-                bool(req_leadership.strip()),
-                bool(req_other.strip()),
-            ])
-            st.info(f"**{active_fields}/6** requirements set")
-
-            # Store for batch processing compatibility
-            st.session_state['structured_must_haves'] = [req_skills] if req_skills.strip() else []
-            st.session_state['structured_nice_to_haves'] = [{"text": nice_to_have, "points": 1}] if nice_to_have.strip() else []
-            st.session_state['structured_reject_ifs'] = []
-
-            # Build job_description - simple sections, AI interprets naturally
-            job_description = f"""=== REQUIREMENTS ===
-
-SKILLS: {req_skills.strip() if req_skills.strip() else '(none specified)'}
-
-EXPERIENCE: {req_experience.strip() if req_experience.strip() else '(none specified)'}
-
-TITLE: {req_title.strip() if req_title.strip() else '(none specified)'}
-
-COMPANY: {req_company.strip() if req_company.strip() else '(none specified)'}
-
-LEADERSHIP: {req_leadership.strip() if req_leadership.strip() else '(none specified)'}
-
-OTHER: {req_other.strip() if req_other.strip() else '(none specified)'}
-
-NICE TO HAVE: {nice_to_have.strip() if nice_to_have.strip() else '(none specified)'}"""
-
-        else:
-            # Classic mode - just JD text area
-            st.caption("Paste job description or requirements as free text.")
-            job_description = st.text_area(
-                "Job Description / Requirements",
-                height=150,
-                key="jd_screening",
-                placeholder="Paste the job description, must-haves, and any specific criteria..."
-            )
-            # Clear structured requirements
-            st.session_state['structured_must_haves'] = []
-            st.session_state['structured_nice_to_haves'] = []
-            st.session_state['structured_reject_ifs'] = []
 
         # Screening Configuration
         st.markdown("### Screening Configuration")
@@ -8250,8 +8148,7 @@ NICE TO HAVE: {nice_to_have.strip() if nice_to_have.strip() else '(none specifie
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
         role_display = selected_role if selected_role != 'General (auto)' else 'General'
-        structured_tag = " + Structured" if use_structured_mode else ""
-        st.info(f"Role: **{role_display}{structured_tag}** | Model: **{ai_model}** | Est. cost: **${est_cost:.3f}**")
+        st.info(f"Role: **{role_display}** | Model: **{ai_model}** | Est. cost: **${est_cost:.3f}**")
 
         # Debug: Show available fields and test single profile
         with st.expander("Debug: Profile Fields & Test"):
@@ -8446,11 +8343,6 @@ NICE TO HAVE: {nice_to_have.strip() if nice_to_have.strip() else '(none specifie
                 batch_size = 50  # Tier 3: 50 parallel requests, 50 × 15KB = ~750KB memory
                 current_batch = batch_state.get('current_batch', 0)
                 all_results = batch_state.get('results', [])
-                # Structured mode parameters
-                use_structured = batch_state.get('use_structured', False)
-                batch_must_haves = batch_state.get('must_haves', [])
-                batch_nice_to_haves = batch_state.get('nice_to_haves', [])
-                batch_reject_ifs = batch_state.get('reject_ifs', [])
 
                 # Build raw_data index once (first batch only), reuse for all batches
                 # Performance: Cache raw_index across screening sessions if enriched_df unchanged
@@ -8729,11 +8621,6 @@ NICE TO HAVE: {nice_to_have.strip() if nice_to_have.strip() else '(none specifie
                     'results': initial_results,  # Start with existing results if re-screening selected
                     'is_continue': False,  # Always fresh screening
                     'max_workers': max_workers,
-                    # Structured mode parameters
-                    'use_structured': use_structured_mode,
-                    'must_haves': st.session_state.get('structured_must_haves', []) if use_structured_mode else [],
-                    'nice_to_haves': st.session_state.get('structured_nice_to_haves', []) if use_structured_mode else [],
-                    'reject_ifs': st.session_state.get('structured_reject_ifs', []) if use_structured_mode else [],
                 }
                 st.session_state['screening_batch_progress'] = {
                     'completed': len(initial_results),

@@ -179,6 +179,8 @@ def profile_to_display_row(profile: dict) -> dict:
         connections = display['connections']
         all_schools = display['all_schools']
         all_employers_str = display['all_employers']
+        all_titles_list = display.get('all_titles') or []
+        all_titles_str = ', '.join(all_titles_list) if isinstance(all_titles_list, list) else str(all_titles_list or '')
         num_positions = display['num_positions']
         past_employers = display.get('past_employers') or []
     else:
@@ -203,6 +205,9 @@ def profile_to_display_row(profile: dict) -> dict:
 
         all_schools_list = profile.get('all_schools') or []
         all_schools = ', '.join(all_schools_list) if isinstance(all_schools_list, list) else str(all_schools_list or '')
+
+        all_titles_list = profile.get('all_titles') or []
+        all_titles_str = ', '.join(all_titles_list) if isinstance(all_titles_list, list) else str(all_titles_list or '')
 
     # Past positions as full JSON from Crustdata
     import json
@@ -240,6 +245,7 @@ def profile_to_display_row(profile: dict) -> dict:
         # For filtering (lists)
         'all_schools': all_schools,
         'all_employers': all_employers_str,
+        'all_titles': all_titles_str,
         'num_positions': num_positions,
     }
 

@@ -78,8 +78,10 @@ try:
         ENRICHMENT_REFRESH_MONTHS,
     )
     import prompts
-    import importlib
-    importlib.reload(prompts)  # Force fresh load to avoid stale cache
+    if 'prompts_loaded' not in st.session_state:
+        import importlib
+        importlib.reload(prompts)  # Force fresh load once per session
+        st.session_state['prompts_loaded'] = True
     from prompts import DEFAULT_PROMPTS
     from pb_dedup import filter_results_against_database, update_phantombuster_with_skip_list, get_skip_list_from_database
     HAS_DATABASE = True
@@ -211,6 +213,39 @@ def _load_search_history_module(agent_id: str):
     except Exception:
         return []
 
+@st.cache_data(ttl=120, max_entries=3, show_spinner=False)
+def _cached_not_found_urls(months: int) -> list:
+    """Cached not-found URLs from DB - avoids re-fetching on every enrich tab render."""
+    try:
+        c = _get_db_client()
+        if c:
+            return get_not_found_urls(c, months=months)
+    except Exception:
+        pass
+    return []
+
+@st.cache_data(ttl=60, max_entries=3, show_spinner="Loading profiles...")
+def _cached_all_profiles(limit: int = 50000) -> list:
+    """Cached all-profiles fetch for database tab (no-filter case)."""
+    try:
+        c = _get_db_client()
+        if c:
+            return get_all_profiles(c, limit=limit)
+    except Exception:
+        pass
+    return []
+
+@st.cache_data(ttl=120, max_entries=3, show_spinner=False)
+def _cached_recently_enriched_urls(months: int) -> list:
+    """Cached recently enriched URL list from DB."""
+    try:
+        c = _get_db_client()
+        if c:
+            return get_recently_enriched_urls(c, months=months)
+    except Exception:
+        pass
+    return []
+
 
 def _start_keep_alive():
     """Ping the app's own URL every 10 minutes to prevent Streamlit Cloud from sleeping."""
@@ -233,7 +268,9 @@ def _start_keep_alive():
     t = threading.Thread(target=ping, daemon=True)
     t.start()
 
-_start_keep_alive()
+if 'keep_alive_started' not in st.session_state:
+    _start_keep_alive()
+    st.session_state['keep_alive_started'] = True
 
 
 def get_auth_config():
@@ -2645,6 +2682,7 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 
+@st.cache_data(ttl=300, show_spinner="Loading Google Sheet...")
 def load_sheet_as_df(sheet_url: str, worksheet_name: str = None) -> pd.DataFrame:
     """Load a Google Sheet as a pandas DataFrame."""
     client = get_gspread_client()
@@ -6631,13 +6669,10 @@ with tab_enrich:
                     return None
 
                 # Check for recently enriched profiles in database (within ENRICHMENT_REFRESH_MONTHS)
-                # Fetch recently enriched URLs from DB (no caching - fast enough and avoids stale data issues)
+                # Uses cached DB query (2-min TTL) to avoid re-fetching on every render
                 def _get_enriched_urls_fresh(months):
-                    """Fetch recently enriched URLs from DB."""
-                    db_client = _get_db_client()
-                    if not db_client:
-                        return [], set(), set()
-                    url_list = get_recently_enriched_urls(db_client, months=months)
+                    """Fetch recently enriched URLs from DB (cached)."""
+                    url_list = _cached_recently_enriched_urls(months)
                     url_set = set(normalize_linkedin_url(u) for u in url_list if u)
                     # Extract usernames AND base usernames for better matching
                     # Crustdata often returns different username format than input
@@ -6699,12 +6734,9 @@ with tab_enrich:
                         refresh_months = ENRICHMENT_REFRESH_MONTHS
                         db_client = _get_db_client()
 
-                        # Get URLs marked as not_found
-                        try:
-                            not_found_list = get_not_found_urls(db_client, months=refresh_months)
-                            not_found_urls_db = set(normalize_linkedin_url(u) for u in not_found_list if u)
-                        except Exception as e:
-                            st.warning(f"Could not fetch not_found URLs: {e}")
+                        # Get URLs marked as not_found (cached, 2-min TTL)
+                        not_found_list = _cached_not_found_urls(months=refresh_months)
+                        not_found_urls_db = set(normalize_linkedin_url(u) for u in not_found_list if u)
 
                         # UNIFIED MATCHING: Fetch profiles and build lookup (same as Load from DB)
                         # MEMORY FIX: Exclude raw_data (20-50KB per profile) — not needed for URL matching or display
@@ -9640,8 +9672,8 @@ with tab_database:
                         all_profiles = search_profiles_boolean(db_client, af, limit=50000)
                         st.caption("Server-side filtered search (supports: OR, AND, NOT, \"phrases\")")
                     else:
-                        # No filters - load all
-                        all_profiles = get_all_profiles(db_client, limit=50000)
+                        # No filters - load all (cached, 1-min TTL)
+                        all_profiles = _cached_all_profiles(limit=50000)
                 else:
                     st.info("Enter filters and click **Search** to find profiles")
 
@@ -9830,8 +9862,48 @@ with tab_database:
 
                         df = df[mask]
 
-                    # Apply freshness filter (always, not just with full-text search)
+                    # Apply array column filters client-side (always, since server-side
+                    # PostgREST can't do substring matching on array columns)
                     af = st.session_state.get('db_applied_filters', {})
+                    _arr_filters_map = {'past_titles': 'all_titles', 'past_companies': 'all_employers',
+                                        'skills': 'skills', 'schools': 'all_schools'}
+                    _has_arr_filters = any(af.get(k) for k in _arr_filters_map)
+                    if _has_arr_filters:
+                        # Re-use or define the boolean query helpers
+                        if '_parse_boolean_query_client' not in dir():
+                            from db import _tokenize_boolean_query, _parse_boolean_tokens
+                            def _parse_boolean_query_client(query: str) -> dict:
+                                tokens = _tokenize_boolean_query(query)
+                                return _parse_boolean_tokens(tokens)
+                            def _eval_boolean_ast(ast: dict, text: str) -> bool:
+                                text = text.lower()
+                                node_type = ast.get('type')
+                                if node_type == 'TERM':
+                                    value = ast.get('value', '').lower()
+                                    return value in text if value else True
+                                if node_type == 'NOT':
+                                    return not _eval_boolean_ast(ast['child'], text)
+                                if node_type == 'OR':
+                                    return any(_eval_boolean_ast(c, text) for c in ast['children'])
+                                if node_type == 'AND':
+                                    return all(_eval_boolean_ast(c, text) for c in ast['children'])
+                                return True
+                        _arr_mask = pd.Series(True, index=df.index)
+                        for _fkey, _col in _arr_filters_map.items():
+                            if af.get(_fkey) and _col in df.columns:
+                                _ast = _parse_boolean_query_client(af[_fkey])
+                                def _arr_match(val, ast=_ast):
+                                    if isinstance(val, list):
+                                        joined = ' '.join(str(v) for v in val)
+                                    elif isinstance(val, str):
+                                        joined = val
+                                    else:
+                                        return False
+                                    return _eval_boolean_ast(ast, joined)
+                                _arr_mask &= df[_col].apply(_arr_match)
+                        df = df[_arr_mask]
+
+                    # Apply freshness filter (always, not just with full-text search)
                     freshness = af.get('freshness', 'All')
                     if freshness != 'All' and 'enriched_at' in df.columns:
                         import datetime as dt

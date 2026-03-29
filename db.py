@@ -1300,6 +1300,11 @@ def search_profiles_boolean(client: SupabaseClient, filters: dict, limit: int = 
             if postgrest_filter:
                 and_conditions.append(postgrest_filter)
 
+    # NOTE: Array columns (past_titles, past_companies, skills, schools) are NOT
+    # filtered server-side because PostgREST doesn't support ::text casting inside
+    # or()/and() groups, and the 'ov' operator only does exact element matching.
+    # Array filters are applied client-side in dashboard.py after fetching results.
+
     # Boolean filters
     if filters.get('has_email'):
         params['email'] = 'not.is.null'

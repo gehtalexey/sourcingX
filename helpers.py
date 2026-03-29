@@ -180,7 +180,7 @@ def profile_to_display_row(profile: dict) -> dict:
         all_schools = display['all_schools']
         all_employers_str = display['all_employers']
         all_titles_list = display.get('all_titles') or []
-        all_titles_str = ', '.join(all_titles_list) if isinstance(all_titles_list, list) else str(all_titles_list or '')
+        all_titles_str = ', '.join(s for s in all_titles_list if s) if isinstance(all_titles_list, list) else str(all_titles_list or '')
         num_positions = display['num_positions']
         past_employers = display.get('past_employers') or []
     else:
@@ -196,18 +196,18 @@ def profile_to_display_row(profile: dict) -> dict:
         num_positions = 0
         past_employers = []
 
-        # Skills and employers from DB columns (arrays)
+        # Skills and employers from DB columns (arrays) — filter None values from DB arrays
         skills_list = profile.get('skills') or []
-        skills_str = ', '.join(skills_list[:20]) if isinstance(skills_list, list) else str(skills_list or '')
+        skills_str = ', '.join(s for s in skills_list[:20] if s) if isinstance(skills_list, list) else str(skills_list or '')
 
         all_employers_list = profile.get('all_employers') or []
-        all_employers_str = ', '.join(all_employers_list) if isinstance(all_employers_list, list) else str(all_employers_list or '')
+        all_employers_str = ', '.join(s for s in all_employers_list if s) if isinstance(all_employers_list, list) else str(all_employers_list or '')
 
         all_schools_list = profile.get('all_schools') or []
-        all_schools = ', '.join(all_schools_list) if isinstance(all_schools_list, list) else str(all_schools_list or '')
+        all_schools = ', '.join(s for s in all_schools_list if s) if isinstance(all_schools_list, list) else str(all_schools_list or '')
 
         all_titles_list = profile.get('all_titles') or []
-        all_titles_str = ', '.join(all_titles_list) if isinstance(all_titles_list, list) else str(all_titles_list or '')
+        all_titles_str = ', '.join(s for s in all_titles_list if s) if isinstance(all_titles_list, list) else str(all_titles_list or '')
 
     # Past positions as full JSON from Crustdata
     import json

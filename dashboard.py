@@ -4146,7 +4146,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         try:
             # Retry logic with exponential backoff for rate limits
             max_retries = 5
-            base_delay = 2  # seconds
+            base_delay = 5  # seconds (increased from 2 for better rate limit handling)
             result = None
             last_error = None
 
@@ -8434,10 +8434,12 @@ with tab_screening:
                 batch_ai_model = batch_state.get('ai_model', 'gpt-4o-mini')
                 batch_ai_provider = batch_state.get('ai_provider', 'openai')
                 batch_api_key = batch_state.get('api_key', openai_key)
-                max_workers = batch_state.get('max_workers', 15)
+                max_workers = batch_state.get('max_workers', 10)  # Reduced from 15 to avoid rate limits
                 # Ensure Anthropic uses reduced concurrency even when resuming
                 if batch_ai_provider == "anthropic":
                     max_workers = min(max_workers, 5)
+                elif batch_ai_provider == "openai":
+                    max_workers = min(max_workers, 10)  # Cap OpenAI at 10 concurrent
                 batch_role_prompt = batch_state.get('role_prompt')
                 batch_size = 50  # Tier 3: 50 parallel requests, 50 × 15KB = ~750KB memory
                 current_batch = batch_state.get('current_batch', 0)
@@ -8564,7 +8566,7 @@ with tab_screening:
 
                     # Check if more batches
                     if end_idx < len(profiles_to_screen):
-                        time.sleep(0.5)  # Brief pause
+                        time.sleep(2)  # Pause between batches to avoid rate limits (increased from 0.5s)
                         st.rerun()  # Continue with next batch
                     else:
                         # All done - finalize

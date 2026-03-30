@@ -7231,24 +7231,32 @@ with tab_enrich:
                                                     if url and email and str(email).strip() and str(email).lower() != 'nan':
                                                         original_emails[normalize_linkedin_url(url)] = str(email).strip()
 
+                                        db_errors = []
                                         for profile in successful:
                                             # Use linkedin_flagship_url (canonical) as primary, not encoded linkedin_url
                                             linkedin_url = profile.get('linkedin_flagship_url') or profile.get('linkedin_url')
                                             # Use tracked original URL for matching with loaded data
                                             original_url = profile.get('_original_url')
                                             if linkedin_url:
-                                                update_profile_enrichment(db_client, linkedin_url, profile, original_url=original_url)
-                                                db_saved += 1
+                                                try:
+                                                    update_profile_enrichment(db_client, linkedin_url, profile, original_url=original_url)
+                                                    db_saved += 1
 
-                                                # Save email from original CSV if present
-                                                norm_url = normalize_linkedin_url(linkedin_url)
-                                                norm_orig = normalize_linkedin_url(original_url) if original_url else None
-                                                csv_email = original_emails.get(norm_url) or (original_emails.get(norm_orig) if norm_orig else None)
-                                                if csv_email:
-                                                    try:
-                                                        update_profile_email(db_client, linkedin_url, csv_email, source='csv')
-                                                    except Exception:
-                                                        pass  # Silently continue
+                                                    # Save email from original CSV if present
+                                                    norm_url = normalize_linkedin_url(linkedin_url)
+                                                    norm_orig = normalize_linkedin_url(original_url) if original_url else None
+                                                    csv_email = original_emails.get(norm_url) or (original_emails.get(norm_orig) if norm_orig else None)
+                                                    if csv_email:
+                                                        try:
+                                                            update_profile_email(db_client, linkedin_url, csv_email, source='csv')
+                                                        except Exception:
+                                                            pass  # Silently continue
+                                                except Exception as e:
+                                                    db_errors.append(f"{linkedin_url}: {str(e)[:100]}")
+                                        # Show DB save results immediately
+                                        st.write(f"**DB Save:** {db_saved}/{len(successful)} profiles saved to database")
+                                        if db_errors:
+                                            st.warning(f"DB save errors ({len(db_errors)}): {db_errors[:3]}")
 
                                         # Save failed enrichments so they don't keep showing as "to enrich"
                                         if errors:

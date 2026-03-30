@@ -4132,9 +4132,6 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
     # Get usage tracker (will be shared across threads)
     tracker = get_usage_tracker()
 
-    # Get rate limiter for the provider (shared across all threads)
-    rate_limiter = get_rate_limiter(ai_provider)
-
     def screen_single(profile, index):
         # Check cancellation before starting
         if cancel_flag and cancel_flag.get('cancelled'):
@@ -4150,8 +4147,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         try:
             # Retry logic with exponential backoff for rate limits
             max_retries = 5
-            # Anthropic has stricter rate limits, use longer base delay
-            base_delay = 10 if ai_provider == "anthropic" else 5
+            base_delay = 2  # seconds
             result = None
             last_error = None
 
@@ -4161,13 +4157,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                     if cancel_flag and cancel_flag.get('cancelled'):
                         return None
 
-                    # Wait for rate limiter (blocks if limit reached)
-                    rate_limiter.wait_if_needed()
-
                     result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
-
-                    # Record successful request
-                    rate_limiter.record_request()
                     break  # Success, exit retry loop
 
                 except Exception as e:
@@ -8448,7 +8438,7 @@ with tab_screening:
                 max_workers = batch_state.get('max_workers', 10)  # Reduced from 15 to avoid rate limits
                 # Ensure Anthropic uses reduced concurrency even when resuming
                 if batch_ai_provider == "anthropic":
-                    max_workers = min(max_workers, 3)  # Stricter limit for Anthropic
+                    max_workers = min(max_workers, 5)
                 elif batch_ai_provider == "openai":
                     max_workers = min(max_workers, 10)  # Cap OpenAI at 10 concurrent
                 batch_role_prompt = batch_state.get('role_prompt')
@@ -8577,9 +8567,7 @@ with tab_screening:
 
                     # Check if more batches
                     if end_idx < len(profiles_to_screen):
-                        # Longer pause for Anthropic due to stricter rate limits
-                        batch_delay = 5 if batch_ai_provider == "anthropic" else 2
-                        time.sleep(batch_delay)
+                        time.sleep(0.5)  # Brief pause between batches
                         st.rerun()  # Continue with next batch
                     else:
                         # All done - finalize
@@ -8647,7 +8635,7 @@ with tab_screening:
 
                 # Reduce concurrency for Anthropic (stricter rate limits than OpenAI)
                 if ai_provider == "anthropic":
-                    max_workers = min(max_workers, 3)  # Cap at 3 for Anthropic (very strict limits)
+                    max_workers = min(max_workers, 5)  # Cap at 5 for Anthropic
 
                 # Validate API key before starting
                 if ai_provider == "anthropic":

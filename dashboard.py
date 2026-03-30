@@ -19,6 +19,7 @@ from google.oauth2.service_account import Credentials
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import sys
+from api_helpers import get_rate_limiter
 
 # Platform-specific imports (for sound/notifications on Windows)
 try:
@@ -4131,6 +4132,9 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
     # Get usage tracker (will be shared across threads)
     tracker = get_usage_tracker()
 
+    # Get rate limiter for the provider (shared across all threads)
+    rate_limiter = get_rate_limiter(ai_provider)
+
     def screen_single(profile, index):
         # Check cancellation before starting
         if cancel_flag and cancel_flag.get('cancelled'):
@@ -4140,8 +4144,6 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         _key = api_key or openai_api_key
         if ai_provider == "anthropic":
             client = anthropic.Anthropic(api_key=_key)
-            # Add per-request delay for Anthropic to avoid rate limits
-            time.sleep(0.5 + (index % 3) * 0.3)  # Stagger requests: 0.5s, 0.8s, 1.1s based on index
         else:
             client = OpenAI(api_key=_key)
 
@@ -4159,7 +4161,13 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                     if cancel_flag and cancel_flag.get('cancelled'):
                         return None
 
+                    # Wait for rate limiter (blocks if limit reached)
+                    rate_limiter.wait_if_needed()
+
                     result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
+
+                    # Record successful request
+                    rate_limiter.record_request()
                     break  # Success, exit retry loop
 
                 except Exception as e:

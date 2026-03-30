@@ -307,6 +307,12 @@ class RateLimitConfig:
         """Rate limit config for OpenAI API."""
         return cls(requests_per_minute=500, burst_limit=50)
 
+    @classmethod
+    def for_anthropic(cls) -> 'RateLimitConfig':
+        """Rate limit config for Anthropic API (conservative for Haiku)."""
+        # Anthropic Tier 1: ~50 RPM, we use 40 to be safe
+        return cls(requests_per_minute=40, burst_limit=3)
+
 
 class RateLimiter:
     """
@@ -468,6 +474,7 @@ def get_rate_limiter(provider: str) -> RateLimiter:
                 'salesql': RateLimitConfig.for_salesql,
                 'phantombuster': RateLimitConfig.for_phantombuster,
                 'openai': RateLimitConfig.for_openai,
+                'anthropic': RateLimitConfig.for_anthropic,
             }
             config_fn = config_map.get(provider.lower())
             if config_fn:

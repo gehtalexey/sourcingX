@@ -4140,13 +4140,16 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         _key = api_key or openai_api_key
         if ai_provider == "anthropic":
             client = anthropic.Anthropic(api_key=_key)
+            # Add per-request delay for Anthropic to avoid rate limits
+            time.sleep(0.5 + (index % 3) * 0.3)  # Stagger requests: 0.5s, 0.8s, 1.1s based on index
         else:
             client = OpenAI(api_key=_key)
 
         try:
             # Retry logic with exponential backoff for rate limits
             max_retries = 5
-            base_delay = 5  # seconds (increased from 2 for better rate limit handling)
+            # Anthropic has stricter rate limits, use longer base delay
+            base_delay = 10 if ai_provider == "anthropic" else 5
             result = None
             last_error = None
 
@@ -8437,7 +8440,7 @@ with tab_screening:
                 max_workers = batch_state.get('max_workers', 10)  # Reduced from 15 to avoid rate limits
                 # Ensure Anthropic uses reduced concurrency even when resuming
                 if batch_ai_provider == "anthropic":
-                    max_workers = min(max_workers, 5)
+                    max_workers = min(max_workers, 3)  # Stricter limit for Anthropic
                 elif batch_ai_provider == "openai":
                     max_workers = min(max_workers, 10)  # Cap OpenAI at 10 concurrent
                 batch_role_prompt = batch_state.get('role_prompt')
@@ -8566,7 +8569,9 @@ with tab_screening:
 
                     # Check if more batches
                     if end_idx < len(profiles_to_screen):
-                        time.sleep(2)  # Pause between batches to avoid rate limits (increased from 0.5s)
+                        # Longer pause for Anthropic due to stricter rate limits
+                        batch_delay = 5 if batch_ai_provider == "anthropic" else 2
+                        time.sleep(batch_delay)
                         st.rerun()  # Continue with next batch
                     else:
                         # All done - finalize
@@ -8632,9 +8637,9 @@ with tab_screening:
                 max_workers = _screening_session_start()
                 st.session_state['_screening_active'] = True
 
-                # Reduce concurrency for Anthropic (lower rate limits than OpenAI)
+                # Reduce concurrency for Anthropic (stricter rate limits than OpenAI)
                 if ai_provider == "anthropic":
-                    max_workers = min(max_workers, 5)  # Cap at 5 for Anthropic
+                    max_workers = min(max_workers, 3)  # Cap at 3 for Anthropic (very strict limits)
 
                 # Validate API key before starting
                 if ai_provider == "anthropic":

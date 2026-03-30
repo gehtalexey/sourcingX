@@ -88,6 +88,18 @@ try:
 except ImportError:
     HAS_DATABASE = False
 
+# Structured screening module
+try:
+    from screening_prompt_builder import (
+        STRUCTURED_SYSTEM_PROMPT,
+        build_user_prompt,
+        screen_with_structured_prompt,
+        screen_batch_structured,
+    )
+    HAS_STRUCTURED_SCREENING = True
+except ImportError:
+    HAS_STRUCTURED_SCREENING = False
+
 # Usage tracking module
 try:
     from usage_tracker import UsageTracker, calculate_openai_cost
@@ -4714,7 +4726,7 @@ with tab_search:
                         st.session_state['crustdata_search_total'] = 0
                         st.info("No profiles found matching your criteria. Try adjusting your filters.")
 
-                    _get_crustdata_credits.clear()
+                    _get_crustdata_credits_cached.clear()
 
                 except Exception as e:
                     st.error(f"Search failed: {str(e)}")
@@ -4899,7 +4911,7 @@ with tab_search:
                                     st.session_state['crustdata_search_selected'] = current_selected + new_indices
 
                                     st.success(f"Loaded {len(new_profiles)} more profiles")
-                                    _get_crustdata_credits.clear()
+                                    _get_crustdata_credits_cached.clear()
                                     st.rerun()
                                 else:
                                     st.info("No more results available.")
@@ -8076,47 +8088,47 @@ with tab_screening:
 
         num_profiles = len(profiles_df)
 
-        # AI Screening Requirements Input
-        st.markdown("### AI Screening Requirements")
-        job_description = st.text_area(
-            "Paste the screening requirements",
-            height=150,
-            key="jd_screening",
-            placeholder="Paste the job description, must-haves, and any specific criteria for AI screening..."
-        )
+        # Screening Mode Toggle
+        # ===== STEP 1: Role Selection (system prompt) =====
+        st.markdown("### 1. Select Role")
 
-        # Role-specific prompt selection (like having different Custom GPTs)
-        st.markdown("### Role Prompt")
-
-        # Build role options from prompts.py
         role_options = ['General (auto)']
-        role_map = {'General (auto)': None}  # Maps display name to prompt
+        role_map = {'General (auto)': None}
         try:
             for role_key, role_data in DEFAULT_PROMPTS.items():
                 name = role_data.get('name', role_key.title())
                 role_options.append(name)
                 role_map[name] = role_data.get('prompt')
         except:
-            pass  # If prompts not available, just use General
+            pass
 
         selected_role = st.selectbox(
-            "Select role type",
+            "Role type (determines system prompt)",
             options=role_options,
             index=0,
             key="screening_role_select",
-            help="Like having different Custom GPTs for each role. Saves time - no need to paste full instructions in JD."
+            help="Each role has specific evaluation criteria. The role prompt becomes the system prompt."
         )
 
-        # Get the role prompt
         role_prompt = role_map.get(selected_role)
         st.session_state['active_role_prompt'] = role_prompt
         st.session_state['active_role_name'] = selected_role
 
         if role_prompt:
-            with st.expander(f"View {selected_role} prompt ({len(role_prompt)} chars)"):
+            with st.expander(f"View {selected_role} system prompt ({len(role_prompt)} chars)"):
                 st.code(role_prompt, language=None)
         else:
-            st.caption("General mode: AI uses your JD as the full instructions")
+            st.caption("General mode: Uses generic evaluation")
+
+        # ===== STEP 2: Job Description =====
+        st.markdown("### 2. Job Description / Requirements")
+        st.caption("Paste job description or requirements as free text.")
+        job_description = st.text_area(
+            "Job Description / Requirements",
+            height=200,
+            key="jd_screening",
+            placeholder="Paste the job description, must-haves, nice-to-haves, and any specific criteria..."
+        )
 
         # Screening Configuration
         st.markdown("### Screening Configuration")
@@ -8423,6 +8435,9 @@ with tab_screening:
                                     batch_progress['partial'] += 1
 
                         # Screen this batch - use dynamic workers (scales with concurrent users)
+                        # Both structured and classic mode use the same screening function
+                        # Structured mode: job_desc contains text box requirements, role_prompt is system prompt
+                        # Classic mode: job_desc is free-form JD text, role_prompt is system prompt
                         batch_results = screen_profiles_batch(
                             batch_profiles,
                             job_desc,
@@ -9534,7 +9549,6 @@ with tab_screening:
                                 st.session_state['email_generation_results'] = []
                                 st.session_state['email_test_approved'] = False
                                 st.rerun()
-
 # ========== TAB 6: Database ==========
 with tab_database:
     st.markdown("### Profile Database")
@@ -9599,9 +9613,11 @@ with tab_database:
                     # Row 2: Current Title, Past Titles
                     fcol3, fcol4 = st.columns(2)
                     with fcol3:
-                        f_current_title = st.text_input("Current Title", key="db_f_current_title", placeholder="backend, devops")
+                        f_current_title = st.text_input("Current Title", key="db_f_current_title", placeholder="backend, devops",
+                                                        help="Partial match on current title only")
                     with fcol4:
-                        f_past_titles = st.text_input("Past Titles", key="db_f_past_titles", placeholder="engineer, developer")
+                        f_past_titles = st.text_input("Past Titles", key="db_f_past_titles", placeholder="backend, team lead",
+                                                      help="Partial match on past titles (uses full-text search)")
 
                     # Row 3: Current Company, Past Companies
                     fcol5, fcol6 = st.columns(2)
@@ -9661,16 +9677,39 @@ with tab_database:
                     has_column_filters = any(af.get(k) for k in ['name', 'current_title', 'past_titles', 'current_company', 'past_companies',
                                                    'location', 'skills', 'schools', 'date_after', 'has_email']) or af.get('freshness', 'All') != 'All'
 
+                    # For past_titles and past_companies, we need full-text search for partial matching
+                    # Build a combined fulltext query if these filters are used
+                    array_field_query_parts = []
+                    if af.get('past_titles'):
+                        # Convert "backend, frontend" to "backend OR frontend"
+                        terms = [t.strip() for t in af['past_titles'].split(',') if t.strip()]
+                        if terms:
+                            array_field_query_parts.append(' OR '.join(terms))
+                    if af.get('past_companies'):
+                        terms = [t.strip() for t in af['past_companies'].split(',') if t.strip()]
+                        if terms:
+                            array_field_query_parts.append(' OR '.join(terms))
+
+                    # Combine with existing fulltext query
+                    if array_field_query_parts:
+                        array_query = ' AND '.join(f"({p})" for p in array_field_query_parts)
+                        if ft and ft.strip():
+                            ft = f"({ft}) AND ({array_query})"
+                        else:
+                            ft = array_query
+                        # Remove these from column filters since we're using fulltext
+                        af = {k: v for k, v in af.items() if k not in ['past_titles', 'past_companies']}
+
                     if ft and ft.strip():
-                        # Full-text search first
+                        # Full-text search (supports partial matching on all fields)
                         from db import search_profiles_fulltext
                         all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=50000)
                         st.caption(f"Full-text search: **{ft}**" + (" + column filters" if has_column_filters else ""))
                     elif has_column_filters:
-                        # Column filters only (server-side) with boolean query support
+                        # Column filters only (server-side)
                         from db import search_profiles_boolean
                         all_profiles = search_profiles_boolean(db_client, af, limit=50000)
-                        st.caption("Server-side filtered search (supports: OR, AND, NOT, \"phrases\")")
+                        st.caption("Server-side filtered search")
                     else:
                         # No filters - load all (cached, 1-min TTL)
                         all_profiles = _cached_all_profiles(limit=50000)

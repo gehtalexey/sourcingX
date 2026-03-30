@@ -2707,7 +2707,6 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 
-@st.cache_data(ttl=300, show_spinner="Loading Google Sheet...")
 @st.cache_data(ttl=600, max_entries=10, show_spinner="Loading sheet...")
 def load_sheet_as_df(sheet_url: str, worksheet_name: str = None) -> pd.DataFrame:
     """Load a Google Sheet as a pandas DataFrame.

@@ -4177,10 +4177,12 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                     if is_rate_limit and attempt < max_retries - 1:
                         # Exponential backoff: 2, 4, 8, 16, 32 seconds
                         delay = base_delay * (2 ** attempt)
+                        print(f"[Screening] Rate limit on profile {index}, attempt {attempt+1}/{max_retries}, waiting {delay}s...")
                         time.sleep(delay)
                         continue
                     else:
                         # Not a rate limit error or max retries reached, re-raise
+                        print(f"[Screening] FAILED profile {index} after {attempt+1} attempts: {str(e)[:100]}")
                         raise
 
             if result is None:
@@ -8204,21 +8206,18 @@ with tab_screening:
         with col_mode:
             screening_mode = "Detailed"  # Always use detailed mode for accurate scoring
         with col_model:
-            model_options = ["gpt-4o-mini (fast)", "gpt-4o (best)", "Claude Haiku (balanced)"]
+            model_options = ["gpt-4o-mini (fast)", "Claude Haiku (balanced)"]
             ai_model_choice = st.radio(
                 "AI Model",
                 options=model_options,
                 index=0,
                 key="ai_model_choice",
-                help="gpt-4o-mini: ~$0.001 | gpt-4o: ~$0.01 | Haiku: ~$0.005 per profile"
+                help="gpt-4o-mini: ~$0.001 | Haiku: ~$0.005 per profile"
             )
         # Parse model choice into model name and provider
         if "Haiku" in ai_model_choice:
             ai_model = "claude-haiku-4-5-20251001"
             ai_provider = "anthropic"
-        elif "gpt-4o (best)" in ai_model_choice:
-            ai_model = "gpt-4o"
-            ai_provider = "openai"
         else:
             ai_model = "gpt-4o-mini"
             ai_provider = "openai"
@@ -8227,12 +8226,9 @@ with tab_screening:
         if ai_provider == "anthropic":
             model_input_cost = 0.80   # Haiku: $0.80/1M input tokens
             model_output_cost = 4.00  # Haiku: $4.00/1M output tokens
-        elif ai_model == "gpt-4o-mini":
+        else:  # gpt-4o-mini
             model_input_cost = 0.15   # gpt-4o-mini: $0.15/1M input tokens
             model_output_cost = 0.60  # gpt-4o-mini: $0.60/1M output tokens
-        else:  # gpt-4o
-            model_input_cost = 2.50   # gpt-4o: $2.50/1M input tokens
-            model_output_cost = 10.00 # gpt-4o: $10.00/1M output tokens
         output_tokens = 150  # ~150 tokens for score + fit + summary
         st.caption("Detailed mode: score, fit, and summary with experience calc")
 
@@ -9134,9 +9130,9 @@ with tab_screening:
                     with email_col2:
                         email_model = st.selectbox(
                             "Model",
-                            options=["gpt-4o-mini", "gpt-4o", "Claude Haiku"],
+                            options=["gpt-4o-mini", "Claude Haiku"],
                             index=0,
-                            help="gpt-4o-mini: ~$0.0004 | gpt-4o: ~$0.008 | Haiku: ~$0.002 per profile",
+                            help="gpt-4o-mini: ~$0.0004 | Haiku: ~$0.002 per profile",
                             key="email_model"
                         )
                         # Parse email model choice

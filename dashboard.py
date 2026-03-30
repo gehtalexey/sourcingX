@@ -1069,6 +1069,19 @@ def get_usage_tracker():
     return None
 
 
+@st.cache_data(ttl=120, max_entries=3, show_spinner="Loading profiles...")
+def _get_cached_all_profiles(_db_client_id: str, limit: int = 500) -> list:
+    """Cached wrapper for get_all_profiles to reduce database queries.
+
+    Cached for 2 minutes to balance freshness with performance.
+    The _db_client_id is used as a cache key differentiator (underscore prefix makes it unhashable-safe).
+    """
+    db_client = _get_db_client()
+    if not db_client:
+        return []
+    return get_all_profiles(db_client, limit=limit)
+
+
 # ===== SalesQL Email Enrichment =====
 # Rate limiting: 180 requests/minute, 5000/day
 SALESQL_REQUESTS_PER_MINUTE = 180
@@ -2695,8 +2708,12 @@ def get_gspread_client():
 
 
 @st.cache_data(ttl=300, show_spinner="Loading Google Sheet...")
+@st.cache_data(ttl=600, max_entries=10, show_spinner="Loading sheet...")
 def load_sheet_as_df(sheet_url: str, worksheet_name: str = None) -> pd.DataFrame:
-    """Load a Google Sheet as a pandas DataFrame."""
+    """Load a Google Sheet as a pandas DataFrame.
+
+    Cached for 10 minutes to reduce Google Sheets API calls during filtering.
+    """
     client = get_gspread_client()
     if not client:
         return None
@@ -8266,6 +8283,16 @@ with tab_screening:
                         if st.session_state.get('_screening_active'):
                             _screening_session_end()
                             st.session_state['_screening_active'] = False
+
+                        # MEMORY CLEANUP: Clear heavy intermediate state on cancellation
+                        # Same cleanup as completion to prevent memory bloat
+                        if 'screening_batch_state' in st.session_state:
+                            del st.session_state['screening_batch_state']
+                        if 'enriched_profiles_raw' in st.session_state:
+                            del st.session_state['enriched_profiles_raw']
+                        import gc
+                        gc.collect()
+
                         save_session_state()  # Save partial results for restore
                         st.warning(f"Screening cancelled! {len(partial_results)} profiles were completed and saved.")
                         st.rerun()

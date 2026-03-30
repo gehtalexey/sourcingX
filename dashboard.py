@@ -4385,8 +4385,8 @@ _profile_count = get_profile_count()
 st.info(f"📊 **{_profile_count}** profiles loaded" if _profile_count else "No profiles loaded — start from the Load tab")
 
 # Create tabs
-tab_search, tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_database, tab_usage = st.tabs([
-    "0. Search", "1. Load", "2. Filter", "3. Enrich", "4. Filter+", "5. AI Screen", "6. Database", "7. Usage"
+tab_search, tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_emails, tab_database, tab_usage = st.tabs([
+    "0. Search", "1. Load", "2. Filter", "3. Enrich", "4. Filter+", "5. AI Screen", "6. Emails", "7. Database", "8. Usage"
 ])
 
 # ========== TAB 0: Search (Crustdata People DB) ==========
@@ -9104,518 +9104,529 @@ with tab_screening:
                         disabled=len(partial_list) == 0
                     )
 
-            # ===== Email Generation Section =====
-            if HAS_EMAIL_GENERATOR:
-                st.markdown("---")
-                st.markdown("### Generate Email Openers")
-                st.caption("Create personalized subject lines and email openers for your top candidates")
+# ========== TAB 6: Emails ==========
+with tab_emails:
+    st.markdown("### Generate Email Openers")
+    
+    # Get screening results from session state
+    screening_results = st.session_state.get('screening_results', [])
+    
+    if not HAS_EMAIL_GENERATOR:
+        st.warning("Email generator module not available.")
+    elif not screening_results:
+        st.info("Run AI Screening first to generate emails for screened profiles.")
+    else:
+        st.markdown("### Generate Email Openers")
+        st.caption("Create personalized subject lines and email openers for your top candidates")
 
-                # Check if we have profiles with raw data
-                profiles_with_raw = [r for r in screening_results if r.get('linkedin_url')]
-                if not profiles_with_raw:
-                    st.warning("No profiles with LinkedIn URLs found in results.")
+        # Check if we have profiles with raw data
+        profiles_with_raw = [r for r in screening_results if r.get('linkedin_url')]
+        if not profiles_with_raw:
+            st.warning("No profiles with LinkedIn URLs found in results.")
+        else:
+            # Settings
+            email_col1, email_col2, email_col3, email_col4, email_col5 = st.columns(5)
+
+            with email_col1:
+                email_generate_type = st.selectbox(
+                    "Generate",
+                    options=["both", "subject_only", "opener_only"],
+                    format_func=lambda x: {"both": "Both", "subject_only": "Subject Only", "opener_only": "Opener Only"}[x],
+                    index=0,
+                    key="email_generate_type"
+                )
+
+            with email_col2:
+                email_model = st.selectbox(
+                    "Model",
+                    options=["gpt-4o-mini", "Claude Haiku"],
+                    index=0,
+                    help="gpt-4o-mini: ~$0.0004 | Haiku: ~$0.002 per profile",
+                    key="email_model"
+                )
+                # Parse email model choice
+                if email_model == "Claude Haiku":
+                    email_ai_model = "claude-haiku-4-5-20251001"
+                    email_ai_provider = "anthropic"
                 else:
-                    # Settings
-                    email_col1, email_col2, email_col3, email_col4, email_col5 = st.columns(5)
+                    email_ai_model = email_model
+                    email_ai_provider = "openai"
 
-                    with email_col1:
-                        email_generate_type = st.selectbox(
-                            "Generate",
-                            options=["both", "subject_only", "opener_only"],
-                            format_func=lambda x: {"both": "Both", "subject_only": "Subject Only", "opener_only": "Opener Only"}[x],
-                            index=0,
-                            key="email_generate_type"
-                        )
+            with email_col3:
+                email_sender = st.selectbox(
+                    "Sender Persona",
+                    options=list(SENDER_PERSONAS.keys()),
+                    format_func=lambda x: x.replace('_', ' ').title(),
+                    index=0,
+                    key="email_sender"
+                )
 
-                    with email_col2:
-                        email_model = st.selectbox(
-                            "Model",
-                            options=["gpt-4o-mini", "Claude Haiku"],
-                            index=0,
-                            help="gpt-4o-mini: ~$0.0004 | Haiku: ~$0.002 per profile",
-                            key="email_model"
-                        )
-                        # Parse email model choice
-                        if email_model == "Claude Haiku":
-                            email_ai_model = "claude-haiku-4-5-20251001"
-                            email_ai_provider = "anthropic"
-                        else:
-                            email_ai_model = email_model
-                            email_ai_provider = "openai"
+            with email_col4:
+                email_tone = st.selectbox(
+                    "Tone",
+                    options=list(TONE_DESCRIPTIONS.keys()),
+                    format_func=lambda x: x.title(),
+                    index=1,  # Default to 'professional'
+                    key="email_tone"
+                )
 
-                    with email_col3:
-                        email_sender = st.selectbox(
-                            "Sender Persona",
-                            options=list(SENDER_PERSONAS.keys()),
-                            format_func=lambda x: x.replace('_', ' ').title(),
-                            index=0,
-                            key="email_sender"
-                        )
+            with email_col5:
+                email_length = st.selectbox(
+                    "Opener Length",
+                    options=list(LENGTH_DESCRIPTIONS.keys()),
+                    format_func=lambda x: x.title(),
+                    index=1,  # Default to 'medium'
+                    key="email_length"
+                )
 
-                    with email_col4:
-                        email_tone = st.selectbox(
-                            "Tone",
-                            options=list(TONE_DESCRIPTIONS.keys()),
-                            format_func=lambda x: x.title(),
-                            index=1,  # Default to 'professional'
-                            key="email_tone"
-                        )
+            # Second row: position, company context, fit filter
+            email_row2_col0, email_row2_col1, email_row2_col2 = st.columns([1, 2, 1])
 
-                    with email_col5:
-                        email_length = st.selectbox(
-                            "Opener Length",
-                            options=list(LENGTH_DESCRIPTIONS.keys()),
-                            format_func=lambda x: x.title(),
-                            index=1,  # Default to 'medium'
-                            key="email_length"
-                        )
+            with email_row2_col0:
+                email_position = st.text_input(
+                    "Position",
+                    placeholder="E.g., DevOps Engineer, Sales Manager, Product Lead",
+                    key="email_position"
+                )
 
-                    # Second row: position, company context, fit filter
-                    email_row2_col0, email_row2_col1, email_row2_col2 = st.columns([1, 2, 1])
+            with email_row2_col1:
+                email_company_context = st.text_input(
+                    "Company & Product",
+                    placeholder="E.g., Orca Security — agentless cloud security platform, competitor to Wiz",
+                    key="email_company_context"
+                )
 
-                    with email_row2_col0:
-                        email_position = st.text_input(
-                            "Position",
-                            placeholder="E.g., DevOps Engineer, Sales Manager, Product Lead",
-                            key="email_position"
-                        )
+            with email_row2_col2:
+                email_fit_filter = st.multiselect(
+                    "Include Fit Levels",
+                    options=["Strong Fit", "Good Fit", "Partial Fit"],
+                    default=["Strong Fit", "Good Fit"],
+                    key="email_fit_filter"
+                )
 
-                    with email_row2_col1:
-                        email_company_context = st.text_input(
-                            "Company & Product",
-                            placeholder="E.g., Orca Security — agentless cloud security platform, competitor to Wiz",
-                            key="email_company_context"
-                        )
+            # Third row: custom instruction (optional)
+            email_custom_instruction = st.text_input(
+                "Custom Instruction (optional)",
+                placeholder="E.g., 'Mention we just raised $50M' or 'Focus on cloud experience, skip education angle'",
+                key="email_custom_instruction"
+            )
 
-                    with email_row2_col2:
-                        email_fit_filter = st.multiselect(
-                            "Include Fit Levels",
-                            options=["Strong Fit", "Good Fit", "Partial Fit"],
-                            default=["Strong Fit", "Good Fit"],
-                            key="email_fit_filter"
-                        )
+            # Combine company context + custom instruction for the AI
+            email_full_instruction = ""
+            if email_company_context:
+                email_full_instruction += f"COMPANY CONTEXT: {email_company_context}"
+            if email_custom_instruction:
+                if email_full_instruction:
+                    email_full_instruction += f"\n{email_custom_instruction}"
+                else:
+                    email_full_instruction = email_custom_instruction
 
-                    # Third row: custom instruction (optional)
-                    email_custom_instruction = st.text_input(
-                        "Custom Instruction (optional)",
-                        placeholder="E.g., 'Mention we just raised $50M' or 'Focus on cloud experience, skip education angle'",
-                        key="email_custom_instruction"
-                    )
+            # Filter profiles by selected fit levels
+            filtered_profiles = [r for r in profiles_with_raw if r.get('fit') in email_fit_filter]
 
-                    # Combine company context + custom instruction for the AI
-                    email_full_instruction = ""
-                    if email_company_context:
-                        email_full_instruction += f"COMPANY CONTEXT: {email_company_context}"
-                    if email_custom_instruction:
-                        if email_full_instruction:
-                            email_full_instruction += f"\n{email_custom_instruction}"
-                        else:
-                            email_full_instruction = email_custom_instruction
+            # Test batch size and cost estimate
+            email_test_col1, email_test_col2, email_test_col3 = st.columns([1, 1, 2])
 
-                    # Filter profiles by selected fit levels
-                    filtered_profiles = [r for r in profiles_with_raw if r.get('fit') in email_fit_filter]
+            with email_test_col1:
+                test_batch_size = st.number_input(
+                    "Test Batch Size",
+                    min_value=1,
+                    max_value=min(20, len(filtered_profiles)) if filtered_profiles else 1,
+                    value=min(5, len(filtered_profiles)) if filtered_profiles else 1,
+                    key="email_test_batch_size"
+                )
 
-                    # Test batch size and cost estimate
-                    email_test_col1, email_test_col2, email_test_col3 = st.columns([1, 1, 2])
+            with email_test_col2:
+                if filtered_profiles:
+                    test_cost = estimate_email_cost(test_batch_size, email_ai_model)
+                    full_cost = estimate_email_cost(len(filtered_profiles), email_ai_model)
+                    st.metric("Est. Cost", f"Test: ${test_cost:.4f} | All: ${full_cost:.3f}")
+                else:
+                    st.metric("Profiles Selected", "0")
 
-                    with email_test_col1:
-                        test_batch_size = st.number_input(
-                            "Test Batch Size",
-                            min_value=1,
-                            max_value=min(20, len(filtered_profiles)) if filtered_profiles else 1,
-                            value=min(5, len(filtered_profiles)) if filtered_profiles else 1,
-                            key="email_test_batch_size"
-                        )
+            with email_test_col3:
+                st.info(f"**{len(filtered_profiles)}** profiles selected ({', '.join(email_fit_filter)})")
 
-                    with email_test_col2:
-                        if filtered_profiles:
-                            test_cost = estimate_email_cost(test_batch_size, email_ai_model)
-                            full_cost = estimate_email_cost(len(filtered_profiles), email_ai_model)
-                            st.metric("Est. Cost", f"Test: ${test_cost:.4f} | All: ${full_cost:.3f}")
-                        else:
-                            st.metric("Profiles Selected", "0")
+            # Initialize session state for email results
+            if 'email_generation_results' not in st.session_state:
+                st.session_state['email_generation_results'] = []
+            if 'email_test_approved' not in st.session_state:
+                st.session_state['email_test_approved'] = False
 
-                    with email_test_col3:
-                        st.info(f"**{len(filtered_profiles)}** profiles selected ({', '.join(email_fit_filter)})")
+            # Action buttons
+            email_btn_col1, email_btn_col2, email_btn_col3 = st.columns([1, 1, 2])
 
-                    # Initialize session state for email results
-                    if 'email_generation_results' not in st.session_state:
-                        st.session_state['email_generation_results'] = []
-                    if 'email_test_approved' not in st.session_state:
-                        st.session_state['email_test_approved'] = False
+            with email_btn_col1:
+                generate_test_btn = st.button(
+                    f"Generate Test ({test_batch_size})",
+                    disabled=len(filtered_profiles) == 0,
+                    key="email_generate_test"
+                )
 
-                    # Action buttons
-                    email_btn_col1, email_btn_col2, email_btn_col3 = st.columns([1, 1, 2])
+            with email_btn_col2:
+                generate_all_btn = st.button(
+                    f"Generate All ({len(filtered_profiles)})",
+                    disabled=len(filtered_profiles) == 0 or not st.session_state.get('email_test_approved'),
+                    type="primary" if st.session_state.get('email_test_approved') else "secondary",
+                    key="email_generate_all"
+                )
 
-                    with email_btn_col1:
-                        generate_test_btn = st.button(
-                            f"Generate Test ({test_batch_size})",
-                            disabled=len(filtered_profiles) == 0,
-                            key="email_generate_test"
-                        )
+            with email_btn_col3:
+                if not st.session_state.get('email_test_approved'):
+                    st.caption("Run a test batch first to unlock 'Generate All'")
 
-                    with email_btn_col2:
-                        generate_all_btn = st.button(
-                            f"Generate All ({len(filtered_profiles)})",
-                            disabled=len(filtered_profiles) == 0 or not st.session_state.get('email_test_approved'),
-                            type="primary" if st.session_state.get('email_test_approved') else "secondary",
-                            key="email_generate_all"
-                        )
+            # Get OpenAI API key (use load_openai_key which handles st.secrets for cloud)
+            openai_key = st.session_state.get('openai_api_key') or os.environ.get('OPENAI_API_KEY') or load_openai_key()
 
-                    with email_btn_col3:
-                        if not st.session_state.get('email_test_approved'):
-                            st.caption("Run a test batch first to unlock 'Generate All'")
+            # Generate test batch
+            if generate_test_btn:
+                if not openai_key:
+                    st.error("OpenAI API key is required. Set it in Streamlit secrets (openai_api_key), config.json, or environment variable OPENAI_API_KEY.")
+                elif not filtered_profiles:
+                    st.warning("No profiles selected. Check that profiles have matching fit levels.")
 
-                    # Get OpenAI API key (use load_openai_key which handles st.secrets for cloud)
-                    openai_key = st.session_state.get('openai_api_key') or os.environ.get('OPENAI_API_KEY') or load_openai_key()
+            if generate_test_btn and openai_key and filtered_profiles:
+                test_profiles = filtered_profiles[:test_batch_size]
 
-                    # Generate test batch
-                    if generate_test_btn:
-                        if not openai_key:
-                            st.error("OpenAI API key is required. Set it in Streamlit secrets (openai_api_key), config.json, or environment variable OPENAI_API_KEY.")
-                        elif not filtered_profiles:
-                            st.warning("No profiles selected. Check that profiles have matching fit levels.")
-
-                    if generate_test_btn and openai_key and filtered_profiles:
-                        test_profiles = filtered_profiles[:test_batch_size]
-
-                        # Need to load raw_data for profiles
-                        profiles_for_email = []
-                        raw_data_loaded = 0
-                        raw_data_failed = []
-                        for p in test_profiles:
-                            profile_data = {'name': p.get('name'), 'linkedin_url': p.get('linkedin_url'),
-                                           'current_title': p.get('current_title'), 'current_company': p.get('current_company'),
-                                           'email': p.get('email')}
-                            # Try to get raw_data from database
-                            if HAS_DATABASE:
-                                try:
-                                    db_client = _get_db_client()
-                                    if db_client and p.get('linkedin_url'):
-                                        db_profile = get_profile(db_client, p['linkedin_url'])
-                                        if db_profile and db_profile.get('raw_data'):
-                                            profile_data['raw_data'] = db_profile['raw_data']
-                                            raw_data_loaded += 1
-                                        else:
-                                            raw_data_failed.append(p.get('name', p.get('linkedin_url', 'Unknown')))
-                                except Exception as e:
-                                    raw_data_failed.append(f"{p.get('name', 'Unknown')}: {str(e)[:50]}")
-                            profiles_for_email.append(profile_data)
-
-                        if raw_data_failed:
-                            st.warning(f"Could not load raw_data for {len(raw_data_failed)}/{len(test_profiles)} profiles. These will return empty emails.")
-
-                        with st.status(f"Generating test batch ({len(profiles_for_email)} profiles)...", expanded=True) as status:
-                            progress_bar = st.progress(0)
-                            results_placeholder = st.empty()
-
-                            def update_progress(completed, total, result):
-                                progress_bar.progress(completed / total)
-                                results_placeholder.text(f"Completed {completed}/{total}")
-
-                            try:
-                                email_api_key = anthropic_key if email_ai_provider == "anthropic" else openai_key
-                                if not email_api_key:
-                                    raise ValueError(f"{'Anthropic' if email_ai_provider == 'anthropic' else 'OpenAI'} API key not configured")
-                                results = generate_emails_batch(
-                                    profiles_for_email,
-                                    email_api_key,
-                                    sender=email_sender,
-                                    tone=email_tone,
-                                    length=email_length,
-                                    custom_instruction=email_full_instruction if email_full_instruction else None,
-                                    ai_model=email_ai_model,
-                                    max_workers=5,
-                                    progress_callback=update_progress,
-                                    generate_type=email_generate_type,
-                                    position=email_position if email_position else None,
-                                    ai_provider=email_ai_provider
-                                )
-
-                                st.session_state['email_generation_results'] = results
-                                st.session_state['email_test_approved'] = True
-
-                                # Show angle distribution
-                                dist = get_angle_distribution(results)
-                                status.update(label=f"Test complete! {len(results)} emails generated", state="complete")
-
-                            except Exception as e:
-                                st.error(f"Error generating emails: {str(e)}")
-                                status.update(label="Error", state="error")
-
-                        st.rerun()
-
-                    # Generate all
-                    if generate_all_btn:
-                        email_api_key_check = anthropic_key if email_ai_provider == "anthropic" else openai_key
-                        if not email_api_key_check:
-                            st.error(f"{'Anthropic' if email_ai_provider == 'anthropic' else 'OpenAI'} API key is required. Add it to config.json or Streamlit secrets.")
-                        elif not filtered_profiles:
-                            st.warning("No profiles selected. Check that profiles have matching fit levels.")
-                        elif not st.session_state.get('email_test_approved'):
-                            st.warning("Run a test batch first to unlock 'Generate All'.")
-
-                    email_api_key_all = anthropic_key if email_ai_provider == "anthropic" else openai_key
-                    if generate_all_btn and email_api_key_all and filtered_profiles and st.session_state.get('email_test_approved'):
-                        # Batch load raw_data for all profiles (much faster than individual calls)
-                        with st.spinner(f"Loading profile data for {len(filtered_profiles)} profiles..."):
-                            profiles_for_email = []
-                            raw_data_loaded = 0
-                            raw_data_missing = 0
-
-                            # Batch fetch from DB
-                            db_profiles_map = {}
-                            if HAS_DATABASE:
-                                try:
-                                    db_client = _get_db_client()
-                                    if db_client:
-                                        # Get all URLs to fetch
-                                        urls_to_fetch = [p.get('linkedin_url') for p in filtered_profiles if p.get('linkedin_url')]
-                                        if urls_to_fetch:
-                                            # Batch fetch using get_profiles_by_urls
-                                            from db import get_profiles_by_urls
-                                            db_profiles = get_profiles_by_urls(db_client, urls_to_fetch, include_raw_data=True)
-                                            # Build lookup map by URL
-                                            for dp in db_profiles:
-                                                url = dp.get('linkedin_url', '')
-                                                if url:
-                                                    db_profiles_map[url.lower().rstrip('/')] = dp
-                                                # Also index by original_url
-                                                orig_url = dp.get('original_url', '')
-                                                if orig_url:
-                                                    db_profiles_map[orig_url.lower().rstrip('/')] = dp
-                                except Exception as e:
-                                    st.warning(f"Could not batch load from DB: {str(e)[:100]}")
-
-                            # Build profiles_for_email with raw_data
-                            for p in filtered_profiles:
-                                profile_data = {'name': p.get('name'), 'linkedin_url': p.get('linkedin_url'),
-                                               'current_title': p.get('current_title'), 'current_company': p.get('current_company'),
-                                               'email': p.get('email')}
-                                # Look up raw_data from batch-fetched map
-                                url = (p.get('linkedin_url') or '').lower().rstrip('/')
-                                db_profile = db_profiles_map.get(url)
+                # Need to load raw_data for profiles
+                profiles_for_email = []
+                raw_data_loaded = 0
+                raw_data_failed = []
+                for p in test_profiles:
+                    profile_data = {'name': p.get('name'), 'linkedin_url': p.get('linkedin_url'),
+                                   'current_title': p.get('current_title'), 'current_company': p.get('current_company'),
+                                   'email': p.get('email')}
+                    # Try to get raw_data from database
+                    if HAS_DATABASE:
+                        try:
+                            db_client = _get_db_client()
+                            if db_client and p.get('linkedin_url'):
+                                db_profile = get_profile(db_client, p['linkedin_url'])
                                 if db_profile and db_profile.get('raw_data'):
                                     profile_data['raw_data'] = db_profile['raw_data']
                                     raw_data_loaded += 1
                                 else:
-                                    raw_data_missing += 1
-                                profiles_for_email.append(profile_data)
+                                    raw_data_failed.append(p.get('name', p.get('linkedin_url', 'Unknown')))
+                        except Exception as e:
+                            raw_data_failed.append(f"{p.get('name', 'Unknown')}: {str(e)[:50]}")
+                    profiles_for_email.append(profile_data)
 
-                        if raw_data_missing > 0:
-                            st.warning(f"Could not load raw_data for {raw_data_missing}/{len(filtered_profiles)} profiles (URL mismatch or not in DB). These will return empty emails.")
+                if raw_data_failed:
+                    st.warning(f"Could not load raw_data for {len(raw_data_failed)}/{len(test_profiles)} profiles. These will return empty emails.")
 
-                        with st.spinner(f"Generating emails for {len(profiles_for_email)} profiles (this may take a minute)..."):
-                            try:
-                                results = generate_emails_batch(
-                                    profiles_for_email,
-                                    email_api_key_all,
-                                    sender=email_sender,
-                                    tone=email_tone,
-                                    length=email_length,
-                                    custom_instruction=email_full_instruction if email_full_instruction else None,
-                                    ai_model=email_ai_model,
-                                    max_workers=10,
-                                    progress_callback=None,  # Disable callback - causes Streamlit threading issues
-                                    generate_type=email_generate_type,
-                                    position=email_position if email_position else None,
-                                    ai_provider=email_ai_provider
-                                )
+                with st.status(f"Generating test batch ({len(profiles_for_email)} profiles)...", expanded=True) as status:
+                    progress_bar = st.progress(0)
+                    results_placeholder = st.empty()
 
-                                st.session_state['email_generation_results'] = results
-                                st.success(f"Complete! {len(results)} emails generated")
+                    def update_progress(completed, total, result):
+                        progress_bar.progress(completed / total)
+                        results_placeholder.text(f"Completed {completed}/{total}")
 
-                            except Exception as e:
-                                st.error(f"Error generating emails: {str(e)}")
-
-                        st.rerun()
-
-                    # Display results
-                    email_results = st.session_state.get('email_generation_results', [])
-                    if email_results:
-                        st.markdown("#### Generated Emails")
-
-                        # Angle distribution summary
-                        dist = get_angle_distribution(email_results)
-                        angle_summary = ", ".join([f"{k}: {v}" for k, v in dist['subject_angles'].items() if k != 'unknown'])
-                        st.caption(f"Subject angles: {angle_summary}")
-
-                        # Results table
-                        display_results = []
-                        errors_count = 0
-                        for r in email_results:
-                            if r.get('error'):
-                                errors_count += 1
-                            display_results.append({
-                                'Name': r.get('name', ''),
-                                'LinkedIn': r.get('linkedin_url', ''),
-                                'Subject': r.get('subject_line', ''),
-                                'Opener': r.get('email_opener', ''),
-                                'Subject Angle': r.get('subject_angle', ''),
-                                'Opener Angle': r.get('opener_angle', ''),
-                                'Email': r.get('email', ''),
-                                'Error': r.get('error', ''),
-                            })
-
-                        if errors_count > 0:
-                            st.warning(f"{errors_count} profiles failed to generate emails. Check 'Error' column for details.")
-
-                        email_df = pd.DataFrame(display_results)
-                        st.dataframe(
-                            email_df,
-                            use_container_width=True,
-                            hide_index=True,
-                            column_config={
-                                "LinkedIn": st.column_config.LinkColumn("LinkedIn", display_text="View"),
-                            }
+                    try:
+                        email_api_key = anthropic_key if email_ai_provider == "anthropic" else openai_key
+                        if not email_api_key:
+                            raise ValueError(f"{'Anthropic' if email_ai_provider == 'anthropic' else 'OpenAI'} API key not configured")
+                        results = generate_emails_batch(
+                            profiles_for_email,
+                            email_api_key,
+                            sender=email_sender,
+                            tone=email_tone,
+                            length=email_length,
+                            custom_instruction=email_full_instruction if email_full_instruction else None,
+                            ai_model=email_ai_model,
+                            max_workers=5,
+                            progress_callback=update_progress,
+                            generate_type=email_generate_type,
+                            position=email_position if email_position else None,
+                            ai_provider=email_ai_provider
                         )
 
-                        # Export buttons
-                        email_export_col1, email_export_col2, email_export_col3, email_export_col4 = st.columns(4)
+                        st.session_state['email_generation_results'] = results
+                        st.session_state['email_test_approved'] = True
 
-                        with email_export_col1:
-                            # Full export with all fields
-                            export_df = pd.DataFrame(email_results)
-                            export_cols = ['first_name', 'last_name', 'name', 'email', 'linkedin_url',
-                                          'location', 'university', 'current_title', 'current_company',
-                                          'subject_line', 'email_opener', 'subject_angle', 'opener_angle']
-                            export_cols = [c for c in export_cols if c in export_df.columns]
-                            st.download_button(
-                                f"Export All ({len(email_results)})",
-                                export_df[export_cols].to_csv(index=False),
-                                "email_openers.csv",
-                                "text/csv",
-                                type="primary"
-                            )
+                        # Show angle distribution
+                        dist = get_angle_distribution(results)
+                        status.update(label=f"Test complete! {len(results)} emails generated", state="complete")
 
-                        with email_export_col2:
-                            # Export only with emails
-                            with_email = [r for r in email_results if r.get('email')]
-                            if with_email:
-                                email_export_df = pd.DataFrame(with_email)
-                                st.download_button(
-                                    f"With Email ({len(with_email)})",
-                                    email_export_df[export_cols].to_csv(index=False),
-                                    "email_openers_with_email.csv",
-                                    "text/csv"
-                                )
-                            else:
-                                st.button("With Email (0)", disabled=True)
+                    except Exception as e:
+                        st.error(f"Error generating emails: {str(e)}")
+                        status.update(label="Error", state="error")
 
-                        with email_export_col3:
-                            # Refresh emails from SalesQL/DB
-                            if st.button("Refresh Emails", key="refresh_emails_from_salesql", help="Update with latest SalesQL emails"):
-                                updated_count = 0
-                                skipped_mismatch = 0
-                                from normalizers import normalize_linkedin_url as norm_url
+                st.rerun()
 
-                                # Helper to normalize URL for matching
-                                def norm(url):
-                                    if not url:
-                                        return ''
-                                    try:
-                                        return norm_url(url) or url.lower().rstrip('/')
-                                    except:
-                                        return url.lower().rstrip('/')
+            # Generate all
+            if generate_all_btn:
+                email_api_key_check = anthropic_key if email_ai_provider == "anthropic" else openai_key
+                if not email_api_key_check:
+                    st.error(f"{'Anthropic' if email_ai_provider == 'anthropic' else 'OpenAI'} API key is required. Add it to config.json or Streamlit secrets.")
+                elif not filtered_profiles:
+                    st.warning("No profiles selected. Check that profiles have matching fit levels.")
+                elif not st.session_state.get('email_test_approved'):
+                    st.warning("Run a test batch first to unlock 'Generate All'.")
 
-                                # Helper to get first name for verification
-                                def get_first_name(name):
-                                    if not name:
-                                        return ''
-                                    return str(name).split()[0].lower().strip() if name else ''
+            email_api_key_all = anthropic_key if email_ai_provider == "anthropic" else openai_key
+            if generate_all_btn and email_api_key_all and filtered_profiles and st.session_state.get('email_test_approved'):
+                # Batch load raw_data for all profiles (much faster than individual calls)
+                with st.spinner(f"Loading profile data for {len(filtered_profiles)} profiles..."):
+                    profiles_for_email = []
+                    raw_data_loaded = 0
+                    raw_data_missing = 0
 
-                                # Helper to check if names match (first name comparison)
-                                def names_match(name1, name2):
-                                    fn1 = get_first_name(name1)
-                                    fn2 = get_first_name(name2)
-                                    if not fn1 or not fn2:
-                                        return True  # Can't verify, allow match
-                                    return fn1 == fn2
+                    # Batch fetch from DB
+                    db_profiles_map = {}
+                    if HAS_DATABASE:
+                        try:
+                            db_client = _get_db_client()
+                            if db_client:
+                                # Get all URLs to fetch
+                                urls_to_fetch = [p.get('linkedin_url') for p in filtered_profiles if p.get('linkedin_url')]
+                                if urls_to_fetch:
+                                    # Batch fetch using get_profiles_by_urls
+                                    from db import get_profiles_by_urls
+                                    db_profiles = get_profiles_by_urls(db_client, urls_to_fetch, include_raw_data=True)
+                                    # Build lookup map by URL
+                                    for dp in db_profiles:
+                                        url = dp.get('linkedin_url', '')
+                                        if url:
+                                            db_profiles_map[url.lower().rstrip('/')] = dp
+                                        # Also index by original_url
+                                        orig_url = dp.get('original_url', '')
+                                        if orig_url:
+                                            db_profiles_map[orig_url.lower().rstrip('/')] = dp
+                        except Exception as e:
+                            st.warning(f"Could not batch load from DB: {str(e)[:100]}")
 
-                                # Collect all email sources with normalized URLs
-                                # Store (email, name) tuples for verification
-                                all_emails = {}
+                    # Build profiles_for_email with raw_data
+                    for p in filtered_profiles:
+                        profile_data = {'name': p.get('name'), 'linkedin_url': p.get('linkedin_url'),
+                                       'current_title': p.get('current_title'), 'current_company': p.get('current_company'),
+                                       'email': p.get('email')}
+                        # Look up raw_data from batch-fetched map
+                        url = (p.get('linkedin_url') or '').lower().rstrip('/')
+                        db_profile = db_profiles_map.get(url)
+                        if db_profile and db_profile.get('raw_data'):
+                            profile_data['raw_data'] = db_profile['raw_data']
+                            raw_data_loaded += 1
+                        else:
+                            raw_data_missing += 1
+                        profiles_for_email.append(profile_data)
 
-                                # 1. From screening results
-                                screening_results = st.session_state.get('screening_results', [])
-                                for r in screening_results:
-                                    url = norm(r.get('linkedin_url'))
-                                    email = r.get('salesql_email') or r.get('email')
-                                    name = r.get('name', '')
-                                    if url and email:
+                if raw_data_missing > 0:
+                    st.warning(f"Could not load raw_data for {raw_data_missing}/{len(filtered_profiles)} profiles (URL mismatch or not in DB). These will return empty emails.")
+
+                with st.spinner(f"Generating emails for {len(profiles_for_email)} profiles (this may take a minute)..."):
+                    try:
+                        results = generate_emails_batch(
+                            profiles_for_email,
+                            email_api_key_all,
+                            sender=email_sender,
+                            tone=email_tone,
+                            length=email_length,
+                            custom_instruction=email_full_instruction if email_full_instruction else None,
+                            ai_model=email_ai_model,
+                            max_workers=10,
+                            progress_callback=None,  # Disable callback - causes Streamlit threading issues
+                            generate_type=email_generate_type,
+                            position=email_position if email_position else None,
+                            ai_provider=email_ai_provider
+                        )
+
+                        st.session_state['email_generation_results'] = results
+                        st.success(f"Complete! {len(results)} emails generated")
+
+                    except Exception as e:
+                        st.error(f"Error generating emails: {str(e)}")
+
+                st.rerun()
+
+            # Display results
+            email_results = st.session_state.get('email_generation_results', [])
+            if email_results:
+                st.markdown("#### Generated Emails")
+
+                # Angle distribution summary
+                dist = get_angle_distribution(email_results)
+                angle_summary = ", ".join([f"{k}: {v}" for k, v in dist['subject_angles'].items() if k != 'unknown'])
+                st.caption(f"Subject angles: {angle_summary}")
+
+                # Results table
+                display_results = []
+                errors_count = 0
+                for r in email_results:
+                    if r.get('error'):
+                        errors_count += 1
+                    display_results.append({
+                        'Name': r.get('name', ''),
+                        'LinkedIn': r.get('linkedin_url', ''),
+                        'Subject': r.get('subject_line', ''),
+                        'Opener': r.get('email_opener', ''),
+                        'Subject Angle': r.get('subject_angle', ''),
+                        'Opener Angle': r.get('opener_angle', ''),
+                        'Email': r.get('email', ''),
+                        'Error': r.get('error', ''),
+                    })
+
+                if errors_count > 0:
+                    st.warning(f"{errors_count} profiles failed to generate emails. Check 'Error' column for details.")
+
+                email_df = pd.DataFrame(display_results)
+                st.dataframe(
+                    email_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "LinkedIn": st.column_config.LinkColumn("LinkedIn", display_text="View"),
+                    }
+                )
+
+                # Export buttons
+                email_export_col1, email_export_col2, email_export_col3, email_export_col4 = st.columns(4)
+
+                with email_export_col1:
+                    # Full export with all fields
+                    export_df = pd.DataFrame(email_results)
+                    export_cols = ['first_name', 'last_name', 'name', 'email', 'linkedin_url',
+                                  'location', 'university', 'current_title', 'current_company',
+                                  'subject_line', 'email_opener', 'subject_angle', 'opener_angle']
+                    export_cols = [c for c in export_cols if c in export_df.columns]
+                    st.download_button(
+                        f"Export All ({len(email_results)})",
+                        export_df[export_cols].to_csv(index=False),
+                        "email_openers.csv",
+                        "text/csv",
+                        type="primary"
+                    )
+
+                with email_export_col2:
+                    # Export only with emails
+                    with_email = [r for r in email_results if r.get('email')]
+                    if with_email:
+                        email_export_df = pd.DataFrame(with_email)
+                        st.download_button(
+                            f"With Email ({len(with_email)})",
+                            email_export_df[export_cols].to_csv(index=False),
+                            "email_openers_with_email.csv",
+                            "text/csv"
+                        )
+                    else:
+                        st.button("With Email (0)", disabled=True)
+
+                with email_export_col3:
+                    # Refresh emails from SalesQL/DB
+                    if st.button("Refresh Emails", key="refresh_emails_from_salesql", help="Update with latest SalesQL emails"):
+                        updated_count = 0
+                        skipped_mismatch = 0
+                        from normalizers import normalize_linkedin_url as norm_url
+
+                        # Helper to normalize URL for matching
+                        def norm(url):
+                            if not url:
+                                return ''
+                            try:
+                                return norm_url(url) or url.lower().rstrip('/')
+                            except:
+                                return url.lower().rstrip('/')
+
+                        # Helper to get first name for verification
+                        def get_first_name(name):
+                            if not name:
+                                return ''
+                            return str(name).split()[0].lower().strip() if name else ''
+
+                        # Helper to check if names match (first name comparison)
+                        def names_match(name1, name2):
+                            fn1 = get_first_name(name1)
+                            fn2 = get_first_name(name2)
+                            if not fn1 or not fn2:
+                                return True  # Can't verify, allow match
+                            return fn1 == fn2
+
+                        # Collect all email sources with normalized URLs
+                        # Store (email, name) tuples for verification
+                        all_emails = {}
+
+                        # 1. From screening results
+                        screening_results = st.session_state.get('screening_results', [])
+                        for r in screening_results:
+                            url = norm(r.get('linkedin_url'))
+                            email = r.get('salesql_email') or r.get('email')
+                            name = r.get('name', '')
+                            if url and email:
+                                all_emails[url] = (email, name)
+
+                        # 2. From passed_candidates_df (SalesQL enrichment results)
+                        passed_df = st.session_state.get('passed_candidates_df')
+                        if passed_df is not None and not passed_df.empty:
+                            url_col = 'linkedin_url' if 'linkedin_url' in passed_df.columns else 'public_url'
+                            email_col = 'salesql_email' if 'salesql_email' in passed_df.columns else 'email'
+                            name_col = 'name' if 'name' in passed_df.columns else 'first_name'
+                            if url_col in passed_df.columns and email_col in passed_df.columns:
+                                for _, row in passed_df.iterrows():
+                                    url = norm(row.get(url_col))
+                                    email = row.get(email_col)
+                                    name = row.get(name_col, '')
+                                    if url and email and pd.notna(email):
                                         all_emails[url] = (email, name)
 
-                                # 2. From passed_candidates_df (SalesQL enrichment results)
-                                passed_df = st.session_state.get('passed_candidates_df')
-                                if passed_df is not None and not passed_df.empty:
-                                    url_col = 'linkedin_url' if 'linkedin_url' in passed_df.columns else 'public_url'
-                                    email_col = 'salesql_email' if 'salesql_email' in passed_df.columns else 'email'
-                                    name_col = 'name' if 'name' in passed_df.columns else 'first_name'
-                                    if url_col in passed_df.columns and email_col in passed_df.columns:
-                                        for _, row in passed_df.iterrows():
-                                            url = norm(row.get(url_col))
-                                            email = row.get(email_col)
-                                            name = row.get(name_col, '')
-                                            if url and email and pd.notna(email):
+                        # 3. From database (batch lookup for efficiency)
+                        if HAS_DATABASE:
+                            try:
+                                db_client = _get_db_client()
+                                if db_client:
+                                    # Get URLs we don't have emails for yet
+                                    missing_urls = []
+                                    for r in email_results:
+                                        url = r.get('linkedin_url')
+                                        if url and norm(url) not in all_emails:
+                                            missing_urls.append(url)
+
+                                    if missing_urls:
+                                        from db import get_profiles_by_urls
+                                        db_profiles = get_profiles_by_urls(db_client, missing_urls[:100])
+                                        for p in db_profiles:
+                                            url = norm(p.get('linkedin_url'))
+                                            email = p.get('email')
+                                            name = p.get('name', '')
+                                            if url and email:
                                                 all_emails[url] = (email, name)
+                            except Exception as e:
+                                st.warning(f"DB lookup failed: {str(e)[:50]}")
 
-                                # 3. From database (batch lookup for efficiency)
-                                if HAS_DATABASE:
-                                    try:
-                                        db_client = _get_db_client()
-                                        if db_client:
-                                            # Get URLs we don't have emails for yet
-                                            missing_urls = []
-                                            for r in email_results:
-                                                url = r.get('linkedin_url')
-                                                if url and norm(url) not in all_emails:
-                                                    missing_urls.append(url)
+                        # Update email_generation_results with name verification
+                        for r in st.session_state['email_generation_results']:
+                            url = norm(r.get('linkedin_url'))
+                            match = all_emails.get(url)
+                            if match:
+                                new_email, source_name = match
+                                target_name = r.get('name', '')
+                                if new_email and new_email != r.get('email'):
+                                    # Verify names match before assigning
+                                    if names_match(target_name, source_name):
+                                        r['email'] = new_email
+                                        updated_count += 1
+                                    else:
+                                        skipped_mismatch += 1
 
-                                            if missing_urls:
-                                                from db import get_profiles_by_urls
-                                                db_profiles = get_profiles_by_urls(db_client, missing_urls[:100])
-                                                for p in db_profiles:
-                                                    url = norm(p.get('linkedin_url'))
-                                                    email = p.get('email')
-                                                    name = p.get('name', '')
-                                                    if url and email:
-                                                        all_emails[url] = (email, name)
-                                    except Exception as e:
-                                        st.warning(f"DB lookup failed: {str(e)[:50]}")
+                        if updated_count > 0:
+                            msg = f"Updated {updated_count} emails!"
+                            if skipped_mismatch > 0:
+                                msg += f" (Skipped {skipped_mismatch} - name mismatch)"
+                            st.success(msg)
+                        else:
+                            msg = f"No new emails found. Checked {len(all_emails)} sources."
+                            if skipped_mismatch > 0:
+                                msg += f" Skipped {skipped_mismatch} due to name mismatch."
+                            st.info(msg)
+                        st.rerun()
 
-                                # Update email_generation_results with name verification
-                                for r in st.session_state['email_generation_results']:
-                                    url = norm(r.get('linkedin_url'))
-                                    match = all_emails.get(url)
-                                    if match:
-                                        new_email, source_name = match
-                                        target_name = r.get('name', '')
-                                        if new_email and new_email != r.get('email'):
-                                            # Verify names match before assigning
-                                            if names_match(target_name, source_name):
-                                                r['email'] = new_email
-                                                updated_count += 1
-                                            else:
-                                                skipped_mismatch += 1
+                with email_export_col4:
+                    if st.button("Clear Results", key="clear_email_results"):
+                        st.session_state['email_generation_results'] = []
+                        st.session_state['email_test_approved'] = False
+                        st.rerun()
 
-                                if updated_count > 0:
-                                    msg = f"Updated {updated_count} emails!"
-                                    if skipped_mismatch > 0:
-                                        msg += f" (Skipped {skipped_mismatch} - name mismatch)"
-                                    st.success(msg)
-                                else:
-                                    msg = f"No new emails found. Checked {len(all_emails)} sources."
-                                    if skipped_mismatch > 0:
-                                        msg += f" Skipped {skipped_mismatch} due to name mismatch."
-                                    st.info(msg)
-                                st.rerun()
+# ========== TAB 7: Database ==========
 
-                        with email_export_col4:
-                            if st.button("Clear Results", key="clear_email_results"):
-                                st.session_state['email_generation_results'] = []
-                                st.session_state['email_test_approved'] = False
-                                st.rerun()
-# ========== TAB 6: Database ==========
 with tab_database:
     st.markdown("### Profile Database")
     st.caption("View and manage all profiles stored in Supabase")
@@ -10428,7 +10439,7 @@ with tab_database:
         except Exception as e:
             st.error(f"Database error: {e}")
 
-# ========== TAB 7: Usage ==========
+# ========== TAB 8: Usage ==========
 with tab_usage:
     st.markdown("### API Usage Dashboard")
     st.caption("Track API consumption across all providers")

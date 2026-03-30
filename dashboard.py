@@ -3537,7 +3537,8 @@ def compute_role_durations(raw):
         return f"{y}y {m}m"
 
     # Track company-level data for stability summary
-    companies = {}  # company_name -> {min_start, max_end, is_current, roles}
+    companies = {}  # company_name -> {min_start, max_end, is_current, titles}
+    career_start = None  # Track earliest role start date
 
     for emp_key in ['past_employers', 'current_employers']:
         for emp in (raw.get(emp_key) or []):
@@ -3554,19 +3555,24 @@ def compute_role_durations(raw):
             end_str = 'today' if is_current else end.strftime('%b %Y') if end else '?'
             dur = _fmt_duration(months)
 
+            # Track career start date
+            if start and (career_start is None or start < career_start):
+                career_start = start
+
             if is_current:
                 lines.append(f"  >>> {title} at {company}: {start_str} - {end_str} = {dur} <<< CURRENT ROLE")
             else:
                 lines.append(f"  {title} at {company}: {start_str} - {end_str} = {dur}")
 
-            # Group by company
+            # Group by company (also track titles for internship detection)
             if company not in companies:
-                companies[company] = {'min_start': start, 'max_end': end, 'is_current': False}
+                companies[company] = {'min_start': start, 'max_end': end, 'is_current': False, 'titles': []}
             else:
                 if start and (companies[company]['min_start'] is None or start < companies[company]['min_start']):
                     companies[company]['min_start'] = start
                 if end > companies[company]['max_end']:
                     companies[company]['max_end'] = end
+            companies[company]['titles'].append(title.lower())
             if is_current:
                 companies[company]['is_current'] = True
 
@@ -3575,8 +3581,18 @@ def compute_role_durations(raw):
 
     # Compute stability summary
     short_companies = []
+    excluded_early_career = []
     current_company_name = None
     current_company_months = None
+
+    # Early career threshold: first 3 years of career OR more than 10 years ago
+    early_career_cutoff = None
+    ten_years_ago = today - timedelta(days=365 * 10)
+    if career_start:
+        early_career_cutoff = career_start + timedelta(days=365 * 3)  # 3 years into career
+
+    # Internship keywords
+    _intern_keywords = {'intern', 'internship', 'trainee', 'apprentice', 'student', 'associate'}
 
     for comp_name, comp_data in companies.items():
         total_months = max(0, (comp_data['max_end'].year - comp_data['min_start'].year) * 12 +
@@ -3587,12 +3603,29 @@ def compute_role_durations(raw):
                 current_company_name = comp_name
                 current_company_months = total_months
         elif total_months < 12:
-            short_companies.append(f"{comp_name} ({_fmt_duration(total_months)})")
+            # Check if this is an internship (any title contains intern keywords)
+            is_internship = any(any(kw in t for kw in _intern_keywords) for t in comp_data.get('titles', []))
+
+            # Check if this is early career (ended before early_career_cutoff OR more than 10 years ago)
+            is_early_career = False
+            if comp_data['max_end']:
+                if early_career_cutoff and comp_data['max_end'] < early_career_cutoff:
+                    is_early_career = True
+                elif comp_data['max_end'] < ten_years_ago:
+                    is_early_career = True
+
+            if is_internship or is_early_career:
+                reason = "intern" if is_internship else "early career"
+                excluded_early_career.append(f"{comp_name} ({_fmt_duration(total_months)}, {reason})")
+            else:
+                short_companies.append(f"{comp_name} ({_fmt_duration(total_months)})")
 
     lines.append('')
     lines.append('STABILITY SUMMARY (pre-calculated by company, use these numbers):')
-    lines.append(f'  Short-stint companies (<12 months, excluding current): {len(short_companies)}' +
+    lines.append(f'  Short-stint companies (<12 months, excluding current/intern/early-career): {len(short_companies)}' +
                  (f' — {", ".join(short_companies)}' if short_companies else ''))
+    if excluded_early_career:
+        lines.append(f'  Excluded from short-stint count (intern/early career): {", ".join(excluded_early_career)}')
     if current_company_name:
         lines.append(f'  Current company: {current_company_name} = {_fmt_duration(current_company_months)}')
     else:

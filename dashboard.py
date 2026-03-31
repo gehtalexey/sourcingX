@@ -3924,21 +3924,43 @@ Evaluate this candidate against the job requirements and return JSON."""
 
     try:
         if ai_provider == "anthropic":
-            # Anthropic API: system prompt is a separate parameter, no json_object mode
-            response = client.messages.create(
-                model=ai_model,
-                max_tokens=max(max_tokens, 400),  # Ensure enough tokens for Haiku's JSON response
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
-                temperature=0.3
-            )
+            # Anthropic API: system prompt as list with cache_control for prompt caching.
+            # The system prompt (~2,300 tokens) is identical for every profile in a run,
+            # so caching it cuts cost from $0.80/1M → $0.08/1M for all calls after the first.
+            # Requires model support + prompt must be >1024 tokens (ours is ~2,300).
+            # Retry up to 3 times on 429 rate limit with exponential backoff.
+            _anthropic_delay = 2
+            for _attempt in range(3):
+                try:
+                    response = client.messages.create(
+                        model=ai_model,
+                        max_tokens=max(max_tokens, 400),  # Ensure enough tokens for Haiku's JSON response
+                        system=[{
+                            "type": "text",
+                            "text": system_prompt,
+                            "cache_control": {"type": "ephemeral"}
+                        }],
+                        messages=[{"role": "user", "content": user_prompt}],
+                        temperature=0.3
+                    )
+                    break  # success
+                except Exception as _e:
+                    if '429' in str(_e) and _attempt < 2:
+                        time.sleep(_anthropic_delay)
+                        _anthropic_delay *= 2  # 2s → 4s → give up
+                    else:
+                        raise
             elapsed_ms = int((time.time() - start_time) * 1000)
 
-            # Log usage
+            # Log usage (include cache read/write tokens for cost tracking)
             if tracker and hasattr(response, 'usage') and response.usage:
+                usage = response.usage
+                cache_read   = getattr(usage, 'cache_read_input_tokens', 0) or 0
+                cache_write  = getattr(usage, 'cache_creation_input_tokens', 0) or 0
+                billed_input = usage.input_tokens  # Anthropic bills input_tokens net of cache savings
                 tracker.log_openai(
-                    tokens_input=response.usage.input_tokens,
-                    tokens_output=response.usage.output_tokens,
+                    tokens_input=billed_input,
+                    tokens_output=usage.output_tokens,
                     model=ai_model,
                     profiles_screened=1,
                     status='success',

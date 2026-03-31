@@ -8213,50 +8213,26 @@ with tab_screening:
         )
 
         # Screening Configuration
-        st.markdown("### Screening Configuration")
+        screen_count = st.number_input(
+            "Number of profiles to screen",
+            min_value=1,
+            max_value=num_profiles,
+            value=min(100, num_profiles),
+            step=10,
+            key="screen_count"
+        )
 
-        col_count, col_mode, col_model = st.columns([1, 1, 1])
-        with col_count:
-            screen_count = st.number_input(
-                "Number of profiles to screen",
-                min_value=1,
-                max_value=num_profiles,
-                value=min(100, num_profiles),
-                step=10,
-                key="screen_count"
-            )
-        with col_mode:
-            screening_mode = "Detailed"  # Always use detailed mode for accurate scoring
-        with col_model:
-            model_options = ["gpt-4o-mini (fast)", "Claude Haiku (balanced)"]
-            ai_model_choice = st.radio(
-                "AI Model",
-                options=model_options,
-                index=0,
-                key="ai_model_choice",
-                help="gpt-4o-mini: ~$0.001 | Haiku: ~$0.005 per profile"
-            )
-        # Parse model choice into model name and provider
-        if "Haiku" in ai_model_choice:
-            ai_model = "claude-haiku-4-5-20251001"
-            ai_provider = "anthropic"
-        else:
-            ai_model = "gpt-4o-mini"
-            ai_provider = "openai"
-
-        # Cost estimate based on mode and model
-        if ai_provider == "anthropic":
-            model_input_cost = 0.80   # Haiku: $0.80/1M input tokens
-            model_output_cost = 4.00  # Haiku: $4.00/1M output tokens
-        else:  # gpt-4o-mini
-            model_input_cost = 0.15   # gpt-4o-mini: $0.15/1M input tokens
-            model_output_cost = 0.60  # gpt-4o-mini: $0.60/1M output tokens
-        output_tokens = 150  # ~150 tokens for score + fit + summary
-        st.caption("Detailed mode: score, fit, and summary with experience calc")
+        # Fixed settings - gpt-4o-mini detailed mode (best cost/quality)
+        screening_mode = "Detailed"
+        ai_model = "gpt-4o-mini"
+        ai_provider = "openai"
+        model_input_cost = 0.15   # $0.15/1M input tokens
+        model_output_cost = 0.60  # $0.60/1M output tokens
+        output_tokens = 150
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
         role_display = selected_role if selected_role != 'General (auto)' else 'General'
-        st.info(f"Role: **{role_display}** | Model: **{ai_model}** | Est. cost: **${est_cost:.3f}**")
+        st.info(f"Role: **{role_display}** | Model: **gpt-4o-mini** | Est. cost: **${est_cost:.3f}**")
 
         # Debug: Show available fields and test single profile
         with st.expander("Debug: Profile Fields & Test"):
@@ -9159,20 +9135,10 @@ with tab_emails:
                 )
 
             with email_col2:
-                email_model = st.selectbox(
-                    "Model",
-                    options=["gpt-4o-mini", "Claude Haiku"],
-                    index=0,
-                    help="gpt-4o-mini: ~$0.0004 | Haiku: ~$0.002 per profile",
-                    key="email_model"
-                )
-                # Parse email model choice
-                if email_model == "Claude Haiku":
-                    email_ai_model = "claude-haiku-4-5-20251001"
-                    email_ai_provider = "anthropic"
-                else:
-                    email_ai_model = email_model
-                    email_ai_provider = "openai"
+                st.caption("Model: **gpt-4o-mini**")
+                # Fixed model - gpt-4o-mini only
+                email_ai_model = "gpt-4o-mini"
+                email_ai_provider = "openai"
 
             with email_col3:
                 email_sender = st.selectbox(

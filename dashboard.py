@@ -9410,7 +9410,14 @@ with tab_emails:
                 if raw_data_missing > 0:
                     st.warning(f"Could not load raw_data for {raw_data_missing}/{len(custom_profiles)} profiles.")
 
-                with st.spinner(f"Generating emails for {len(profiles_for_email)} profiles..."):
+                with st.status(f"Generating emails for {len(profiles_for_email)} profiles...", expanded=True) as status:
+                    progress_bar = st.progress(0)
+                    progress_text = st.empty()
+
+                    def update_custom_progress(completed, total, result):
+                        progress_bar.progress(completed / total)
+                        progress_text.text(f"Completed {completed}/{total}")
+
                     try:
                         results = generate_emails_batch(
                             profiles_for_email,
@@ -9421,17 +9428,18 @@ with tab_emails:
                             custom_instruction=email_full_instruction if email_full_instruction else None,
                             ai_model=email_ai_model,
                             max_workers=10,
-                            progress_callback=None,
+                            progress_callback=update_custom_progress,
                             generate_type=email_generate_type,
                             position=email_position if email_position else None,
                             ai_provider=email_ai_provider
                         )
 
                         st.session_state['email_generation_results'] = results
-                        st.success(f"Complete! {len(results)} emails generated")
+                        status.update(label=f"Complete! {len(results)} emails generated", state="complete")
 
                     except Exception as e:
                         st.error(f"Error generating emails: {str(e)}")
+                        status.update(label="Error", state="error")
 
                 st.rerun()
 
@@ -9485,7 +9493,14 @@ with tab_emails:
                 if raw_data_missing > 0:
                     st.warning(f"Could not load raw_data for {raw_data_missing}/{len(filtered_profiles)} profiles (URL mismatch or not in DB). These will return empty emails.")
 
-                with st.spinner(f"Generating emails for {len(profiles_for_email)} profiles (this may take a minute)..."):
+                with st.status(f"Generating emails for {len(profiles_for_email)} profiles...", expanded=True) as status:
+                    progress_bar = st.progress(0)
+                    progress_text = st.empty()
+
+                    def update_all_progress(completed, total, result):
+                        progress_bar.progress(completed / total)
+                        progress_text.text(f"Completed {completed}/{total}")
+
                     try:
                         results = generate_emails_batch(
                             profiles_for_email,
@@ -9496,17 +9511,18 @@ with tab_emails:
                             custom_instruction=email_full_instruction if email_full_instruction else None,
                             ai_model=email_ai_model,
                             max_workers=10,
-                            progress_callback=None,  # Disable callback - causes Streamlit threading issues
+                            progress_callback=update_all_progress,
                             generate_type=email_generate_type,
                             position=email_position if email_position else None,
                             ai_provider=email_ai_provider
                         )
 
                         st.session_state['email_generation_results'] = results
-                        st.success(f"Complete! {len(results)} emails generated")
+                        status.update(label=f"Complete! {len(results)} emails generated", state="complete")
 
                     except Exception as e:
                         st.error(f"Error generating emails: {str(e)}")
+                        status.update(label="Error", state="error")
 
                 st.rerun()
 

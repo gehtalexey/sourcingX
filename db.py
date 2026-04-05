@@ -49,21 +49,57 @@ class SupabaseClient:
             return response.json()
         return {}
 
-    def select(self, table: str, columns: str = '*', filters: dict = None, limit: int = 5000) -> list:
+    def select(self, table: str, columns: str = '*', filters: dict = None, limit: int = 5000,
+               order_by: str = None, cursor_column: str = None, cursor_value: str = None) -> list:
         """Select rows from a table. Auto-paginates past Supabase 1000-row server limit.
-        Default limit reduced to 5000 to prevent OOM on large datasets."""
+        Default limit reduced to 5000 to prevent OOM on large datasets.
+
+        For large datasets (2000+), use keyset pagination for better performance:
+            order_by='enriched_at.desc', cursor_column='enriched_at'
+        This avoids the O(n) scan-and-skip cost of offset pagination.
+        """
         PAGE_SIZE = 1000
         params = {'select': columns}
         if filters:
             for key, value in filters.items():
                 params[key] = value
+        if order_by:
+            params['order'] = order_by
 
         # Small requests don't need pagination
         if limit <= PAGE_SIZE:
             params['limit'] = limit
+            if cursor_column and cursor_value:
+                # Apply cursor filter for keyset pagination
+                params[cursor_column] = f'lt.{cursor_value}' if order_by and '.desc' in order_by else f'gt.{cursor_value}'
             return self._request('GET', table, params=params)
 
-        # Paginate to get all results
+        # Keyset pagination (faster for large datasets — no offset scan)
+        if cursor_column and order_by:
+            all_results = []
+            current_cursor = cursor_value  # None on first page
+            remaining = limit
+            while remaining > 0:
+                page_limit = min(PAGE_SIZE, remaining)
+                page_params = {**params, 'limit': page_limit}
+                if current_cursor:
+                    is_desc = '.desc' in order_by
+                    page_params[cursor_column] = f'lt.{current_cursor}' if is_desc else f'gt.{current_cursor}'
+                page = self._request('GET', table, params=page_params)
+                if not page:
+                    break
+                all_results.extend(page)
+                remaining -= len(page)
+                if len(page) < page_limit:
+                    break
+                # Move cursor to last row's value
+                last_row = page[-1]
+                current_cursor = last_row.get(cursor_column)
+                if not current_cursor:
+                    break
+            return all_results
+
+        # Offset pagination (fallback for queries without cursor)
         all_results = []
         offset = 0
         while offset < limit:
@@ -235,37 +271,23 @@ def _get_existing_original_urls(client: SupabaseClient, linkedin_url: str) -> li
     return []
 
 
-def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_response: dict, original_url: str = None) -> dict:
-    """Save a Crustdata-enriched profile to the database.
+def _prepare_profile_row(linkedin_url: str, crustdata_response: dict, original_url: str = None,
+                         existing_original_urls: list = None, email: str = None, email_source: str = None) -> dict:
+    """Prepare a profile dict for DB upsert (pure function, no DB calls).
 
-    Simplified approach: Store raw_data as-is, extract only title/company for indexing.
-    All other fields are extracted at display time from raw_data.
-
-    Multi-source support: Appends to original_urls array instead of overwriting,
-    allowing tracking of all input URLs from different sources.
+    Extracts indexed fields from the Crustdata response and builds the row dict.
 
     Args:
-        client: SupabaseClient instance
-        linkedin_url: The LinkedIn URL (used as primary key, typically from Crustdata)
+        linkedin_url: Normalized LinkedIn URL (primary key)
         crustdata_response: Raw response from Crustdata API
         original_url: The original input URL (for matching with loaded data)
+        existing_original_urls: Existing original_urls from DB (for append)
+        email: Optional email to include in the row
+        email_source: Optional email source (e.g., 'csv')
 
     Returns:
-        The saved profile record
+        Dict ready for upsert
     """
-    linkedin_url = normalize_linkedin_url(linkedin_url)
-    if not linkedin_url:
-        raise ValueError("Valid linkedin_url is required")
-
-    # Also normalize original_url for matching
-    original_url = normalize_linkedin_url(original_url) if original_url else None
-
-    # Multi-source support: Get existing URLs and append (deduplicated)
-    existing_urls = _get_existing_original_urls(client, linkedin_url)
-    original_urls = list(existing_urls)  # Copy
-    if original_url and original_url not in original_urls:
-        original_urls.append(original_url)
-
     cd = crustdata_response or {}
 
     # Extract name for indexed column
@@ -312,6 +334,13 @@ def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_r
     all_schools = [str(x) for x in all_schools if x] if isinstance(all_schools, list) else []
     skills = [str(x) for x in skills if x] if isinstance(skills, list) else []
 
+    now = datetime.utcnow().isoformat()
+
+    # Build original_urls array (merge existing + new)
+    original_urls = list(existing_original_urls or [])
+    if original_url and original_url not in original_urls:
+        original_urls.append(original_url)
+
     # Data to save - indexed fields + raw_data for everything else
     data = {
         'linkedin_url': linkedin_url,
@@ -326,31 +355,222 @@ def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_r
         'all_schools': all_schools if all_schools else None,
         'skills': skills if skills else None,
         'status': 'enriched',
-        'enriched_at': datetime.utcnow().isoformat(),
-        'enrichment_status': 'enriched',  # Track successful enrichment
-        'enrichment_attempted_at': datetime.utcnow().isoformat(),
+        'enriched_at': now,
+        'enrichment_status': 'enriched',
+        'enrichment_attempted_at': now,
     }
+
+    # Include email if provided
+    if email:
+        data['email'] = email
+        if email_source:
+            data['email_source'] = email_source
+
+    # Include original_urls array
+    if original_urls:
+        data['original_urls'] = original_urls
 
     # Remove None values
     data = {k: v for k, v in data.items() if v is not None}
 
+    return data
+
+
+def save_enriched_profile(client: SupabaseClient, linkedin_url: str, crustdata_response: dict, original_url: str = None) -> dict:
+    """Save a Crustdata-enriched profile to the database.
+
+    Simplified approach: Store raw_data as-is, extract only title/company for indexing.
+    All other fields are extracted at display time from raw_data.
+
+    Multi-source support: Appends to original_urls array instead of overwriting,
+    allowing tracking of all input URLs from different sources.
+
+    Args:
+        client: SupabaseClient instance
+        linkedin_url: The LinkedIn URL (used as primary key, typically from Crustdata)
+        crustdata_response: Raw response from Crustdata API
+        original_url: The original input URL (for matching with loaded data)
+
+    Returns:
+        The saved profile record
+    """
+    linkedin_url = normalize_linkedin_url(linkedin_url)
+    if not linkedin_url:
+        raise ValueError("Valid linkedin_url is required")
+
+    original_url = normalize_linkedin_url(original_url) if original_url else None
+
+    # Multi-source support: Get existing URLs and append (deduplicated)
+    existing_urls = _get_existing_original_urls(client, linkedin_url)
+
+    data = _prepare_profile_row(linkedin_url, crustdata_response, original_url, existing_urls)
+
     # Try to save with original_urls array (post-migration)
-    if original_urls:
-        data_with_array = {**data, 'original_urls': original_urls}
+    if 'original_urls' in data:
         try:
-            result = client.upsert('profiles', data_with_array, on_conflict='linkedin_url')
+            result = client.upsert('profiles', data, on_conflict='linkedin_url')
             return result[0] if result else None
         except Exception:
             # Column doesn't exist yet (pre-migration), fall through to save without it
-            pass
+            data.pop('original_urls', None)
 
     # Save without original_urls array (backward compatible)
     result = client.upsert('profiles', data, on_conflict='linkedin_url')
     return result[0] if result else None
 
 
+def _bulk_fetch_existing_original_urls(client: SupabaseClient, linkedin_urls: list) -> dict:
+    """Bulk-fetch existing original_urls for multiple profiles in one query.
+
+    Returns:
+        Dict mapping linkedin_url -> list of existing original_urls
+    """
+    if not linkedin_urls:
+        return {}
+
+    result_map = {}
+    batch_size = 50  # Supabase URL length limits
+
+    for i in range(0, len(linkedin_urls), batch_size):
+        batch = linkedin_urls[i:i+batch_size]
+        url_list = ','.join(batch)
+        try:
+            # Try with original_urls column (post-migration)
+            try:
+                results = client.select(
+                    'profiles',
+                    'linkedin_url,original_urls,original_url',
+                    filters={'linkedin_url': f'in.({url_list})'},
+                    limit=batch_size
+                )
+            except Exception:
+                # Fall back to original_url only (pre-migration)
+                results = client.select(
+                    'profiles',
+                    'linkedin_url,original_url',
+                    filters={'linkedin_url': f'in.({url_list})'},
+                    limit=batch_size
+                )
+
+            for profile in (results or []):
+                url = profile.get('linkedin_url', '')
+                urls = profile.get('original_urls') or []
+                if not urls and profile.get('original_url'):
+                    urls = [profile['original_url']]
+                result_map[url] = urls if isinstance(urls, list) else []
+        except Exception:
+            pass
+
+    return result_map
+
+
+def save_enriched_profiles_bulk(client: SupabaseClient, profiles: list,
+                                original_url_map: dict = None,
+                                email_map: dict = None,
+                                batch_size: int = 100) -> dict:
+    """Save multiple enriched profiles using batch upsert (much faster than individual saves).
+
+    Replaces the old pattern of N individual save_enriched_profile() calls with:
+    1. One bulk SELECT to fetch existing original_urls
+    2. In-memory row preparation
+    3. Batch upserts of 100 rows each
+
+    For 2000 profiles: ~60 HTTP calls instead of ~6000.
+
+    Args:
+        client: SupabaseClient instance
+        profiles: List of Crustdata response dicts (each must have linkedin_flagship_url or linkedin_url)
+        original_url_map: {normalized_linkedin_url: original_url} mapping
+        email_map: {normalized_url: email} mapping from CSV
+        batch_size: Number of profiles per upsert batch (default 100)
+
+    Returns:
+        Stats dict: {'saved': int, 'errors': int, 'error_messages': list}
+    """
+    if not profiles:
+        return {'saved': 0, 'errors': 0, 'error_messages': []}
+
+    original_url_map = original_url_map or {}
+    email_map = email_map or {}
+    stats = {'saved': 0, 'errors': 0, 'error_messages': []}
+
+    # Step 1: Collect all linkedin_urls and normalize
+    url_profile_pairs = []
+    for profile in profiles:
+        linkedin_url = profile.get('linkedin_flagship_url') or profile.get('linkedin_url')
+        if not linkedin_url:
+            continue
+        norm_url = normalize_linkedin_url(linkedin_url)
+        if norm_url:
+            url_profile_pairs.append((norm_url, profile))
+
+    all_urls = [url for url, _ in url_profile_pairs]
+
+    # Step 2: Bulk-fetch existing original_urls (one query per 50 URLs)
+    existing_urls_map = _bulk_fetch_existing_original_urls(client, all_urls)
+
+    # Step 3: Prepare all rows in-memory
+    rows = []
+    has_original_urls_column = True  # Optimistic; will retry without if needed
+    for norm_url, profile in url_profile_pairs:
+        original_url = original_url_map.get(norm_url)
+        existing_urls = existing_urls_map.get(norm_url, [])
+
+        # Check email map for this profile
+        email = email_map.get(norm_url)
+        if not email and original_url:
+            email = email_map.get(normalize_linkedin_url(original_url))
+
+        try:
+            row = _prepare_profile_row(
+                norm_url, profile, original_url, existing_urls,
+                email=email, email_source='csv' if email else None
+            )
+            rows.append(row)
+        except Exception as e:
+            stats['errors'] += 1
+            stats['error_messages'].append(f"{norm_url}: prepare failed: {str(e)[:100]}")
+
+    # Step 4: Batch upsert in chunks
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i+batch_size]
+        try:
+            if has_original_urls_column:
+                client.upsert_batch('profiles', batch, on_conflict='linkedin_url')
+            else:
+                # Strip original_urls from all rows
+                clean_batch = [{k: v for k, v in row.items() if k != 'original_urls'} for row in batch]
+                client.upsert_batch('profiles', clean_batch, on_conflict='linkedin_url')
+            stats['saved'] += len(batch)
+        except Exception as e:
+            error_str = str(e)
+            # If original_urls column doesn't exist, retry this batch without it
+            if has_original_urls_column and ('original_urls' in error_str or '42703' in error_str):
+                has_original_urls_column = False
+                try:
+                    clean_batch = [{k: v for k, v in row.items() if k != 'original_urls'} for row in batch]
+                    client.upsert_batch('profiles', clean_batch, on_conflict='linkedin_url')
+                    stats['saved'] += len(batch)
+                    continue
+                except Exception as e2:
+                    error_str = str(e2)
+
+            # Batch failed — fall back to individual saves for this batch
+            print(f"[DB] Batch upsert failed ({error_str[:100]}), falling back to individual saves")
+            for row in batch:
+                try:
+                    client.upsert('profiles', row, on_conflict='linkedin_url')
+                    stats['saved'] += 1
+                except Exception as row_e:
+                    stats['errors'] += 1
+                    url = row.get('linkedin_url', 'unknown')
+                    stats['error_messages'].append(f"{url}: {str(row_e)[:100]}")
+
+    return stats
+
+
 def save_enriched_profiles_batch(client: SupabaseClient, profiles: list[tuple[str, dict]]) -> dict:
-    """Save multiple enriched profiles in a batch.
+    """Save multiple enriched profiles in a batch (legacy — uses individual saves).
 
     Args:
         client: SupabaseClient instance
@@ -626,21 +846,31 @@ def get_profiles_by_fit_level(client: SupabaseClient, fit_level: str, limit: int
     return client.select('profiles', '*', {'screening_fit_level': f'eq.{fit_level}'}, limit=limit)
 
 
-def get_all_profiles(client: SupabaseClient, limit: int = 10000, include_raw_data: bool = False) -> list:
+def get_all_profiles(client: SupabaseClient, limit: int = 10000, include_raw_data: bool = False, lightweight: bool = False) -> list:
     """Get all profiles.
 
     Args:
         client: SupabaseClient instance
         limit: Maximum number of profiles to return
-        include_raw_data: If False (default), excludes raw_data to save memory.
-                         Set to True only when raw_data is needed (e.g., screening).
+        include_raw_data: If True, includes raw_data JSONB (needed for screening)
+        lightweight: If True, returns minimal columns for fast counting/listing
+                     (excludes arrays, screening text — use for post-enrichment reload)
+
+    Uses keyset pagination on enriched_at for faster loading of large datasets.
     """
     if include_raw_data:
-        return client.select('profiles', '*', limit=limit)
+        return client.select('profiles', '*', limit=limit,
+                             order_by='enriched_at.desc', cursor_column='enriched_at')
+    elif lightweight:
+        # Minimal columns for fast post-enrichment reload (counting, basic display)
+        columns = 'linkedin_url,original_url,name,location,current_title,current_company,status,enriched_at,screening_score,screening_fit_level,screened_at,email'
+        return client.select('profiles', columns, limit=limit,
+                             order_by='enriched_at.desc', cursor_column='enriched_at')
     else:
-        # Select only indexed columns to save memory (exclude raw_data)
+        # Standard columns for Database tab (includes arrays for filtering, screening summary)
         columns = 'linkedin_url,original_url,name,location,current_title,current_company,all_employers,all_titles,all_schools,skills,status,enriched_at,screening_score,screening_fit_level,screening_summary,screening_reasoning,screened_at,email'
-        return client.select('profiles', columns, limit=limit)
+        return client.select('profiles', columns, limit=limit,
+                             order_by='enriched_at.desc', cursor_column='enriched_at')
 
 
 def get_profiles_by_urls(client: SupabaseClient, urls: list, include_raw_data: bool = True) -> list:
@@ -1509,12 +1739,16 @@ def get_recently_enriched_urls(client: SupabaseClient, months: int = 6) -> list:
     cutoff_date = (datetime.utcnow() - timedelta(days=months * 30)).isoformat()
     filters = {'enriched_at': f'gte.{cutoff_date}'}
 
-    # Try with original_urls array first (post-migration)
+    # Try with original_urls array first (post-migration), keyset pagination for speed
     try:
-        all_results = client.select('profiles', 'linkedin_url,original_url,original_urls', filters, limit=50000)
+        all_results = client.select('profiles', 'linkedin_url,original_url,original_urls,enriched_at',
+                                    filters, limit=50000,
+                                    order_by='enriched_at.desc', cursor_column='enriched_at')
     except Exception:
         # Fall back to old columns only (pre-migration)
-        all_results = client.select('profiles', 'linkedin_url,original_url', filters, limit=50000)
+        all_results = client.select('profiles', 'linkedin_url,original_url,enriched_at',
+                                    filters, limit=50000,
+                                    order_by='enriched_at.desc', cursor_column='enriched_at')
 
     urls = set()  # Use set to avoid duplicates
     for p in all_results:

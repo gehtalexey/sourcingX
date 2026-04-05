@@ -67,7 +67,7 @@ except ImportError:
 try:
     from db import (
         get_supabase_client, check_connection, save_enriched_profile,
-        update_profile_enrichment, update_profile_screening, update_profile_screening_batch, get_all_profiles,
+        update_profile_enrichment, update_profile_screening, update_profile_screening_batch, get_all_profiles, save_enriched_profiles_bulk,
         get_pipeline_stats, get_profiles_by_fit_level, get_all_linkedin_urls,
         get_dedup_stats, profiles_to_dataframe, get_usage_summary, get_usage_logs,
         get_usage_by_date, get_enriched_urls, get_recently_enriched_urls,
@@ -7289,28 +7289,27 @@ with tab_enrich:
                                                     if url and email and str(email).strip() and str(email).lower() != 'nan':
                                                         original_emails[normalize_linkedin_url(url)] = str(email).strip()
 
-                                        db_errors = []
+                                        # Build original_url map for bulk save
+                                        original_url_map = {}
                                         for profile in successful:
-                                            # Use linkedin_flagship_url (canonical) as primary, not encoded linkedin_url
-                                            linkedin_url = profile.get('linkedin_flagship_url') or profile.get('linkedin_url')
-                                            # Use tracked original URL for matching with loaded data
-                                            original_url = profile.get('_original_url')
-                                            if linkedin_url:
-                                                try:
-                                                    update_profile_enrichment(db_client, linkedin_url, profile, original_url=original_url)
-                                                    db_saved += 1
+                                            url = profile.get('linkedin_flagship_url') or profile.get('linkedin_url')
+                                            orig = profile.get('_original_url')
+                                            if url:
+                                                norm = normalize_linkedin_url(url)
+                                                if norm and orig:
+                                                    original_url_map[norm] = normalize_linkedin_url(orig)
 
-                                                    # Save email from original CSV if present
-                                                    norm_url = normalize_linkedin_url(linkedin_url)
-                                                    norm_orig = normalize_linkedin_url(original_url) if original_url else None
-                                                    csv_email = original_emails.get(norm_url) or (original_emails.get(norm_orig) if norm_orig else None)
-                                                    if csv_email:
-                                                        try:
-                                                            update_profile_email(db_client, linkedin_url, csv_email, source='csv')
-                                                        except Exception:
-                                                            pass  # Silently continue
-                                                except Exception as e:
-                                                    db_errors.append(f"{linkedin_url}: {str(e)[:100]}")
+                                        # Bulk save all profiles + emails in one call
+                                        bulk_result = save_enriched_profiles_bulk(
+                                            db_client,
+                                            successful,
+                                            original_url_map=original_url_map,
+                                            email_map=original_emails,
+                                            batch_size=100
+                                        )
+                                        db_saved = bulk_result['saved']
+                                        db_errors = bulk_result.get('error_messages', [])
+
                                         # Show DB save results immediately
                                         st.write(f"**DB Save:** {db_saved}/{len(successful)} profiles saved to database")
                                         if db_errors:
@@ -9242,7 +9241,7 @@ with tab_emails:
                 st.session_state['email_test_approved'] = False
 
             # Action buttons
-            email_btn_col1, email_btn_col2, email_btn_col3 = st.columns([1, 1, 2])
+            email_btn_col1, email_btn_col2, email_btn_col3, email_btn_col4 = st.columns([1, 1, 1, 1])
 
             with email_btn_col1:
                 generate_test_btn = st.button(
@@ -9252,6 +9251,21 @@ with tab_emails:
                 )
 
             with email_btn_col2:
+                email_custom_count = st.number_input(
+                    "Custom count",
+                    min_value=1,
+                    max_value=len(filtered_profiles) if filtered_profiles else 1,
+                    value=min(20, len(filtered_profiles)) if filtered_profiles else 1,
+                    key="email_custom_count"
+                )
+                generate_custom_btn = st.button(
+                    f"Generate {email_custom_count}",
+                    disabled=len(filtered_profiles) == 0 or not st.session_state.get('email_test_approved'),
+                    type="primary" if st.session_state.get('email_test_approved') else "secondary",
+                    key="email_generate_custom"
+                )
+
+            with email_btn_col3:
                 generate_all_btn = st.button(
                     f"Generate All ({len(filtered_profiles)})",
                     disabled=len(filtered_profiles) == 0 or not st.session_state.get('email_test_approved'),
@@ -9259,9 +9273,9 @@ with tab_emails:
                     key="email_generate_all"
                 )
 
-            with email_btn_col3:
+            with email_btn_col4:
                 if not st.session_state.get('email_test_approved'):
-                    st.caption("Run a test batch first to unlock 'Generate All'")
+                    st.caption("Run a test batch first to unlock custom & all")
 
             # Get OpenAI API key (use load_openai_key which handles st.secrets for cloud)
             openai_key = st.session_state.get('openai_api_key') or os.environ.get('OPENAI_API_KEY') or load_openai_key()
@@ -9352,7 +9366,76 @@ with tab_emails:
                 elif not st.session_state.get('email_test_approved'):
                     st.warning("Run a test batch first to unlock 'Generate All'.")
 
+            # Generate custom count
             email_api_key_all = anthropic_key if email_ai_provider == "anthropic" else openai_key
+            if generate_custom_btn and email_api_key_all and filtered_profiles and st.session_state.get('email_test_approved'):
+                custom_profiles = filtered_profiles[:email_custom_count]
+                with st.spinner(f"Loading profile data for {len(custom_profiles)} profiles..."):
+                    profiles_for_email = []
+                    raw_data_loaded = 0
+                    raw_data_missing = 0
+
+                    db_profiles_map = {}
+                    if HAS_DATABASE:
+                        try:
+                            db_client = _get_db_client()
+                            if db_client:
+                                urls_to_fetch = [p.get('linkedin_url') for p in custom_profiles if p.get('linkedin_url')]
+                                if urls_to_fetch:
+                                    from db import get_profiles_by_urls
+                                    db_profiles = get_profiles_by_urls(db_client, urls_to_fetch, include_raw_data=True)
+                                    for dp in db_profiles:
+                                        url = dp.get('linkedin_url', '')
+                                        if url:
+                                            db_profiles_map[url.lower().rstrip('/')] = dp
+                                        orig_url = dp.get('original_url', '')
+                                        if orig_url:
+                                            db_profiles_map[orig_url.lower().rstrip('/')] = dp
+                        except Exception as e:
+                            st.warning(f"Could not batch load from DB: {str(e)[:100]}")
+
+                    for p in custom_profiles:
+                        profile_data = {'name': p.get('name'), 'linkedin_url': p.get('linkedin_url'),
+                                       'current_title': p.get('current_title'), 'current_company': p.get('current_company'),
+                                       'email': p.get('email')}
+                        url = (p.get('linkedin_url') or '').lower().rstrip('/')
+                        db_profile = db_profiles_map.get(url)
+                        if db_profile and db_profile.get('raw_data'):
+                            profile_data['raw_data'] = db_profile['raw_data']
+                            raw_data_loaded += 1
+                        else:
+                            raw_data_missing += 1
+                        profiles_for_email.append(profile_data)
+
+                if raw_data_missing > 0:
+                    st.warning(f"Could not load raw_data for {raw_data_missing}/{len(custom_profiles)} profiles.")
+
+                with st.spinner(f"Generating emails for {len(profiles_for_email)} profiles..."):
+                    try:
+                        results = generate_emails_batch(
+                            profiles_for_email,
+                            email_api_key_all,
+                            sender=email_sender,
+                            tone=email_tone,
+                            length=email_length,
+                            custom_instruction=email_full_instruction if email_full_instruction else None,
+                            ai_model=email_ai_model,
+                            max_workers=10,
+                            progress_callback=None,
+                            generate_type=email_generate_type,
+                            position=email_position if email_position else None,
+                            ai_provider=email_ai_provider
+                        )
+
+                        st.session_state['email_generation_results'] = results
+                        st.success(f"Complete! {len(results)} emails generated")
+
+                    except Exception as e:
+                        st.error(f"Error generating emails: {str(e)}")
+
+                st.rerun()
+
+            # Generate all
             if generate_all_btn and email_api_key_all and filtered_profiles and st.session_state.get('email_test_approved'):
                 # Batch load raw_data for all profiles (much faster than individual calls)
                 with st.spinner(f"Loading profile data for {len(filtered_profiles)} profiles..."):

@@ -8,6 +8,7 @@ Uses REST API directly - no supabase package required.
 import os
 import json
 import re
+import hashlib
 import requests
 from datetime import datetime, timedelta
 from typing import Optional
@@ -775,6 +776,105 @@ def update_profile_screening_batch(client: SupabaseClient, results: list) -> dic
     except Exception as e:
         print(f"[DB] Batch screening save failed: {e}")
         return {'saved': 0, 'errors': len(rows)}
+
+
+def compute_jd_hash(jd_text: str) -> str:
+    """Compute a stable hash from JD text for screening dedup."""
+    return hashlib.sha256((jd_text or '')[:500].encode()).hexdigest()
+
+
+def insert_screening_result(client: SupabaseClient, linkedin_url: str, source_project: str,
+                             jd_hash: str, score: int = None, fit_level: str = None,
+                             result: str = None, summary: str = None, reasoning: str = None,
+                             notes: str = None, opener: str = None, jd_title: str = None,
+                             position_id: str = None, ai_model: str = None) -> dict:
+    """Insert screening result into the shared screening_results table.
+
+    Uses upsert on (linkedin_url, jd_hash, source_project) so re-screening
+    the same profile for the same JD overwrites the previous result.
+    """
+    linkedin_url = normalize_linkedin_url(linkedin_url)
+
+    data = {
+        'linkedin_url': linkedin_url,
+        'source_project': source_project,
+        'jd_hash': jd_hash,
+        'jd_title': jd_title,
+        'position_id': position_id,
+        'screening_score': score,
+        'screening_fit_level': fit_level,
+        'screening_result': result,
+        'screening_summary': summary,
+        'screening_reasoning': reasoning,
+        'screening_notes': notes,
+        'email_opener': opener,
+        'ai_model': ai_model,
+        'screened_at': datetime.utcnow().isoformat(),
+    }
+    data = {k: v for k, v in data.items() if v is not None}
+
+    try:
+        return client.upsert('screening_results', data,
+                              on_conflict='linkedin_url,jd_hash,source_project')
+    except Exception as e:
+        print(f"[DB] Warning: failed to write screening_results: {e}")
+        return None
+
+
+def insert_screening_results_batch(client: SupabaseClient, results: list,
+                                     source_project: str, jd_hash: str,
+                                     jd_title: str = None, ai_model: str = None) -> dict:
+    """Batch insert screening results into shared screening_results table.
+
+    Args:
+        results: List of dicts with keys: linkedin_url, score, fit_level, summary, reasoning
+        source_project: 'sourcingx' or 'autopilot'
+        jd_hash: Hash of the JD used for screening
+        jd_title: Human-readable JD title
+        ai_model: AI model used for screening
+    """
+    if not results:
+        return {'saved': 0, 'errors': 0}
+
+    now = datetime.utcnow().isoformat()
+    rows = []
+    for r in results:
+        url = normalize_linkedin_url(r.get('linkedin_url', ''))
+        if not url:
+            continue
+        row = {
+            'linkedin_url': url,
+            'source_project': source_project,
+            'jd_hash': jd_hash,
+            'jd_title': jd_title,
+            'screening_score': r.get('score'),
+            'screening_fit_level': r.get('fit_level'),
+            'screening_summary': r.get('summary'),
+            'screening_reasoning': r.get('reasoning'),
+            'ai_model': ai_model,
+            'screened_at': now,
+        }
+        row = {k: v for k, v in row.items() if v is not None}
+        rows.append(row)
+
+    if not rows:
+        return {'saved': 0, 'errors': 0}
+
+    try:
+        client.upsert_batch('screening_results', rows,
+                             on_conflict='linkedin_url,jd_hash,source_project')
+        return {'saved': len(rows), 'errors': 0}
+    except Exception as e:
+        print(f"[DB] Batch screening_results save failed: {e}")
+        return {'saved': 0, 'errors': len(rows)}
+
+
+def get_latest_screenings(client: SupabaseClient, fit_level: str = None, limit: int = 1000) -> list:
+    """Get latest screening per profile from the shared screening_results table."""
+    filters = {}
+    if fit_level:
+        filters['screening_fit_level'] = f'eq.{fit_level}'
+    return client.select('latest_screening', '*', filters, limit=limit)
 
 
 def update_profile_email(client: SupabaseClient, linkedin_url: str, email: str, source: str = 'salesql') -> dict:

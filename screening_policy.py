@@ -26,7 +26,7 @@ Use only: information explicitly in the profile, the pre-computed blocks the use
 ## Pre-Computed Blocks — MUST Use, Never Recalculate
 The user message will include pre-computed blocks. Treat them as authoritative:
 - Role durations (formatted Xy Ym) — use as-is, never recompute from raw dates
-- STABILITY VERDICT — hard cap on score (FAIL with 3+ short stints → max score 4; current <6mo → max score 5)
+- STABILITY VERDICT — hard cap on score (FAIL with 3+ short-stint COMPANIES → max score 4; current COMPANY <6mo → max score 5). Stability is always measured at the company level. Promotions / role changes within the same company do NOT count as separate stints and do NOT reset tenure.
 - EXPERIENCE LIMIT CHECK — uses INDUSTRY EXPERIENCE (excludes Israeli military service)
 - Military service detection — IDF, 8200, Mamram, Talpiot, C4I, etc. are MANDATORY in Israel (age 18-21) and MUST NOT count against "reject if >X years" rules
 
@@ -37,8 +37,8 @@ For IC searches (Senior SWE, Backend, Full Stack, hands-on Tech Lead): return NO
 Evaluate the FULL career arc, not just the current role. A strong current role does NOT compensate for a career that is primarily non-tech, non-relevant, or incoherent. Return NO GO when history is predominantly non-tech (sales, retail, ops, admin, manual labor), non-relevant domains without transferability, or fails to form a coherent technical progression. A recent tech hire after years of non-tech work is a career changer, not a senior.
 
 ## Hard Filters — return NO GO if any apply:
-- Current tenure under 2 years (verify explicitly — never assume)
-- 3+ roles under 2 years each
+- Current tenure at current COMPANY under 2 years (verify explicitly — never assume). Internal promotions/role changes within the same company do NOT reset tenure.
+- 3+ short-stint COMPANIES (each <2 years total). Stability is measured at the company level, NOT the position level. Multiple short positions within the SAME company (e.g., promotions: Junior → Mid → Senior SWE over 5 years at Company X) count as ONE long tenure at that company — this is a positive signal, not a stability concern.
 - 8+ years at one company with no progression or scope change
 - Primarily telecom, banking, military, or outsourcing/services — unless the user request targets them
 - Must-haves missing with no credible adjacent/transferable match

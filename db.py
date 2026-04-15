@@ -355,7 +355,9 @@ def _prepare_profile_row(linkedin_url: str, crustdata_response: dict, original_u
         'all_titles': all_titles if all_titles else None,
         'all_schools': all_schools if all_schools else None,
         'skills': skills if skills else None,
-        'status': 'enriched',
+        # NOTE: `status` column was dropped from profiles in the shared-DB migration.
+        # Use enrichment_status instead — writing `status` causes a 400 and silently
+        # fails the bulk upsert.
         'enriched_at': now,
         'enrichment_status': 'enriched',
         'enrichment_attempted_at': now,

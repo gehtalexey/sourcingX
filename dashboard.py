@@ -6783,7 +6783,7 @@ with tab_enrich:
                 urls_hash = hashlib.md5('|'.join(sorted(str(u) for u in urls)).encode()).hexdigest()
 
                 # Cache version - increment when detection logic changes to force refresh
-                _DETECTION_CACHE_VERSION = 2  # Bumped: Added original_urls support
+                _DETECTION_CACHE_VERSION = 3  # Bumped: tz-aware cutoff caused 0 matches; now uses naive utcnow()
                 use_cached_detection = (
                     st.session_state.get('_detection_hash') == urls_hash and
                     st.session_state.get('_detection_cache_version') == _DETECTION_CACHE_VERSION and
@@ -6891,9 +6891,17 @@ with tab_enrich:
                         # UNIFIED MATCHING: Fetch profiles and build lookup (same as Load from DB)
                         # MEMORY FIX: Exclude raw_data (20-50KB per profile) — not needed for URL matching or display
                         # STABILITY FIX: Round cutoff to start of day to prevent inconsistent counts on refresh
-                        cutoff_date = (datetime.now(timezone.utc) - timedelta(days=refresh_months * 30)).replace(hour=0, minute=0, second=0, microsecond=0)
+                        # BUGFIX: Use NAIVE utcnow() to match how db.get_recently_enriched_urls() formats the
+                        # cutoff. A tz-aware datetime produces "+00:00" in the ISO string, which compares
+                        # incorrectly against the naive `enriched_at` column in Supabase and returns 0 rows.
+                        cutoff_date = (datetime.utcnow() - timedelta(days=refresh_months * 30)).replace(hour=0, minute=0, second=0, microsecond=0)
                         cutoff = cutoff_date.isoformat()
-                        _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,status,enriched_at,screened_at,contacted_at,screening_score,screening_fit_level,screening_summary'
+                        # NOTE: After the shared-DB migration, these columns were dropped
+                        # from profiles: screening_score/fit_level/summary/reasoning (moved
+                        # to screening_results), status, screened_at, contacted_at.
+                        # Selecting a dropped column makes PostgREST 400 and the try/except
+                        # silently drops ALL matches, making every URL look "new".
+                        _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,enriched_at'
                         all_profiles = db_client.select('profiles', _MATCH_COLUMNS,
                             filters={'enriched_at': f'gte.{cutoff}'}, limit=50000)
 
@@ -6977,6 +6985,9 @@ with tab_enrich:
                         db_check_error = str(e)
                         # Fallback: all URLs are new
                         new_urls = list(urls)
+                        # Surface the error so silent failures (e.g., dropped columns in
+                        # the shared schema) are visible instead of looking like 0 matches.
+                        st.error(f"DB dedup query failed — all URLs will appear as 'to enrich'. Error: {db_check_error[:500]}")
                 else:
                     new_urls = list(urls)
 
@@ -7475,10 +7486,24 @@ with tab_enrich:
                                 except Exception as e:
                                     st.warning(f"Database save failed: {e}")
 
-                            # Store message to show after rerun
-                            db_msg = f" (DB: {db_saved} saved)" if db_saved > 0 else ""
+                            # Store message to show after rerun — always show DB save count
+                            # so the recruiter can see how many landed in Supabase (not just session).
+                            if HAS_DATABASE:
+                                db_msg = f" | DB: {db_saved}/{len(successful)} saved"
+                            else:
+                                db_msg = " | DB: not connected"
 
-                            # Clear any cached data so counts update
+                            # Clear all caches so the "already enriched" count refreshes from DB.
+                            # Explicitly clear the two most-relevant caches in addition to cache_data.clear()
+                            # (belt-and-braces: some Streamlit versions don't always wipe decorated functions).
+                            try:
+                                _cached_recently_enriched_urls.clear()
+                            except Exception:
+                                pass
+                            try:
+                                _cached_not_found_urls.clear()
+                            except Exception:
+                                pass
                             st.cache_data.clear()
 
                             # Clear detection cache so "already enriched" counts refresh

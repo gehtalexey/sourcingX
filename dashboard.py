@@ -3852,16 +3852,22 @@ def _extract_json_from_text(text):
     return text
 
 
+MAYBE_SCORE_THRESHOLD = 6
+
+
 def _decision_to_fit_label(decision: str, score: int) -> str:
-    """Map unified-policy {decision, score} back to legacy fit labels so the
-    existing UI (stats, filters, sort, email tab) keeps working unchanged."""
+    """Map unified-policy {decision, score} to recruiter-facing buckets.
+    GO → Good Fit; NO GO with score ≥ MAYBE_SCORE_THRESHOLD → Maybe
+    (borderline — worth a human glance); otherwise Not a Fit."""
     is_go = str(decision).upper().strip() == "GO"
-    if is_go and score >= 9:
-        return "Strong Fit"
-    if is_go and score >= 7:
+    if is_go:
         return "Good Fit"
-    if not is_go and score >= 5:
-        return "Partial Fit"
+    try:
+        s = int(score or 0)
+    except (TypeError, ValueError):
+        s = 0
+    if s >= MAYBE_SCORE_THRESHOLD:
+        return "Maybe"
     return "Not a Fit"
 
 
@@ -8803,23 +8809,21 @@ with tab_screening:
 
             screening_results = st.session_state['screening_results']
 
-            # Summary stats
-            stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
-            strong_fit = sum(1 for r in screening_results if r.get('fit') == 'Strong Fit')
+            # Summary stats (unified policy: Good Fit = GO, Maybe = borderline NO GO, Not a Fit = NO GO)
+            stats_col1, stats_col2, stats_col3 = st.columns(3)
             good_fit = sum(1 for r in screening_results if r.get('fit') == 'Good Fit')
-            partial_fit = sum(1 for r in screening_results if r.get('fit') == 'Partial Fit')
+            maybe_fit = sum(1 for r in screening_results if r.get('fit') == 'Maybe')
             not_fit = sum(1 for r in screening_results if r.get('fit') == 'Not a Fit')
 
-            stats_col1.metric("Strong Fit", strong_fit, delta=None)
-            stats_col2.metric("Good Fit", good_fit, delta=None)
-            stats_col3.metric("Partial Fit", partial_fit, delta=None)
-            stats_col4.metric("Not a Fit", not_fit, delta=None)
+            stats_col1.metric("GO", good_fit, delta=None)
+            stats_col2.metric("Maybe", maybe_fit, delta=None)
+            stats_col3.metric("NO GO", not_fit, delta=None)
 
             # Filter by fit level
             fit_filter = st.multiselect(
                 "Filter by fit level",
-                options=["Strong Fit", "Good Fit", "Partial Fit", "Not a Fit", "Error"],
-                default=["Strong Fit", "Good Fit"],
+                options=["Good Fit", "Maybe", "Not a Fit", "Error"],
+                default=["Good Fit", "Maybe"],
                 key="fit_filter"
             )
 
@@ -8828,9 +8832,15 @@ with tab_screening:
             # legacy role-prompt results don't, so fall back to score.
             filtered_results = [r for r in screening_results if r.get('fit') in fit_filter]
             def _sort_key(r):
-                decision = str(r.get('decision', '') or '').upper().strip()
-                go_rank = 0 if decision == 'GO' else 1  # GO first
-                return (go_rank, -int(r.get('score', 0) or 0))
+                # Bucket order: GO → Maybe → NO GO; then score desc within bucket
+                fit = r.get('fit', '')
+                if fit == 'Good Fit':
+                    bucket = 0
+                elif fit == 'Maybe':
+                    bucket = 1
+                else:
+                    bucket = 2
+                return (bucket, -int(r.get('score', 0) or 0))
             sorted_results = sorted(filtered_results, key=_sort_key)
 
             # Check for profiles with missing data
@@ -8879,7 +8889,7 @@ with tab_screening:
                         )
 
                 # Reorder columns to put important ones first (linkedin_url next to name for easy click)
-                priority_cols = ['score', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
+                priority_cols = ['score', 'decision', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
                 ordered_cols = [c for c in priority_cols if c in df_display.columns]
                 other_cols = [c for c in df_display.columns if c not in priority_cols and c != 'index']
                 df_display = df_display[ordered_cols + other_cols]
@@ -8890,6 +8900,7 @@ with tab_screening:
                     hide_index=True,
                     column_config={
                         "score": st.column_config.NumberColumn("Score", format="%d/10"),
+                        "decision": st.column_config.TextColumn("Decision", width="small", help="GO / NO GO (unified policy only)"),
                         "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                     }
                 )
@@ -8934,22 +8945,23 @@ with tab_screening:
                 screening_df = pd.DataFrame(sorted_results)
                 # Note: Email data is already merged from enriched_df into screening_results above
 
-                # Choose which candidates to enrich
+                # Choose which candidates to enrich (unified policy buckets)
                 candidate_source = st.radio(
                     "Which candidates to enrich?",
-                    ["Strong + Good Fit", "Strong + Good + Partial Fit", "All candidates"],
+                    ["GO only", "GO + Maybe", "All candidates"],
                     key="candidate_source_tab5",
                     horizontal=True
                 )
 
-                if candidate_source == "Strong + Good Fit" and 'fit' in screening_df.columns:
-                    enrich_df = screening_df[screening_df['fit'].isin(['Strong Fit', 'Good Fit'])].copy()
-                    st.caption(f"Priority candidates: {len(enrich_df)} (Strong + Good Fit)")
-                elif candidate_source == "Strong + Good + Partial Fit" and 'fit' in screening_df.columns:
-                    enrich_df = screening_df[screening_df['fit'].isin(['Strong Fit', 'Good Fit', 'Partial Fit'])].copy()
-                    st.caption(f"Extended candidates: {len(enrich_df)} (Strong + Good + Partial Fit)")
+                if candidate_source == "GO only":
+                    enrich_df = screening_df[screening_df['fit'] == 'Good Fit'].copy() if 'fit' in screening_df.columns else screening_df.copy()
+                    st.caption(f"GO candidates: {len(enrich_df)}")
+                elif candidate_source == "GO + Maybe":
+                    enrich_df = screening_df[screening_df['fit'].isin(['Good Fit', 'Maybe'])].copy() if 'fit' in screening_df.columns else screening_df.copy()
+                    st.caption(f"GO + Maybe candidates: {len(enrich_df)}")
                 else:
                     enrich_df = screening_df.copy()
+                    st.caption(f"All candidates: {len(enrich_df)}")
 
                 current_count = len(enrich_df)
                 # Check both email fields (DB email and SalesQL email)
@@ -9105,37 +9117,45 @@ with tab_screening:
                 final_cols = available_cols + remaining
                 return df[final_cols].to_csv(index=False)
 
-            # Count by fit level
-            strong_list = [r for r in screening_results if r.get('fit') == 'Strong Fit']
-            good_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
-            partial_list = [r for r in screening_results if r.get('fit') == 'Partial Fit']
-            strong_good_list = [r for r in screening_results if r.get('fit') in ['Strong Fit', 'Good Fit']]
-            strong_good_partial_list = [r for r in screening_results if r.get('fit') in ['Strong Fit', 'Good Fit', 'Partial Fit']]
+            # Unified-policy buckets
+            go_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
+            maybe_list = [r for r in screening_results if r.get('fit') == 'Maybe']
+            no_go_list = [r for r in screening_results if r.get('fit') == 'Not a Fit']
 
-            # Row 1: Combined exports (most useful)
-            st.caption("**Combined Exports**")
-            combo_col1, combo_col2, combo_col3, combo_col4 = st.columns(4)
+            exp_col1, exp_col2, exp_col3, exp_col4, exp_col5 = st.columns(5)
 
-            with combo_col1:
+            with exp_col1:
                 st.download_button(
-                    f"Strong + Good ({len(strong_good_list)})",
-                    prepare_screening_export(strong_good_list),
-                    "screening_strong_good_fit.csv",
+                    f"GO ({len(go_list)})",
+                    prepare_screening_export(go_list),
+                    "screening_go.csv",
                     "text/csv",
-                    disabled=len(strong_good_list) == 0,
-                    type="primary"
+                    disabled=len(go_list) == 0,
+                    type="primary",
+                    key="export_go"
                 )
 
-            with combo_col2:
+            with exp_col2:
                 st.download_button(
-                    f"Strong + Good + Partial ({len(strong_good_partial_list)})",
-                    prepare_screening_export(strong_good_partial_list),
-                    "screening_strong_good_partial_fit.csv",
+                    f"Maybe ({len(maybe_list)})",
+                    prepare_screening_export(maybe_list),
+                    "screening_maybe.csv",
                     "text/csv",
-                    disabled=len(strong_good_partial_list) == 0
+                    disabled=len(maybe_list) == 0,
+                    key="export_maybe"
                 )
 
-            with combo_col3:
+            with exp_col3:
+                st.download_button(
+                    f"NO GO ({len(no_go_list)})",
+                    prepare_screening_export(no_go_list),
+                    "screening_no_go.csv",
+                    "text/csv",
+                    disabled=len(no_go_list) == 0,
+                    key="export_no_go"
+                )
+
+            with exp_col4:
                 st.download_button(
                     f"All Results ({len(sorted_results)})",
                     prepare_screening_export(sorted_results),
@@ -9143,39 +9163,8 @@ with tab_screening:
                     "text/csv"
                 )
 
-            with combo_col4:
+            with exp_col5:
                 st.button("Clear Results", key="clear_screening", on_click=_cb_clear_screening_results)
-
-            # Row 2: Individual fit levels
-            with st.expander("Individual Fit Level Exports"):
-                ind_col1, ind_col2, ind_col3 = st.columns(3)
-
-                with ind_col1:
-                    st.download_button(
-                        f"Strong Fit ({len(strong_list)})",
-                        prepare_screening_export(strong_list),
-                        "screening_strong_fit.csv",
-                        "text/csv",
-                        disabled=len(strong_list) == 0
-                    )
-
-                with ind_col2:
-                    st.download_button(
-                        f"Good Fit ({len(good_list)})",
-                        prepare_screening_export(good_list),
-                        "screening_good_fit.csv",
-                        "text/csv",
-                        disabled=len(good_list) == 0
-                    )
-
-                with ind_col3:
-                    st.download_button(
-                        f"Partial Fit ({len(partial_list)})",
-                        prepare_screening_export(partial_list),
-                        "screening_partial_fit.csv",
-                        "text/csv",
-                        disabled=len(partial_list) == 0
-                    )
 
 # ========== TAB 6: Emails ==========
 with tab_emails:
@@ -9262,9 +9251,10 @@ with tab_emails:
             with email_row2_col2:
                 email_fit_filter = st.multiselect(
                     "Include Fit Levels",
-                    options=["Strong Fit", "Good Fit", "Partial Fit"],
-                    default=["Strong Fit", "Good Fit"],
-                    key="email_fit_filter"
+                    options=["Good Fit", "Maybe"],
+                    default=["Good Fit"],
+                    key="email_fit_filter",
+                    help="Good Fit = GO, Maybe = borderline NO GO (score ≥ threshold)"
                 )
 
             # Third row: custom instruction (optional)
@@ -9284,7 +9274,7 @@ with tab_emails:
                 else:
                     email_full_instruction = email_custom_instruction
 
-            # Filter profiles by selected fit levels
+            # Filter profiles by selected buckets (Good Fit = GO, Maybe = borderline)
             filtered_profiles = [r for r in profiles_with_raw if r.get('fit') in email_fit_filter]
 
             # Test batch size and cost estimate
@@ -9308,7 +9298,7 @@ with tab_emails:
                     st.metric("Profiles Selected", "0")
 
             with email_test_col3:
-                st.info(f"**{len(filtered_profiles)}** profiles selected ({', '.join(email_fit_filter)})")
+                st.info(f"**{len(filtered_profiles)}** profiles selected ({', '.join(email_fit_filter) or 'none'})")
 
             # Initialize session state for email results
             if 'email_generation_results' not in st.session_state:

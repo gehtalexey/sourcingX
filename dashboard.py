@@ -84,6 +84,7 @@ try:
         importlib.reload(prompts)  # Force fresh load once per session
         st.session_state['prompts_loaded'] = True
     from prompts import DEFAULT_PROMPTS
+    from screening_policy import get_system_prompt as _policy_system_prompt, build_user_prompt as _policy_user_prompt
     from pb_dedup import filter_results_against_database, update_phantombuster_with_skip_list, get_skip_list_from_database
     HAS_DATABASE = True
 except ImportError:
@@ -427,6 +428,19 @@ st.markdown("""
 
 # Load API keys
 @st.cache_data(ttl=3600, max_entries=3)  # Config rarely changes - cache for 1 hour
+def is_admin_user() -> bool:
+    """Return True if the current logged-in username is in config.admin_usernames.
+    Used to gate the legacy role-prompt dropdown (non-admins see only the
+    unified-policy textbox)."""
+    try:
+        cfg = load_config()
+        admins = cfg.get('admin_usernames') or []
+        username = st.session_state.get('username') or ''
+        return bool(username) and username in admins
+    except Exception:
+        return False
+
+
 def load_config():
     """Load config from config.json or Streamlit secrets (for cloud deployment)."""
     config = {}
@@ -3838,10 +3852,29 @@ def _extract_json_from_text(text):
     return text
 
 
+MAYBE_SCORE_THRESHOLD = 6
+
+
+def _decision_to_fit_label(decision: str, score: int) -> str:
+    """Map unified-policy {decision, score} to recruiter-facing buckets.
+    GO → Good Fit; NO GO with score ≥ MAYBE_SCORE_THRESHOLD → Maybe
+    (borderline — worth a human glance); otherwise Not a Fit."""
+    is_go = str(decision).upper().strip() == "GO"
+    if is_go:
+        return "Good Fit"
+    try:
+        s = int(score or 0)
+    except (TypeError, ValueError):
+        s = 0
+    if s >= MAYBE_SCORE_THRESHOLD:
+        return "Maybe"
+    return "Not a Fit"
+
+
 def screen_profile(profile: dict, job_description: str, client,
                    tracker: 'UsageTracker' = None, mode: str = "detailed",
                    ai_model: str = "gpt-4o-mini", role_prompt: str = None,
-                   ai_provider: str = "openai") -> dict:
+                   ai_provider: str = "openai", user_request: str = None) -> dict:
     """Screen a profile against a job description using OpenAI or Anthropic.
 
     Args:
@@ -3887,7 +3920,7 @@ def screen_profile(profile: dict, job_description: str, client,
     durations_text = compute_role_durations_cached(raw)
     trimmed_raw = trim_raw_profile(raw)
 
-    # JSON format based on mode
+    # JSON format based on mode (legacy path only — unified policy has its own format)
     if mode == "quick":
         json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit"}'
         max_tokens = 50
@@ -3895,11 +3928,18 @@ def screen_profile(profile: dict, job_description: str, client,
         json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit", "summary": "2-3 sentences: experience calc, key skills match, and score justification"}'
         max_tokens = 300
 
-    # Build prompts
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # Use role-specific prompt if provided, otherwise use default
-    if role_prompt:
+    # Three prompt-build paths:
+    #   1. user_request  → unified screening_policy.py (new default for regular users)
+    #   2. role_prompt   → legacy role-specific prompt from prompts.py (admin-only)
+    #   3. fallback      → old SCREENING_PROMPT constant
+    use_unified_policy = bool(user_request) and not role_prompt
+    if use_unified_policy:
+        system_prompt = _policy_system_prompt()
+        user_prompt = _policy_user_prompt(user_request, durations_text, trimmed_raw)
+        max_tokens = 400  # room for decision + score + reasoning
+    elif role_prompt:
         system_prompt = f"""{role_prompt}
 {_DURATION_PROMPT_INSTRUCTIONS}
 
@@ -3907,12 +3947,20 @@ Today's date: {today}
 
 Return ONLY valid JSON in this format:
 {json_format}"""
+        durations_header = f"{durations_text}\n\n" if durations_text else ""
+        user_prompt = f"""{durations_header}## Job Description:
+{job_description}
+
+## Candidate Profile:
+```json
+{json.dumps(trimmed_raw, indent=2, default=str)}
+```
+
+Evaluate this candidate against the job requirements and return JSON."""
     else:
         system_prompt = SCREENING_PROMPT.format(today=today, json_format=json_format)
-
-    # Build user prompt with pre-computed durations above profile JSON
-    durations_header = f"{durations_text}\n\n" if durations_text else ""
-    user_prompt = f"""{durations_header}## Job Description:
+        durations_header = f"{durations_text}\n\n" if durations_text else ""
+        user_prompt = f"""{durations_header}## Job Description:
 {job_description}
 
 ## Candidate Profile:
@@ -3996,6 +4044,21 @@ Evaluate this candidate against the job requirements and return JSON."""
                 )
 
             result = json.loads(response.choices[0].message.content)
+
+        # Unified-policy path returns {decision, score, reasoning}.
+        # Map to legacy {score, fit, summary} so downstream UI keeps working,
+        # and keep the raw decision/reasoning fields for the new display.
+        if use_unified_policy:
+            decision = str(result.get("decision", "NO GO")).upper().strip()
+            score = int(result.get("score", 0) or 0)
+            reasoning = str(result.get("reasoning", "") or "")
+            result = {
+                "score": score,
+                "fit": _decision_to_fit_label(decision, score),
+                "summary": reasoning,
+                "decision": decision,
+                "reasoning": reasoning,
+            }
 
         return result
 
@@ -4127,7 +4190,8 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                           max_workers: int = 15,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
                           ai_model: str = "gpt-4o-mini", role_prompt: str = None,
-                          ai_provider: str = "openai", api_key: str = None) -> list:
+                          ai_provider: str = "openai", api_key: str = None,
+                          user_request: str = None) -> list:
     """Screen multiple profiles in parallel using ThreadPoolExecutor.
 
     Args:
@@ -4179,7 +4243,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                     if cancel_flag and cancel_flag.get('cancelled'):
                         return None
 
-                    result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
+                    result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider, user_request=user_request)
                     break  # Success, exit retry loop
 
                 except Exception as e:
@@ -8169,47 +8233,50 @@ with tab_screening:
 
         num_profiles = len(profiles_df)
 
-        # Screening Mode Toggle
-        # ===== STEP 1: Role Selection (system prompt) =====
-        st.markdown("### 1. Select Role")
-
-        role_options = ['General (auto)']
-        role_map = {'General (auto)': None}
-        try:
-            for role_key, role_data in DEFAULT_PROMPTS.items():
-                name = role_data.get('name', role_key.title())
-                role_options.append(name)
-                role_map[name] = role_data.get('prompt')
-        except:
-            pass
-
-        selected_role = st.selectbox(
-            "Role type (determines system prompt)",
-            options=role_options,
-            index=0,
-            key="screening_role_select",
-            help="Each role has specific evaluation criteria. The role prompt becomes the system prompt."
+        # ===== STEP 1: Role + requirements (single textbox, unified policy) =====
+        # Regular users only see this field. Their text becomes $ARGUMENTS for
+        # the unified screening_policy.py rubric — no role dropdown, no JD split.
+        # Admins additionally see the legacy role dropdown below (expander).
+        st.markdown("### 1. Role, must-haves, exclusions")
+        st.caption("Describe the role you're screening for: title, must-haves, nice-to-haves, and any exclusions. This is the only input — the screening rubric is the same for every role.")
+        job_description = st.text_area(
+            "Role, must-haves, exclusions",
+            height=220,
+            key="jd_screening",
+            placeholder="Example: Senior Backend Engineer, Node.js + Postgres, 5+ years at a product startup. Must have: production API ownership, microservices. Exclude: team leads without recent hands-on, >8 years at a single non-progressing role..."
         )
 
-        role_prompt = role_map.get(selected_role)
+        # Admin-only: legacy role-specific prompts from prompts.py
+        _is_admin = is_admin_user()
+        role_prompt = None
+        selected_role = 'General (auto)'
+        if _is_admin:
+            with st.expander("🔧 Admin — Legacy role-specific prompts (overrides unified policy)", expanded=False):
+                role_options = ['General (auto)']
+                role_map = {'General (auto)': None}
+                try:
+                    for role_key, role_data in DEFAULT_PROMPTS.items():
+                        name = role_data.get('name', role_key.title())
+                        role_options.append(name)
+                        role_map[name] = role_data.get('prompt')
+                except Exception:
+                    pass
+
+                selected_role = st.selectbox(
+                    "Role type (legacy — admin only)",
+                    options=role_options,
+                    index=0,
+                    key="screening_role_select",
+                    help="Legacy behavior: picks a role-specific system prompt from prompts.py. Leave on 'General (auto)' to use the unified screening_policy.py."
+                )
+                role_prompt = role_map.get(selected_role)
+                if role_prompt:
+                    st.caption(f"⚠️ Legacy mode active — using '{selected_role}' prompt instead of unified policy")
+                    with st.expander(f"View {selected_role} system prompt ({len(role_prompt)} chars)"):
+                        st.code(role_prompt, language=None)
+
         st.session_state['active_role_prompt'] = role_prompt
         st.session_state['active_role_name'] = selected_role
-
-        if role_prompt:
-            with st.expander(f"View {selected_role} system prompt ({len(role_prompt)} chars)"):
-                st.code(role_prompt, language=None)
-        else:
-            st.caption("General mode: Uses generic evaluation")
-
-        # ===== STEP 2: Job Description =====
-        st.markdown("### 2. Job Description / Requirements")
-        st.caption("Paste job description or requirements as free text.")
-        job_description = st.text_area(
-            "Job Description / Requirements",
-            height=200,
-            key="jd_screening",
-            placeholder="Paste the job description, must-haves, nice-to-haves, and any specific criteria..."
-        )
 
         # Screening Configuration
         screen_count = st.number_input(
@@ -8230,8 +8297,11 @@ with tab_screening:
         output_tokens = 150
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
-        role_display = selected_role if selected_role != 'General (auto)' else 'General'
-        st.info(f"Role: **{role_display}** | Model: **gpt-4o-mini** | Est. cost: **${est_cost:.3f}**")
+        if role_prompt:
+            role_display = f"Legacy: {selected_role}"
+        else:
+            role_display = "Unified policy"
+        st.info(f"Rubric: **{role_display}** | Model: **gpt-4o-mini** | Est. cost: **${est_cost:.3f}**")
 
         # Debug: Show available fields and test single profile
         with st.expander("Debug: Profile Fields & Test"):
@@ -8255,7 +8325,7 @@ with tab_screening:
                         for k, v in test_profile.items():
                             if isinstance(v, float) and math.isnan(v):
                                 test_profile[k] = ''
-                        result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider)
+                        result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider, user_request=(None if role_prompt else job_description))
                         st.write("Result:", result)
                     except Exception as e:
                         import traceback
@@ -8435,6 +8505,7 @@ with tab_screening:
                 elif batch_ai_provider == "openai":
                     max_workers = min(max_workers, 10)  # Cap OpenAI at 10 concurrent
                 batch_role_prompt = batch_state.get('role_prompt')
+                batch_user_request = batch_state.get('user_request')
                 batch_size = 50  # Tier 3: 50 parallel requests, 50 × 15KB = ~750KB memory
                 current_batch = batch_state.get('current_batch', 0)
                 all_results = batch_state.get('results', [])
@@ -8511,7 +8582,8 @@ with tab_screening:
                             role_prompt=batch_role_prompt,
                             progress_callback=_on_profile_screened,
                             ai_provider=batch_ai_provider,
-                            api_key=batch_api_key
+                            api_key=batch_api_key,
+                            user_request=batch_user_request
                         )
                         all_results.extend(batch_results)
 
@@ -8711,7 +8783,8 @@ with tab_screening:
                     'ai_model': ai_model,
                     'ai_provider': ai_provider,
                     'api_key': anthropic_key if ai_provider == "anthropic" else openai_key,
-                    'role_prompt': role_prompt,  # Role-specific system prompt (like Custom GPT)
+                    'role_prompt': role_prompt,  # Admin-only legacy path
+                    'user_request': None if role_prompt else job_description,  # Unified policy path
                     'current_batch': 0,
                     'results': initial_results,  # Start with existing results if re-screening selected
                     'is_continue': False,  # Always fresh screening
@@ -8735,29 +8808,39 @@ with tab_screening:
 
             screening_results = st.session_state['screening_results']
 
-            # Summary stats
-            stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
-            strong_fit = sum(1 for r in screening_results if r.get('fit') == 'Strong Fit')
+            # Summary stats (unified policy: Good Fit = GO, Maybe = borderline NO GO, Not a Fit = NO GO)
+            stats_col1, stats_col2, stats_col3 = st.columns(3)
             good_fit = sum(1 for r in screening_results if r.get('fit') == 'Good Fit')
-            partial_fit = sum(1 for r in screening_results if r.get('fit') == 'Partial Fit')
+            maybe_fit = sum(1 for r in screening_results if r.get('fit') == 'Maybe')
             not_fit = sum(1 for r in screening_results if r.get('fit') == 'Not a Fit')
 
-            stats_col1.metric("Strong Fit", strong_fit, delta=None)
-            stats_col2.metric("Good Fit", good_fit, delta=None)
-            stats_col3.metric("Partial Fit", partial_fit, delta=None)
-            stats_col4.metric("Not a Fit", not_fit, delta=None)
+            stats_col1.metric("GO", good_fit, delta=None)
+            stats_col2.metric("Maybe", maybe_fit, delta=None)
+            stats_col3.metric("NO GO", not_fit, delta=None)
 
             # Filter by fit level
             fit_filter = st.multiselect(
                 "Filter by fit level",
-                options=["Strong Fit", "Good Fit", "Partial Fit", "Not a Fit", "Error"],
-                default=["Strong Fit", "Good Fit"],
+                options=["Good Fit", "Maybe", "Not a Fit", "Error"],
+                default=["Good Fit", "Maybe"],
                 key="fit_filter"
             )
 
-            # Filter and sort results
+            # Filter and sort results — GO first, then by score desc.
+            # Unified-policy results have a 'decision' field ("GO"/"NO GO");
+            # legacy role-prompt results don't, so fall back to score.
             filtered_results = [r for r in screening_results if r.get('fit') in fit_filter]
-            sorted_results = sorted(filtered_results, key=lambda x: x.get('score', 0), reverse=True)
+            def _sort_key(r):
+                # Bucket order: GO → Maybe → NO GO; then score desc within bucket
+                fit = r.get('fit', '')
+                if fit == 'Good Fit':
+                    bucket = 0
+                elif fit == 'Maybe':
+                    bucket = 1
+                else:
+                    bucket = 2
+                return (bucket, -int(r.get('score', 0) or 0))
+            sorted_results = sorted(filtered_results, key=_sort_key)
 
             # Check for profiles with missing data
             missing_data_profiles = [r for r in screening_results if r.get('fit') == 'Missing Data' or r.get('missing_data')]
@@ -8805,7 +8888,7 @@ with tab_screening:
                         )
 
                 # Reorder columns to put important ones first (linkedin_url next to name for easy click)
-                priority_cols = ['score', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
+                priority_cols = ['score', 'decision', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
                 ordered_cols = [c for c in priority_cols if c in df_display.columns]
                 other_cols = [c for c in df_display.columns if c not in priority_cols and c != 'index']
                 df_display = df_display[ordered_cols + other_cols]
@@ -8816,6 +8899,7 @@ with tab_screening:
                     hide_index=True,
                     column_config={
                         "score": st.column_config.NumberColumn("Score", format="%d/10"),
+                        "decision": st.column_config.TextColumn("Decision", width="small", help="GO / NO GO (unified policy only)"),
                         "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                     }
                 )
@@ -8825,6 +8909,7 @@ with tab_screening:
                 display_data = []
                 for r in sorted_results:
                     display_data.append({
+                        'Decision': r.get('decision', '') or '',
                         'Score': r.get('score', 0),
                         'Fit': r.get('fit', ''),
                         'Name': r.get('name', '') or '',
@@ -8841,6 +8926,7 @@ with tab_screening:
                     width="stretch",
                     hide_index=True,
                     column_config={
+                        "Decision": st.column_config.TextColumn("Decision", width="small", help="GO / NO GO (unified policy only)"),
                         "Score": st.column_config.NumberColumn("Score", format="%d/10", width="small"),
                         "Fit": st.column_config.TextColumn("Fit", width="medium"),
                         "Name": st.column_config.TextColumn("Name", width="medium"),
@@ -8858,22 +8944,23 @@ with tab_screening:
                 screening_df = pd.DataFrame(sorted_results)
                 # Note: Email data is already merged from enriched_df into screening_results above
 
-                # Choose which candidates to enrich
+                # Choose which candidates to enrich (unified policy buckets)
                 candidate_source = st.radio(
                     "Which candidates to enrich?",
-                    ["Strong + Good Fit", "Strong + Good + Partial Fit", "All candidates"],
+                    ["GO only", "GO + Maybe", "All candidates"],
                     key="candidate_source_tab5",
                     horizontal=True
                 )
 
-                if candidate_source == "Strong + Good Fit" and 'fit' in screening_df.columns:
-                    enrich_df = screening_df[screening_df['fit'].isin(['Strong Fit', 'Good Fit'])].copy()
-                    st.caption(f"Priority candidates: {len(enrich_df)} (Strong + Good Fit)")
-                elif candidate_source == "Strong + Good + Partial Fit" and 'fit' in screening_df.columns:
-                    enrich_df = screening_df[screening_df['fit'].isin(['Strong Fit', 'Good Fit', 'Partial Fit'])].copy()
-                    st.caption(f"Extended candidates: {len(enrich_df)} (Strong + Good + Partial Fit)")
+                if candidate_source == "GO only":
+                    enrich_df = screening_df[screening_df['fit'] == 'Good Fit'].copy() if 'fit' in screening_df.columns else screening_df.copy()
+                    st.caption(f"GO candidates: {len(enrich_df)}")
+                elif candidate_source == "GO + Maybe":
+                    enrich_df = screening_df[screening_df['fit'].isin(['Good Fit', 'Maybe'])].copy() if 'fit' in screening_df.columns else screening_df.copy()
+                    st.caption(f"GO + Maybe candidates: {len(enrich_df)}")
                 else:
                     enrich_df = screening_df.copy()
+                    st.caption(f"All candidates: {len(enrich_df)}")
 
                 current_count = len(enrich_df)
                 # Check both email fields (DB email and SalesQL email)
@@ -9029,37 +9116,45 @@ with tab_screening:
                 final_cols = available_cols + remaining
                 return df[final_cols].to_csv(index=False)
 
-            # Count by fit level
-            strong_list = [r for r in screening_results if r.get('fit') == 'Strong Fit']
-            good_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
-            partial_list = [r for r in screening_results if r.get('fit') == 'Partial Fit']
-            strong_good_list = [r for r in screening_results if r.get('fit') in ['Strong Fit', 'Good Fit']]
-            strong_good_partial_list = [r for r in screening_results if r.get('fit') in ['Strong Fit', 'Good Fit', 'Partial Fit']]
+            # Unified-policy buckets
+            go_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
+            maybe_list = [r for r in screening_results if r.get('fit') == 'Maybe']
+            no_go_list = [r for r in screening_results if r.get('fit') == 'Not a Fit']
 
-            # Row 1: Combined exports (most useful)
-            st.caption("**Combined Exports**")
-            combo_col1, combo_col2, combo_col3, combo_col4 = st.columns(4)
+            exp_col1, exp_col2, exp_col3, exp_col4, exp_col5 = st.columns(5)
 
-            with combo_col1:
+            with exp_col1:
                 st.download_button(
-                    f"Strong + Good ({len(strong_good_list)})",
-                    prepare_screening_export(strong_good_list),
-                    "screening_strong_good_fit.csv",
+                    f"GO ({len(go_list)})",
+                    prepare_screening_export(go_list),
+                    "screening_go.csv",
                     "text/csv",
-                    disabled=len(strong_good_list) == 0,
-                    type="primary"
+                    disabled=len(go_list) == 0,
+                    type="primary",
+                    key="export_go"
                 )
 
-            with combo_col2:
+            with exp_col2:
                 st.download_button(
-                    f"Strong + Good + Partial ({len(strong_good_partial_list)})",
-                    prepare_screening_export(strong_good_partial_list),
-                    "screening_strong_good_partial_fit.csv",
+                    f"Maybe ({len(maybe_list)})",
+                    prepare_screening_export(maybe_list),
+                    "screening_maybe.csv",
                     "text/csv",
-                    disabled=len(strong_good_partial_list) == 0
+                    disabled=len(maybe_list) == 0,
+                    key="export_maybe"
                 )
 
-            with combo_col3:
+            with exp_col3:
+                st.download_button(
+                    f"NO GO ({len(no_go_list)})",
+                    prepare_screening_export(no_go_list),
+                    "screening_no_go.csv",
+                    "text/csv",
+                    disabled=len(no_go_list) == 0,
+                    key="export_no_go"
+                )
+
+            with exp_col4:
                 st.download_button(
                     f"All Results ({len(sorted_results)})",
                     prepare_screening_export(sorted_results),
@@ -9067,39 +9162,8 @@ with tab_screening:
                     "text/csv"
                 )
 
-            with combo_col4:
+            with exp_col5:
                 st.button("Clear Results", key="clear_screening", on_click=_cb_clear_screening_results)
-
-            # Row 2: Individual fit levels
-            with st.expander("Individual Fit Level Exports"):
-                ind_col1, ind_col2, ind_col3 = st.columns(3)
-
-                with ind_col1:
-                    st.download_button(
-                        f"Strong Fit ({len(strong_list)})",
-                        prepare_screening_export(strong_list),
-                        "screening_strong_fit.csv",
-                        "text/csv",
-                        disabled=len(strong_list) == 0
-                    )
-
-                with ind_col2:
-                    st.download_button(
-                        f"Good Fit ({len(good_list)})",
-                        prepare_screening_export(good_list),
-                        "screening_good_fit.csv",
-                        "text/csv",
-                        disabled=len(good_list) == 0
-                    )
-
-                with ind_col3:
-                    st.download_button(
-                        f"Partial Fit ({len(partial_list)})",
-                        prepare_screening_export(partial_list),
-                        "screening_partial_fit.csv",
-                        "text/csv",
-                        disabled=len(partial_list) == 0
-                    )
 
 # ========== TAB 6: Emails ==========
 with tab_emails:
@@ -9186,9 +9250,10 @@ with tab_emails:
             with email_row2_col2:
                 email_fit_filter = st.multiselect(
                     "Include Fit Levels",
-                    options=["Strong Fit", "Good Fit", "Partial Fit"],
-                    default=["Strong Fit", "Good Fit"],
-                    key="email_fit_filter"
+                    options=["Good Fit", "Maybe"],
+                    default=["Good Fit"],
+                    key="email_fit_filter",
+                    help="Good Fit = GO, Maybe = borderline NO GO (score ≥ threshold)"
                 )
 
             # Third row: custom instruction (optional)
@@ -9208,7 +9273,7 @@ with tab_emails:
                 else:
                     email_full_instruction = email_custom_instruction
 
-            # Filter profiles by selected fit levels
+            # Filter profiles by selected buckets (Good Fit = GO, Maybe = borderline)
             filtered_profiles = [r for r in profiles_with_raw if r.get('fit') in email_fit_filter]
 
             # Test batch size and cost estimate
@@ -9232,7 +9297,7 @@ with tab_emails:
                     st.metric("Profiles Selected", "0")
 
             with email_test_col3:
-                st.info(f"**{len(filtered_profiles)}** profiles selected ({', '.join(email_fit_filter)})")
+                st.info(f"**{len(filtered_profiles)}** profiles selected ({', '.join(email_fit_filter) or 'none'})")
 
             # Initialize session state for email results
             if 'email_generation_results' not in st.session_state:

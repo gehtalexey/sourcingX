@@ -498,6 +498,9 @@ def load_config():
                 config['anthropic_api_key'] = st.secrets['anthropic_api_key']
             elif 'ANTHROPIC_API_KEY' in st.secrets:
                 config['anthropic_api_key'] = st.secrets['ANTHROPIC_API_KEY']
+            if 'admin_usernames' in st.secrets:
+                # Streamlit secrets returns AttrDict for lists — coerce to list
+                config['admin_usernames'] = list(st.secrets['admin_usernames'])
     except Exception:
         pass
 
@@ -4431,12 +4434,13 @@ with st.sidebar:
                 st.success("Memory optimized!")
                 st.rerun()
 
-        if st.button("🗑️ Clear Debug Data", width="stretch"):
-            _debug_keys = ['_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols', '_debug_valid_urls']
-            for k in _debug_keys:
-                if k in st.session_state:
-                    del st.session_state[k]
-            st.rerun()
+        if is_admin_user():
+            if st.button("🗑️ Clear Debug Data", width="stretch"):
+                _debug_keys = ['_enrich_debug', '_enrich_match_debug', '_debug_url_cols', '_debug_all_cols', '_debug_valid_urls']
+                for k in _debug_keys:
+                    if k in st.session_state:
+                        del st.session_state[k]
+                st.rerun()
 
         if st.button("🗑️ Clear Filtered Data", width="stretch"):
             if 'filtered_out' in st.session_state:
@@ -6640,17 +6644,18 @@ with tab_enrich:
         else:
             st.info(msg)
 
-    # Show load debug info if available
+    # Show load debug info if available (admin-only)
     if '_load_debug' in st.session_state:
         load_debug = st.session_state.pop('_load_debug')
-        with st.expander("Debug: Profile Loading Details", expanded=True):
-            st.write(f"**DB profiles fetched:** {load_debug.get('db_profiles', 'N/A')}")
-            st.write(f"**Lookup dictionary keys:** {load_debug.get('lookup_keys', 'N/A')}")
-            st.write(f"**Input URLs to match:** {load_debug.get('input_urls', 'N/A')}")
-            st.write(f"**Successfully matched:** {load_debug.get('matched', 'N/A')}")
-            st.write(f"**Gap (unmatched):** {load_debug.get('gap', 'N/A')}")
-            if load_debug.get('unmatched_samples'):
-                st.write(f"**Unmatched samples:** {load_debug.get('unmatched_samples')}")
+        if is_admin_user():
+            with st.expander("Debug: Profile Loading Details", expanded=True):
+                st.write(f"**DB profiles fetched:** {load_debug.get('db_profiles', 'N/A')}")
+                st.write(f"**Lookup dictionary keys:** {load_debug.get('lookup_keys', 'N/A')}")
+                st.write(f"**Input URLs to match:** {load_debug.get('input_urls', 'N/A')}")
+                st.write(f"**Successfully matched:** {load_debug.get('matched', 'N/A')}")
+                st.write(f"**Gap (unmatched):** {load_debug.get('gap', 'N/A')}")
+                if load_debug.get('unmatched_samples'):
+                    st.write(f"**Unmatched samples:** {load_debug.get('unmatched_samples')}")
 
     if not HAS_DATABASE:
         st.error("Supabase is not connected. Enrichment is disabled because results won't be saved. Check your supabase_url and supabase_key in secrets.")
@@ -6678,8 +6683,8 @@ with tab_enrich:
             # Message shown after enrichment status below
             pass
 
-            # Show URL matching debug info (persisted from last enrichment)
-            if '_enrich_debug' in st.session_state or '_enrich_match_debug' in st.session_state:
+            # Show URL matching debug info (persisted from last enrichment) — admin-only
+            if is_admin_user() and ('_enrich_debug' in st.session_state or '_enrich_match_debug' in st.session_state):
                 with st.expander("Debug: Last Enrichment URL Matching", expanded=False):
                     enrich_debug = st.session_state.get('_enrich_debug', {})
                     match_debug = st.session_state.get('_enrich_match_debug', {})
@@ -6705,8 +6710,8 @@ with tab_enrich:
                         for sample in match_debug.get('result_samples', []):
                             st.write(f"  - flagship: {sample.get('flagship')}, matched: {sample.get('matched')}")
 
-            # Show error debug info (from last enrichment with failures)
-            if '_error_debug' in st.session_state:
+            # Show error debug info (from last enrichment with failures) — admin-only
+            if is_admin_user() and '_error_debug' in st.session_state:
                 error_debug = st.session_state['_error_debug']
                 with st.expander("Debug: Failed Enrichments", expanded=False):
                     st.write(f"**Errors:** {error_debug.get('count', 0)}")
@@ -6726,16 +6731,17 @@ with tab_enrich:
             # Toggle to show all columns
             show_all_cols = st.checkbox("Show all columns", value=False, key="enrich_show_all_cols")
 
-            # Debug: show available columns
-            with st.expander("Debug: Available columns", expanded=False):
-                st.write(f"Columns in enriched data: {list(enriched_df.columns)}")
-                # Show sample values for key columns
-                if len(enriched_df) > 0:
-                    st.write("Sample row:")
-                    sample = enriched_df.iloc[0]
-                    for col in ['name', 'current_company', 'current_title', 'linkedin_url']:
-                        if col in enriched_df.columns:
-                            st.write(f"  {col}: {sample.get(col, 'N/A')}")
+            # Debug: show available columns (admin-only)
+            if is_admin_user():
+                with st.expander("Debug: Available columns", expanded=False):
+                    st.write(f"Columns in enriched data: {list(enriched_df.columns)}")
+                    # Show sample values for key columns
+                    if len(enriched_df) > 0:
+                        st.write("Sample row:")
+                        sample = enriched_df.iloc[0]
+                        for col in ['name', 'current_company', 'current_title', 'linkedin_url']:
+                            if col in enriched_df.columns:
+                                st.write(f"  {col}: {sample.get(col, 'N/A')}")
 
             if show_all_cols:
                 # Show ALL columns in dataframe
@@ -7031,8 +7037,8 @@ with tab_enrich:
                             st.cache_data.clear()
                             st.rerun()
 
-                # Debug: show why URLs are marked as "to enrich"
-                if new_urls:
+                # Debug: show why URLs are marked as "to enrich" (admin-only)
+                if new_urls and is_admin_user():
                     with st.expander(f"Debug: {len(new_urls)} URLs marked 'to enrich'", expanded=False):
                         st.write(f"**DB has {len(matched_profiles_cache)} matched profiles**")
                         st.write(f"**Sample matched URLs:** {list(matched_profiles_cache.keys())[:10]}")
@@ -7236,31 +7242,33 @@ with tab_enrich:
                         errors = [r for r in results if 'error' in r]
                         successful = [r for r in results if 'error' not in r]
 
-                        # Debug info
-                        st.write(f"**Debug:** Total results: {len(results)}, Successful: {len(successful)}, Errors: {len(errors)}")
+                        # Debug info (admin-only)
+                        if is_admin_user():
+                            st.write(f"**Debug:** Total results: {len(results)}, Successful: {len(successful)}, Errors: {len(errors)}")
                         if errors:
                             st.warning(f"Errors: {[e.get('error', 'unknown')[:100] for e in errors[:3]]}")
 
-                        # Show URL mapping debug info
-                        with st.expander("Debug: URL Matching Details", expanded=True):
-                            enrich_debug = st.session_state.get('_enrich_debug', {})
-                            match_debug = st.session_state.get('_enrich_match_debug', {})
+                        # Show URL mapping debug info (admin-only)
+                        if is_admin_user():
+                            with st.expander("Debug: URL Matching Details", expanded=True):
+                                enrich_debug = st.session_state.get('_enrich_debug', {})
+                                match_debug = st.session_state.get('_enrich_match_debug', {})
 
-                            st.write("**Input URL Mapping:**")
-                            st.write(f"- Input URLs: {enrich_debug.get('input_urls', 'N/A')}")
-                            st.write(f"- Map keys created: {enrich_debug.get('map_keys', 'N/A')}")
-                            st.write(f"- Failed to extract: {enrich_debug.get('failed_extract', 'N/A')}")
-                            st.write(f"- Sample inputs: {enrich_debug.get('sample_inputs', [])}")
-                            st.write(f"- Sample map keys: {enrich_debug.get('sample_map_keys', [])}")
-                            if enrich_debug.get('failed_samples'):
-                                st.write(f"- Failed samples: {enrich_debug.get('failed_samples', [])}")
+                                st.write("**Input URL Mapping:**")
+                                st.write(f"- Input URLs: {enrich_debug.get('input_urls', 'N/A')}")
+                                st.write(f"- Map keys created: {enrich_debug.get('map_keys', 'N/A')}")
+                                st.write(f"- Failed to extract: {enrich_debug.get('failed_extract', 'N/A')}")
+                                st.write(f"- Sample inputs: {enrich_debug.get('sample_inputs', [])}")
+                                st.write(f"- Sample map keys: {enrich_debug.get('sample_map_keys', [])}")
+                                if enrich_debug.get('failed_samples'):
+                                    st.write(f"- Failed samples: {enrich_debug.get('failed_samples', [])}")
 
-                            st.write("**Result Matching:**")
-                            st.write(f"- Results: {match_debug.get('results', 'N/A')}")
-                            st.write(f"- Matched: {match_debug.get('matched', 'N/A')}")
-                            st.write(f"- Unmatched: {match_debug.get('unmatched_count', 'N/A')}")
-                            st.write(f"- Unmatched samples: {match_debug.get('unmatched_samples', [])}")
-                            st.write(f"- Result samples: {match_debug.get('result_samples', [])}")
+                                st.write("**Result Matching:**")
+                                st.write(f"- Results: {match_debug.get('results', 'N/A')}")
+                                st.write(f"- Matched: {match_debug.get('matched', 'N/A')}")
+                                st.write(f"- Unmatched: {match_debug.get('unmatched_count', 'N/A')}")
+                                st.write(f"- Unmatched samples: {match_debug.get('unmatched_samples', [])}")
+                                st.write(f"- Result samples: {match_debug.get('result_samples', [])}")
 
                         if successful:
                             # Save enriched data - DataFrame is the single source of truth
@@ -7516,31 +7524,32 @@ with tab_filter2:
         # enriched_df already contains exactly the profiles loaded - no filtering needed
         st.success(f"**{len(enriched_df)}** enriched profiles ready for filtering")
 
-        # Show available enriched columns and sample data for debugging
-        with st.expander("Debug: Searchable columns & sample data"):
-            search_cols = ['skills', 'all_titles', 'all_employers', 'past_positions', 'summary', 'headline']
-            available = [c for c in search_cols if c in enriched_df.columns]
-            st.write(f"**Searchable columns:** {available}")
+        # Show available enriched columns and sample data for debugging (admin-only)
+        if is_admin_user():
+            with st.expander("Debug: Searchable columns & sample data"):
+                search_cols = ['skills', 'all_titles', 'all_employers', 'past_positions', 'summary', 'headline']
+                available = [c for c in search_cols if c in enriched_df.columns]
+                st.write(f"**Searchable columns:** {available}")
 
-            # Show sample data from first non-empty row
-            if len(enriched_df) > 0:
-                sample_row = enriched_df.iloc[0]
+                # Show sample data from first non-empty row
+                if len(enriched_df) > 0:
+                    sample_row = enriched_df.iloc[0]
+                    for col in available:
+                        val = sample_row.get(col, '')
+                        try:
+                            is_valid = val is not None and str(val).strip() and str(val) != 'nan'
+                        except (ValueError, TypeError):
+                            is_valid = False
+                        if is_valid:
+                            st.write(f"**{col}:** {str(val)[:200]}{'...' if len(str(val)) > 200 else ''}")
+                        else:
+                            st.write(f"**{col}:** *(empty)*")
+
+                # Count non-empty values
+                st.write("**Non-empty counts:**")
                 for col in available:
-                    val = sample_row.get(col, '')
-                    try:
-                        is_valid = val is not None and str(val).strip() and str(val) != 'nan'
-                    except (ValueError, TypeError):
-                        is_valid = False
-                    if is_valid:
-                        st.write(f"**{col}:** {str(val)[:200]}{'...' if len(str(val)) > 200 else ''}")
-                    else:
-                        st.write(f"**{col}:** *(empty)*")
-
-            # Count non-empty values
-            st.write("**Non-empty counts:**")
-            for col in available:
-                non_empty = (enriched_df[col].notna() & (enriched_df[col] != '')).sum()
-                st.write(f"  - {col}: {non_empty}/{len(enriched_df)} profiles")
+                    non_empty = (enriched_df[col].notna() & (enriched_df[col] != '')).sum()
+                    st.write(f"  - {col}: {non_empty}/{len(enriched_df)} profiles")
 
         # Google Sheets filtering (same as Filter tab)
         filter_sheets = get_filter_sheets_config().copy()
@@ -8298,34 +8307,35 @@ with tab_screening:
             role_display = "Unified policy"
         st.info(f"Rubric: **{role_display}** | Model: **gpt-4o-mini** | Est. cost: **${est_cost:.3f}**")
 
-        # Debug: Show available fields and test single profile
-        with st.expander("Debug: Profile Fields & Test"):
-            if not profiles_df.empty:
-                st.write("Available fields:", list(profiles_df.columns))
-                sample = {k: str(v)[:100] for k, v in profiles_df.iloc[0].to_dict().items()}
-                st.write("Sample profile:", sample)
+        # Debug: Show available fields and test single profile (admin-only)
+        if is_admin_user():
+            with st.expander("Debug: Profile Fields & Test"):
+                if not profiles_df.empty:
+                    st.write("Available fields:", list(profiles_df.columns))
+                    sample = {k: str(v)[:100] for k, v in profiles_df.iloc[0].to_dict().items()}
+                    st.write("Sample profile:", sample)
 
-                if job_description and st.button("Test Single Profile", key="test_single"):
-                    try:
-                        if ai_provider == "anthropic":
-                            client = anthropic.Anthropic(api_key=anthropic_key)
-                        else:
-                            client = OpenAI(api_key=openai_key)
-                        test_mode = 'detailed'
-                        role_name = st.session_state.get('active_role_name', 'General')
-                        st.write(f"Testing with first profile ({test_mode} mode, role: {role_name}, model: {ai_model})...")
-                        test_profile = profiles_df.iloc[0].to_dict()
-                        # Clean NaN
-                        import math
-                        for k, v in test_profile.items():
-                            if isinstance(v, float) and math.isnan(v):
-                                test_profile[k] = ''
-                        result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider, user_request=(None if role_prompt else job_description))
-                        st.write("Result:", result)
-                    except Exception as e:
-                        import traceback
-                        st.error(f"Error: {e}")
-                        st.code(traceback.format_exc())
+                    if job_description and st.button("Test Single Profile", key="test_single"):
+                        try:
+                            if ai_provider == "anthropic":
+                                client = anthropic.Anthropic(api_key=anthropic_key)
+                            else:
+                                client = OpenAI(api_key=openai_key)
+                            test_mode = 'detailed'
+                            role_name = st.session_state.get('active_role_name', 'General')
+                            st.write(f"Testing with first profile ({test_mode} mode, role: {role_name}, model: {ai_model})...")
+                            test_profile = profiles_df.iloc[0].to_dict()
+                            # Clean NaN
+                            import math
+                            for k, v in test_profile.items():
+                                if isinstance(v, float) and math.isnan(v):
+                                    test_profile[k] = ''
+                            result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider, user_request=(None if role_prompt else job_description))
+                            st.write("Result:", result)
+                        except Exception as e:
+                            import traceback
+                            st.error(f"Error: {e}")
+                            st.code(traceback.format_exc())
 
         # Screen Button
         if job_description:

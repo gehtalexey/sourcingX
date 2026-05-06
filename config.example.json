@@ -7,5 +7,6 @@
         "past_candidates": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit",
         "blacklist": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit",
         "not_relevant": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit"
-    }
+    },
+    "admin_usernames": ["your_login_username_here"]
 }

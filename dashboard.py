@@ -9856,7 +9856,16 @@ with tab_database:
                     fulltext_query = st.text_input(
                         "Full-text search",
                         key="db_fulltext_search",
-                        placeholder="e.g., node.js kubernetes 8200 fintech (searches name, titles, companies, skills, schools, summary, job descriptions, education, languages)"
+                        placeholder="e.g., (react OR angular) AND node.js NOT director",
+                        help=(
+                            "**Boolean syntax** (LinkedIn-style):\n"
+                            "- `AND` (or just space) — both terms required\n"
+                            "- `OR` (or `,`) — either term matches\n"
+                            "- `NOT` (or `-` prefix) — exclude term\n"
+                            "- `( ... )` — group terms\n\n"
+                            "**Searches across:** name, titles, companies, skills, schools, "
+                            "summary, headline, job descriptions, education, languages."
+                        )
                     )
 
                     # Row 1: Name, Location

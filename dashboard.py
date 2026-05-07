@@ -7576,6 +7576,8 @@ with tab_filter2:
         filter_sheets = get_filter_sheets_config().copy()
         gspread_client = get_gspread_client()
 
+        st.markdown("**Your Filter Sheet:**")
+        st.caption(f"Share your sheet with: `linkedin-enricher@linkedin-enricher-485616.iam.gserviceaccount.com`")
         user_sheet_url = st.text_input(
             "Google Sheet URL for filtering",
             value=st.session_state.get('user_sheet_url', ''),

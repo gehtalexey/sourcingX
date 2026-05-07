@@ -9856,7 +9856,7 @@ with tab_database:
                     fulltext_query = st.text_input(
                         "Full-text search",
                         key="db_fulltext_search",
-                        placeholder="e.g., node.js kubernetes 8200 (searches ALL fields)"
+                        placeholder="e.g., node.js kubernetes 8200 fintech (searches name, titles, companies, skills, schools, summary, job descriptions, education, languages)"
                     )
 
                     # Row 1: Name, Location

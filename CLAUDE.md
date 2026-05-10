@@ -4,7 +4,7 @@
 
 - **Desktop (Claude Code CLI):** Before the **first** change on `master` in a session, confirm with Alexey once and offer a feature branch. After he confirms, treat subsequent edits, commits, and pushes to `master` in that same session as authorized — don't re-prompt for each one. The confirmation resets at the start of a new session.
 - **Mobile (Claude app):** Branches are created automatically - safe by default.
-- **Codex code review:** Codex (second AI coding agent) reviews all code Claude writes in this project. Flow: Claude writes → Codex reviews for bugs/improvements (does not edit) → Alexey relays findings → Claude applies fixes. Before applying Codex's fixes, re-read the file in case state has changed since the review.
+- **Codex code review:** Codex (second AI coding agent) reviews all code Claude writes in this project. Flow: Claude opens a PR against `master` → Codex finds the latest open SourcingX PR and posts its review directly on GitHub → Claude reads the PR comments/reviews (via `gh pr view --comments`, `gh api`, or equivalent) and applies fixes on the same branch. Codex does not edit files; Alexey does not relay feedback by hand. Before applying Codex's fixes, re-read the file in case state has changed since the review.
 
 ## AI coding workflow
 

@@ -73,10 +73,14 @@ apply to the change, skip it with a one-line note in the PR comments.
 
 ## Reviewer instructions
 
-- **Codex (AI):** Read the diff, check each section above. Report findings
+- **Codex (AI):** Find the latest open SourcingX PR on GitHub, read the
+  diff, check each section above. Post findings as PR comments/reviews,
   grouped by severity: BLOCKER, NIT, OPTIONAL. Don't edit files — only
-  report. Alexey relays findings to Claude.
+  report on GitHub.
 - **Claude (self-review before push):** Walk this list before opening the
-  PR. If a section is N/A, note it in the PR description.
+  PR. If a section is N/A, note it in the PR description. After pushing,
+  pull Codex's review off GitHub directly (e.g. `gh pr view <n> --comments`,
+  `gh api repos/<owner>/<repo>/pulls/<n>/reviews`) and apply fixes on the
+  same branch — don't wait for Alexey to copy-paste anything.
 - **Alexey (final merge):** Skim sections 1, 3, 5 even when Codex says LGTM.
   Click merge yourself — no auto-merge.

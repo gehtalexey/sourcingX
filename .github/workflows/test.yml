@@ -6,9 +6,15 @@ on:
   pull_request:
     branches: [master]
 
+# Least-privilege: read-only on the repo, no write access to anything else.
+# Any future job that needs to write (e.g. publish) must be added narrowly.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -25,10 +31,19 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-cov
 
-      - name: Run tests
+      - name: Syntax check (lightweight lint)
+        # Compile every tracked .py file. Catches syntax/import errors across
+        # the whole repo without requiring a full lint toolchain.
+        run: python -m compileall -q .
+
+      - name: Run focused tests
         env:
-          # Prevent tests from calling real APIs
+          # Placeholder keys prevent tests from accidentally calling real APIs.
+          # Real secrets must NEVER be inlined here — use repo Actions secrets.
           OPENAI_API_KEY: "test-key"
           CRUSTDATA_API_KEY: "test-key"
         run: |
-          pytest test_mocking_services.py test_screening_parameterized.py -v --tb=short
+          pytest -v --tb=short \
+            test_mocking_services.py \
+            test_screening_parameterized.py \
+            test_profiles_status_dropped.py

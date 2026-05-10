@@ -100,6 +100,35 @@ class TestParseTenureConstraint:
         # 6m vs 12m vs 18m → 18m wins.
         assert parse_tenure_constraint_months(text) == 18
 
+    @pytest.mark.parametrize("text, expected_months", [
+        # Codex's three exact phrasings from the PR #16 re-review —
+        # Chen's actual wording was natural language, not numeric.
+        ("no one under one year at current company", 12),
+        ("minimum one year at current company", 12),
+        ("must have been at current employer for two years", 24),
+        # More small-number coverage.
+        ("at least three years at current company", 36),
+        ("minimum six months at company", 6),
+        ("no one under twelve months at current company", 12),
+        # Case-insensitive (recruiters capitalize unpredictably).
+        ("Minimum One Year at Current Company", 12),
+    ])
+    def test_english_number_words_parse(self, text, expected_months):
+        """Parser must accept small English number words (one..twelve)
+        and convert them to digits before regex matching."""
+        assert parse_tenure_constraint_months(text) == expected_months
+
+    def test_number_word_substrings_do_not_match(self):
+        """Word-boundary guarantee: 'onerous', 'sixteen', etc. must NOT be
+        misread as the number 'one' / 'six'. Even if they did, the lack of
+        a tenure phrase around them means parse should still return None."""
+        assert parse_tenure_constraint_months(
+            "The role is onerous and requires self-direction."
+        ) is None
+        assert parse_tenure_constraint_months(
+            "The team is sixteen people strong."
+        ) is None
+
 
 # ---------------------------------------------------------------------------
 # 2. current_company_tenure_months

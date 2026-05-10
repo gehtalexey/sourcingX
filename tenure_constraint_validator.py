@@ -102,6 +102,47 @@ _HEBREW_YEAR_UNITS = {"שנה", "שנים"}
 _HEBREW_MONTH_UNITS = {"חודש", "חודשים"}
 
 
+# English number words → digits. Codex flagged on PR #16 that Chen's actual
+# phrasing was natural language ("no one under one year at company"), not
+# numeric. We pre-normalize these words to digits before running the regexes
+# so every existing pattern picks them up unchanged. Range covers what a
+# recruiter would plausibly type in a tenure rule.
+_NUMBER_WORDS = {
+    "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+    "eleven": "11", "twelve": "12",
+}
+
+_NUMBER_WORD_RE = re.compile(
+    r"\b(" + "|".join(_NUMBER_WORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+# "no one" / "no-one" is an idiomatic phrase ("nobody"), NOT the number one.
+# We protect it before number-word normalization so "no one under one year"
+# doesn't collapse to "no 1 under 1 year" and break the "no one under" regex.
+_NO_ONE_RE = re.compile(r"\bno[-\s]+one\b", re.IGNORECASE)
+_NO_ONE_PLACEHOLDER = "\x00NOONE\x00"
+
+
+def _normalize_number_words(text: str) -> str:
+    """Replace English number words (one..twelve) with digits.
+
+    Case-insensitive, word-boundary based — won't touch "onerous", "tens",
+    etc. The idiomatic phrase "no one" (= nobody) is preserved verbatim so
+    the "no one under N" regex still matches. Hebrew and digits pass
+    through unchanged.
+    """
+    if not text:
+        return text
+    # Stash "no one" -> placeholder -> normalize -> restore.
+    text = _NO_ONE_RE.sub(_NO_ONE_PLACEHOLDER, text)
+    text = _NUMBER_WORD_RE.sub(lambda m: _NUMBER_WORDS[m.group(1).lower()], text)
+    text = text.replace(_NO_ONE_PLACEHOLDER, "no one")
+    return text
+
+
 def _unit_to_months(qty: float, unit: str) -> int:
     """Convert (qty, unit) into a whole number of months.
 
@@ -127,6 +168,10 @@ def parse_tenure_constraint_months(text: Optional[str]) -> Optional[int]:
     """
     if not text:
         return None
+
+    # Normalize English number words ("one", "two", ...) to digits BEFORE
+    # running the regexes — Chen's actual phrasing was natural language.
+    text = _normalize_number_words(text)
 
     found_months = []
     for pattern in _EN_PATTERNS + _HE_PATTERNS:

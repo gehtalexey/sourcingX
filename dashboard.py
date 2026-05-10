@@ -5970,10 +5970,14 @@ with tab_filter:
             # Without this, Streamlit buttons inside a narrow nested column
             # collapse min-width and break every character onto its own line
             # (e.g. "C-Level/Founders" -> "C-/Lev/el/F/oun/der/s").
+            #
+            # Selectors are scoped to `.exclude-quick-select` so the styles only
+            # apply to the exclude quick-select buttons (wrapped below) and do
+            # NOT affect any other Streamlit buttons rendered on the page.
             st.markdown(
                 """
                 <style>
-                div[data-testid="stButton"] > button {
+                .exclude-quick-select div[data-testid="stButton"] > button {
                     white-space: normal;
                     word-break: keep-all;
                     overflow-wrap: normal;
@@ -5981,8 +5985,8 @@ with tab_filter:
                     padding-left: 0.25rem;
                     padding-right: 0.25rem;
                 }
-                div[data-testid="stButton"] > button > div,
-                div[data-testid="stButton"] > button p {
+                .exclude-quick-select div[data-testid="stButton"] > button > div,
+                .exclude-quick-select div[data-testid="stButton"] > button p {
                     white-space: normal;
                     word-break: keep-all;
                     overflow-wrap: normal;
@@ -5991,6 +5995,10 @@ with tab_filter:
                 """,
                 unsafe_allow_html=True,
             )
+
+            # Open a scoping wrapper so the CSS above only targets buttons
+            # rendered inside this block.
+            st.markdown('<div class="exclude-quick-select">', unsafe_allow_html=True)
 
             category_items = list(EXCLUDE_CATEGORIES.items())
             # Lay out as rows of 3 so each button has enough horizontal room
@@ -6013,6 +6021,9 @@ with tab_filter:
                     with row_cols[col_idx]:
                         st.button(label, key=key, width="stretch",
                                   on_click=cb, args=cb_args)
+
+            # Close the scoping wrapper.
+            st.markdown('</div>', unsafe_allow_html=True)
 
             selected_exclude = st.multiselect(
                 "Selected exclusions",

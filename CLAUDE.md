@@ -4,6 +4,7 @@
 
 - **Desktop (Claude Code CLI):** Always ask before making changes on `master` branch. Offer to create a feature branch first.
 - **Mobile (Claude app):** Branches are created automatically - safe by default.
+- **Codex code review:** Codex (second AI coding agent) reviews all code Claude writes in this project. Flow: Claude writes → Codex reviews for bugs/improvements (does not edit) → Alexey relays findings → Claude applies fixes. Before applying Codex's fixes, re-read the file in case state has changed since the review.
 
 ## Project Overview
 

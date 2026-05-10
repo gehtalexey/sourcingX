@@ -213,7 +213,7 @@ def _get_db_restore_counts_cached():
     try:
         c = _get_db_client()
         if c:
-            return c.count('profiles', {'status': 'eq.enriched'})
+            return c.count('profiles', {'enrichment_status': 'eq.enriched'})
         return 0
     except Exception:
         return 0
@@ -5116,7 +5116,7 @@ with tab_upload:
                 try:
                     db_client = _get_db_client()
                     if db_client:
-                        from db import get_profiles_by_status
+                        from db import get_profiles_by_enrichment_status
 
                         # Use module-level cached function for efficiency
                         enriched_count = _get_db_restore_counts_cached()
@@ -5126,7 +5126,7 @@ with tab_upload:
                             st.caption("Load enriched profiles from Supabase (screening is always fresh per JD)")
 
                             if st.button(f"Load Enriched ({enriched_count})", key="resume_enriched"):
-                                profiles = get_profiles_by_status(db_client, "enriched", limit=500)  # Reduced for memory
+                                profiles = get_profiles_by_enrichment_status(db_client, "enriched", limit=500)  # Reduced for memory
                                 if profiles:
                                     df = profiles_to_dataframe(profiles)
                                     st.session_state['results_df'] = df
@@ -8912,7 +8912,7 @@ with tab_screening:
                         'score', 'fit', 'summary',
                         # Database screening columns
                         'screening_score', 'screening_fit_level', 'screening_summary',
-                        'screening_reasoning', 'screened_at', 'status',
+                        'screening_reasoning', 'screened_at',
                         # Any other screening-related
                         'screening_fit', 'screening_status', 'fit_level'
                     }
@@ -10563,7 +10563,6 @@ with tab_database:
                                         'all_titles': all_titles or None,
                                         'all_schools': all_schools or None,
                                         'skills': skills or None,
-                                        'status': 'enriched',
                                         'enriched_at': now,
                                         'enrichment_status': 'enriched',
                                         'enrichment_attempted_at': now,

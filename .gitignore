@@ -16,6 +16,7 @@ search_history.json
 __pycache__/
 *.py[cod]
 .env
+.pytest_cache/
 
 # Output files
 *_enriched.csv
@@ -23,3 +24,34 @@ __pycache__/
 screening_*.csv
 !screening_results.csv
 screening_*.json
+
+# Local agent / IDE / tooling state
+.agent/
+.agents/
+.continue/
+.claude/launch.json
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
+# Scratch and temp files
+*.tmp
+*.bak
+nul
+_*.py
+_*.json
+_*.txt
+
+# Debug / one-off scripts
+debug_*.py
+
+# Manual SQL scratch (not real migrations)
+check_*.sql
+count_*.sql
+step*.sql
+
+# Stray Windows-pathed downloads
+C:Users*
+
+# Lock files (anywhere)
+*.lock

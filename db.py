@@ -631,10 +631,9 @@ def save_failed_enrichment(client: SupabaseClient, linkedin_url: str, error_mess
 
     try:
         # Use upsert to handle both new and existing profiles
-        # Must include status='enriched' to satisfy CHECK constraint on insert
+        # profiles.status was dropped — do not write it (matches _prepare_profile_row)
         data = {
             'linkedin_url': linkedin_url,
-            'status': 'enriched',  # Required for CHECK constraint
             'enrichment_status': 'not_found',
             'enrichment_attempted_at': now,
         }
@@ -734,7 +733,6 @@ def update_profile_screening(client: SupabaseClient, linkedin_url: str, score: i
         'screening_summary': summary,
         'screening_reasoning': reasoning,
         'screened_at': datetime.utcnow().isoformat(),
-        'status': 'screened',
     }
 
     result = client.upsert('profiles', data, on_conflict='linkedin_url')
@@ -766,7 +764,6 @@ def update_profile_screening_batch(client: SupabaseClient, results: list) -> dic
             'screening_summary': r.get('summary'),
             'screening_reasoning': r.get('reasoning'),
             'screened_at': now,
-            'status': 'screened',
         })
 
     if not rows:
@@ -935,12 +932,12 @@ def get_profile(client: SupabaseClient, linkedin_url: str) -> Optional[dict]:
 
 def get_profiles_needing_screening(client: SupabaseClient, limit: int = 100) -> list:
     """Get enriched profiles that haven't been screened yet."""
-    return client.select('profiles', '*', {'status': 'eq.enriched', 'screening_score': 'is.null'}, limit=limit)
+    return client.select('profiles', '*', {'enrichment_status': 'eq.enriched', 'screening_score': 'is.null'}, limit=limit)
 
 
-def get_profiles_by_status(client: SupabaseClient, status: str, limit: int = 1000) -> list:
-    """Get profiles by pipeline status."""
-    return client.select('profiles', '*', {'status': f'eq.{status}'}, limit=limit)
+def get_profiles_by_enrichment_status(client: SupabaseClient, enrichment_status: str, limit: int = 1000) -> list:
+    """Get profiles by enrichment state (e.g. 'enriched', 'not_found', 'failed')."""
+    return client.select('profiles', '*', {'enrichment_status': f'eq.{enrichment_status}'}, limit=limit)
 
 
 def get_profiles_by_fit_level(client: SupabaseClient, fit_level: str, limit: int = 1000) -> list:
@@ -1275,7 +1272,7 @@ def search_profiles_fulltext(client: SupabaseClient, query: str, limit: int = 50
     # Fields to keep (exclude raw_data and search_text to save memory)
     KEEP_FIELDS = {'linkedin_url', 'name', 'current_title', 'current_company', 'location',
                    'all_employers', 'all_titles', 'all_schools', 'skills', 'email',
-                   'enriched_at', 'screening_score', 'screening_fit_level', 'status'}
+                   'enriched_at', 'screening_score', 'screening_fit_level', 'enrichment_status'}
 
     try:
         all_results = []

@@ -1,0 +1,33 @@
+# Auto-detect text files and normalize to LF in the repo.
+# Stops Windows checkouts from creating phantom CRLF-only diffs.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF so they run on Windows directly.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Source / config — explicit LF (covers anything text=auto guesses wrong).
+*.py    text eol=lf
+*.sql   text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.txt   text eol=lf
+*.csv   text eol=lf
+
+# Binary — never touch line endings.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.tar   binary
+*.xlsx  binary
+*.xls   binary

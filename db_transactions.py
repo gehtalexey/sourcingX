@@ -195,7 +195,7 @@ class DataCheckpoint:
 
         try:
             # Make changes
-            client.update('profiles', {'status': 'archived'}, {'linkedin_url': url})
+            client.update('profiles', {'enrichment_status': 'failed'}, {'linkedin_url': url})
             # More operations...
         except Exception:
             # Restore original state
@@ -303,9 +303,9 @@ def safe_batch_operation(client: 'SupabaseClient', table: str, filters: dict = N
         from db_transactions import safe_batch_operation
 
         client = get_supabase_client()
-        with safe_batch_operation(client, 'profiles', {'status': 'eq.enriched'}) as (checkpoint, batch):
+        with safe_batch_operation(client, 'profiles', {'enrichment_status': 'eq.enriched'}) as (checkpoint, batch):
             batch.upsert('profiles', new_data)
-            batch.update('profiles', {'status': 'screened'}, {'linkedin_url': url})
+            batch.update('profiles', {'screening_score': 7, 'screened_at': now}, {'linkedin_url': url})
         # Automatically commits on success, checkpoint available for manual rollback
 
     Args:

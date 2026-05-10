@@ -189,6 +189,11 @@ class TestHelperFunctionMocking:
                                                backend_job_description):
         import dashboard
 
+        # Clear the module-level duration cache so the patched function actually runs.
+        # screen_profile() calls compute_role_durations_cached(), which short-circuits
+        # to the cached value when another test in the session has already populated it.
+        dashboard._duration_cache.clear()
+
         with patch('dashboard.compute_role_durations') as mock_compute:
             mock_compute.return_value = "ROLE DURATIONS: mocked"
             dashboard.screen_profile(strong_backend_profile, backend_job_description,

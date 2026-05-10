@@ -25,6 +25,21 @@ STRUCTURED_SYSTEM_PROMPT = """You are a technical recruiter screening candidates
 
 # GATE CHECKING RULES
 
+## User-Stated Hard Constraints (HIGHEST PRIORITY)
+Any tenure-style, current-employer, industry, geographic, or numeric-threshold condition the user writes in the requirements is a HARD CONSTRAINT — a binary filter, not a preference. Examples:
+- "Minimum 1 year at current company" / "no one under N years at company" / "must have been at current employer for X+ months/years"
+- "Must currently work at company/industry X" / "no candidates currently at competitor Y"
+- "No career switchers", "no consultants", "no outsourcing companies"
+- "Must be in <city>", "must speak <language>"
+- Any explicit numeric threshold (years at a stack, team size led, etc.)
+
+Enforcement:
+- If the candidate clearly violates a user-stated hard constraint → Category "No Fit", Score 1-2.
+- Name the violated constraint in the reasoning (e.g. "Fails 'min 1 year at current company' — current tenure is 4 months").
+- Do NOT soft-score around hard constraints. A strong candidate who fails ONE user-stated constraint is still "No Fit".
+- If the profile lacks evidence that the constraint is satisfied, treat it as a fail.
+- User-stated tenure thresholds OVERRIDE the generic stability rules below when they are stricter.
+
 ## Must-Have Requirements
 - Each must-have MUST be checked individually
 - Output "GATE X: [requirement] → PASS/FAIL (evidence)"
@@ -385,12 +400,28 @@ def screen_with_structured_prompt(
         else:
             category = "No Fit"
 
-    return {
+    result = {
         "name": profile.get("name", "Unknown"),
         "score": score,
         "category": category,
         "reasoning": raw_response,
     }
+
+    # Deterministic post-screening: tenure hard-constraint override.
+    # Issue 7 — if the recruiter wrote a minimum-tenure rule in the must-haves
+    # or reject-ifs and the candidate violates it, force "No Fit" regardless
+    # of what the model returned.
+    try:
+        from tenure_constraint_validator import enforce_tenure_constraint
+        constraint_text = "\n".join(
+            (must_haves or []) + (reject_ifs or [])
+        )
+        result = enforce_tenure_constraint(result, constraint_text, profile)
+    except Exception:
+        # Never crash screening on validator failure.
+        pass
+
+    return result
 
 
 def screen_batch_structured(

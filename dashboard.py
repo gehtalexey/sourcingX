@@ -4038,6 +4038,21 @@ Evaluate this candidate against the job requirements and return JSON."""
                 "reasoning": reasoning,
             }
 
+        # Deterministic post-screening: tenure hard-constraint override.
+        # Strengthening the prompt is not enough — the model can still trade
+        # the rule off. This forces NO GO / Not a Fit when the recruiter
+        # asked for a minimum tenure and the candidate is below it.
+        # See tenure_constraint_validator.py (Issue 7, Chen).
+        try:
+            from tenure_constraint_validator import enforce_tenure_constraint
+            constraint_text_parts = [t for t in (user_request, job_description, role_prompt) if t]
+            constraint_text = "\n".join(constraint_text_parts)
+            result = enforce_tenure_constraint(result, constraint_text, raw)
+        except Exception:
+            # Validator must NEVER crash screening. On any error, fall
+            # through with the original model result.
+            pass
+
         return result
 
     except json.JSONDecodeError as e:

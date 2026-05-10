@@ -5965,27 +5965,54 @@ with tab_filter:
             # Quick select buttons - organized in rows
             st.caption("Quick select (click to toggle):")
 
-            # Row 1: All + first 5 categories
-            row1_cols = st.columns(6)
-            with row1_cols[0]:
-                st.button("All", key="exc_all", width="stretch",
-                          on_click=_cb_set_value, args=('exclude_title_presets', ALL_EXCLUDE_TITLES))
+            # Scoped CSS: keep button labels on one line within a word and let
+            # multi-word labels wrap at spaces rather than character-by-character.
+            # Without this, Streamlit buttons inside a narrow nested column
+            # collapse min-width and break every character onto its own line
+            # (e.g. "C-Level/Founders" -> "C-/Lev/el/F/oun/der/s").
+            st.markdown(
+                """
+                <style>
+                div[data-testid="stButton"] > button {
+                    white-space: normal;
+                    word-break: keep-all;
+                    overflow-wrap: normal;
+                    min-width: 0;
+                    padding-left: 0.25rem;
+                    padding-right: 0.25rem;
+                }
+                div[data-testid="stButton"] > button > div,
+                div[data-testid="stButton"] > button p {
+                    white-space: normal;
+                    word-break: keep-all;
+                    overflow-wrap: normal;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
 
             category_items = list(EXCLUDE_CATEGORIES.items())
-            for i, (cat_name, cat_keywords) in enumerate(category_items[:5]):
-                with row1_cols[i + 1]:
-                    st.button(cat_name, key=f"exc_{cat_name}", width="stretch",
-                              on_click=_cb_toggle_exclude_preset, args=(cat_keywords,))
+            # Lay out as rows of 3 so each button has enough horizontal room
+            # for its label (longest is "C-Level/Founders"). Buttons wrap to a
+            # new row naturally as we re-enter the loop.
+            buttons_per_row = 3
+            quick_buttons = (
+                [("All", ALL_EXCLUDE_TITLES, "exc_all", _cb_set_value,
+                  ('exclude_title_presets', ALL_EXCLUDE_TITLES))]
+                + [(name, kws, f"exc_{name}", _cb_toggle_exclude_preset, (kws,))
+                   for name, kws in category_items]
+                + [("Clear", [], "exc_clear", _cb_set_value,
+                    ('exclude_title_presets', []))]
+            )
 
-            # Row 2: Remaining categories + Clear button
-            row2_cols = st.columns(len(category_items) - 5 + 1)
-            for i, (cat_name, cat_keywords) in enumerate(category_items[5:]):
-                with row2_cols[i]:
-                    st.button(cat_name, key=f"exc_{cat_name}", width="stretch",
-                              on_click=_cb_toggle_exclude_preset, args=(cat_keywords,))
-            with row2_cols[-1]:
-                st.button("Clear", key="exc_clear", width="stretch",
-                          on_click=_cb_set_value, args=('exclude_title_presets', []))
+            for row_start in range(0, len(quick_buttons), buttons_per_row):
+                row = quick_buttons[row_start:row_start + buttons_per_row]
+                row_cols = st.columns(buttons_per_row)
+                for col_idx, (label, _kws, key, cb, cb_args) in enumerate(row):
+                    with row_cols[col_idx]:
+                        st.button(label, key=key, width="stretch",
+                                  on_click=cb, args=cb_args)
 
             selected_exclude = st.multiselect(
                 "Selected exclusions",

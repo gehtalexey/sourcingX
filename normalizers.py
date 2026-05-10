@@ -343,37 +343,33 @@ def parse_duration(duration_str: Any) -> Optional[float]:
 # MILITARY-POSITION DETECTION (for years-of-experience adjustment)
 # ============================================================================
 
-# Conservative keyword list. Matched as case-insensitive substrings on the
-# position title and/or employer name. Designed to identify IDF / Israeli
-# military service so it can be excluded from the YoE total displayed in the
-# results table. We deliberately do NOT match civilian roles even if they
-# overlap thematically (e.g. "Defense" alone is not enough).
-_MILITARY_TITLE_KEYWORDS = (
-    'idf',
+# Conservative keyword sets. Designed to identify IDF / Israeli military
+# service so it can be excluded from the YoE total displayed in the results
+# table. We deliberately do NOT match civilian roles even if they overlap
+# thematically (e.g. "Defense" alone is not enough).
+#
+# Two matching modes:
+# - PHRASES: multi-word names or unambiguous full strings — safe to match as
+#   case-insensitive substrings (e.g. "Israel Defense Forces", Hebrew tokens).
+# - SHORT TOKENS: short Latin markers that could appear as substrings of
+#   unrelated words (e.g. "idf" inside "midfield", "army" inside "armyard").
+#   These are matched at word boundaries only.
+_MILITARY_TITLE_PHRASES = (
     'israel defense forces',
     'israeli defense forces',
     'israel defence forces',
     'israeli defence forces',
     'military',
-    'army',
     'soldier',
     'combat',
-    # IDF tech units commonly listed as titles or employers
-    '8200',
     'unit 8200',
-    'mamram',
-    'talpiot',
-    'matzov',
-    'shaldag',
-    'sayeret',
-    # Hebrew
+    # Hebrew (word-boundary rules don't apply the same way to Hebrew script)
     'צה"ל',
     'צה״ל',
     'צבא',
 )
 
-_MILITARY_COMPANY_KEYWORDS = (
-    'idf',
+_MILITARY_COMPANY_PHRASES = (
     'israel defense forces',
     'israeli defense forces',
     'israel defence forces',
@@ -381,15 +377,32 @@ _MILITARY_COMPANY_KEYWORDS = (
     'israeli army',
     'israel army',
     'israeli military',
-    'mamram',
-    'talpiot',
-    'matzov',
     'unit 8200',
-    '8200',
     # Hebrew
     'צה"ל',
     'צה״ל',
     'צבא',
+)
+
+# Short Latin tokens — matched only at word boundaries to avoid false positives
+# like "idf" inside "midfield" or "army" inside "armyard".
+_MILITARY_TITLE_SHORT_TOKENS = (
+    r'\bidf\b',
+    r'\barmy\b',
+    r'\b8200\b',
+    r'\bmamram\b',
+    r'\btalpiot\b',
+    r'\bmatzov\b',
+    r'\bshaldag\b',
+    r'\bsayeret\b',
+)
+
+_MILITARY_COMPANY_SHORT_TOKENS = (
+    r'\bidf\b',
+    r'\b8200\b',
+    r'\bmamram\b',
+    r'\btalpiot\b',
+    r'\bmatzov\b',
 )
 
 
@@ -399,7 +412,9 @@ def _is_military_position(title: Any, company: Any) -> bool:
     Israeli military service rather than a civilian engineering role.
 
     Conservative by design — only matches well-known military markers so
-    civilian "defense" or "security" jobs are not filtered.
+    civilian "defense" or "security" jobs are not filtered. Short Latin
+    tokens (idf, army, 8200, etc.) are matched at word boundaries to avoid
+    false positives like "Midfield Engineer".
     """
     title_str = ''
     if not is_nan_or_none(title):
@@ -412,12 +427,24 @@ def _is_military_position(title: Any, company: Any) -> bool:
     if not title_str and not company_str:
         return False
 
-    for kw in _MILITARY_TITLE_KEYWORDS:
-        if kw and kw.lower() in title_str:
+    # Phrase matches (substring) — title
+    for phrase in _MILITARY_TITLE_PHRASES:
+        if phrase and phrase.lower() in title_str:
             return True
 
-    for kw in _MILITARY_COMPANY_KEYWORDS:
-        if kw and kw.lower() in company_str:
+    # Phrase matches (substring) — company
+    for phrase in _MILITARY_COMPANY_PHRASES:
+        if phrase and phrase.lower() in company_str:
+            return True
+
+    # Short-token matches (word boundary) — title
+    for pattern in _MILITARY_TITLE_SHORT_TOKENS:
+        if re.search(pattern, title_str, re.IGNORECASE):
+            return True
+
+    # Short-token matches (word boundary) — company
+    for pattern in _MILITARY_COMPANY_SHORT_TOKENS:
+        if re.search(pattern, company_str, re.IGNORECASE):
             return True
 
     return False

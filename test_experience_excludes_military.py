@@ -52,9 +52,39 @@ def test_is_military_position_true(title, company):
     ("Defense Industry Analyst", "Rafael"),  # 'defense' alone is NOT military
     ("", ""),
     (None, None),
+    # Word-boundary regressions (Codex review on PR #17):
+    # short Latin tokens like "idf" / "army" must not match unrelated words.
+    ("Midfield Engineer", "Soccer Club"),       # 'idf' substring of 'midfield'
+    ("Senior Engineer", "Midfielder Analytics"),  # 'idf' substring on company
+    ("Armyard Sales", "Logistics Co"),           # 'army' substring of 'armyard'
 ])
 def test_is_military_position_false(title, company):
     assert _is_military_position(title, company) is False
+
+
+# Explicit regression tests called out by Codex's review on PR #17.
+def test_midfield_engineer_is_not_military():
+    """`_is_military_position` must use word-boundary matching for 'idf' so
+    'Midfield Engineer' does NOT register as a military position."""
+    assert _is_military_position("Midfield Engineer", "Soccer Club") is False
+
+
+def test_army_word_boundary_still_matches():
+    """Boundary matching must still flag the real 'army' token."""
+    assert _is_military_position("Army Engineer", "Defense Co") is True
+
+
+def test_idf_phrase_and_token_combo():
+    """Phrase match on company + short-token match on title both fire."""
+    assert _is_military_position(
+        "IDF Software Engineer", "Israel Defense Forces"
+    ) is True
+
+
+def test_word_bounded_short_token_in_company():
+    """Short tokens (e.g. '8200', 'mamram') should still match inside a
+    multi-word company string when surrounded by whitespace."""
+    assert _is_military_position("Engineer", "Mamram Unit 8200") is True
 
 
 # ----------------------------------------------------------------------------

@@ -12,61 +12,18 @@ keeping the existing exact + prefix behavior intact, and the guard that
 prevents a one-word entry like "Apple" from matching every "Apple X"
 company.
 
-Tests import the module-level helpers directly. Streamlit and other heavy
-deps are stubbed so the test runs in CI without a full env.
+Tests import the helpers from the import-safe `company_matching` module
+so CI doesn't need to stub streamlit / requests / openai etc.
 """
 
-import sys
-import types
-
-import pytest
-
-
-# ---------------------------------------------------------------------------
-# Stub heavy / third-party imports before importing dashboard.py.
-# The helpers we care about only need `pd` (pandas) and `re` (stdlib).
-# Everything else is replaced with permissive stubs.
-# ---------------------------------------------------------------------------
-
-
-class _PermissiveStub(types.ModuleType):
-    """Module that returns another stub for any attribute access."""
-
-    def __getattr__(self, name):
-        if name.startswith("__"):
-            raise AttributeError(name)
-        sub = _PermissiveStub(f"{self.__name__}.{name}")
-        sys.modules[sub.__name__] = sub
-        return sub
-
-
-for _name in [
-    "streamlit",
-    "requests",
-    "openai",
-    "anthropic",
-    "gspread",
-    "google",
-    "google.oauth2",
-    "google.oauth2.service_account",
-    "plyer",
-    "api_helpers",
-    "normalizers",
-    "helpers",
-]:
-    if _name not in sys.modules:
-        sys.modules[_name] = _PermissiveStub(_name)
-
-
-import dashboard  # noqa: E402
-
-
-norm = dashboard._normalize_company_name
-matches = dashboard._company_matches_filter_list
+from company_matching import (
+    normalize_company_name as norm,
+    company_matches_filter_list as matches,
+)
 
 
 # ---------------------------------------------------------------------------
-# _normalize_company_name
+# normalize_company_name
 # ---------------------------------------------------------------------------
 
 
@@ -95,7 +52,7 @@ def test_normalize_keeps_systems_token():
 
 
 # ---------------------------------------------------------------------------
-# _company_matches_filter_list — primary regression
+# company_matches_filter_list — primary regression
 # ---------------------------------------------------------------------------
 
 
@@ -111,7 +68,7 @@ def test_elad_software_systems_matches_elad_systems():
 
 
 # ---------------------------------------------------------------------------
-# _company_matches_filter_list — exact + prefix cases stay green
+# company_matches_filter_list — exact + prefix cases stay green
 # ---------------------------------------------------------------------------
 
 
@@ -132,7 +89,7 @@ def test_empty_inputs_return_false():
 
 
 # ---------------------------------------------------------------------------
-# _company_matches_filter_list — false-positive guards
+# company_matches_filter_list — false-positive guards
 # ---------------------------------------------------------------------------
 
 

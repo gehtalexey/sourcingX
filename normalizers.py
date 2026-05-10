@@ -291,6 +291,7 @@ def parse_duration(duration_str: Any) -> Optional[float]:
     - "8 months" → 0.67
     - "2 years" → 2.0
     - "1 year 6 months" → 1.5
+    - "2y 9m" → 2.75 (Crustdata short format on per-position records)
     - "2.5" → 2.5 (already numeric)
     - None → None
     """
@@ -323,10 +324,241 @@ def parse_duration(duration_str: Any) -> Optional[float]:
     if month_match:
         months = float(month_match.group(1))
 
+    # Short Crustdata format used on per-position records: "2y 9m", "11m", "3y"
+    if not years and not months:
+        short_year = re.search(r'(\d+(?:\.\d+)?)\s*y\b', duration_str)
+        short_month = re.search(r'(\d+(?:\.\d+)?)\s*m\b', duration_str)
+        if short_year:
+            years = float(short_year.group(1))
+        if short_month:
+            months = float(short_month.group(1))
+
     if years or months:
         return round(years + months / 12, 2)
 
     return None
+
+
+# ============================================================================
+# MILITARY-POSITION DETECTION (for years-of-experience adjustment)
+# ============================================================================
+
+# Conservative keyword sets. Designed to identify IDF / Israeli military
+# service so it can be excluded from the YoE total displayed in the results
+# table. We deliberately do NOT match civilian roles even if they overlap
+# thematically (e.g. "Defense" alone is not enough).
+#
+# Two matching modes:
+# - PHRASES: multi-word names or unambiguous full strings — safe to match as
+#   case-insensitive substrings (e.g. "Israel Defense Forces", Hebrew tokens).
+# - SHORT TOKENS: short Latin markers that could appear as substrings of
+#   unrelated words (e.g. "idf" inside "midfield", "army" inside "armyard").
+#   These are matched at word boundaries only.
+_MILITARY_TITLE_PHRASES = (
+    'israel defense forces',
+    'israeli defense forces',
+    'israel defence forces',
+    'israeli defence forces',
+    'military',
+    'soldier',
+    'combat',
+    'unit 8200',
+    # Hebrew (word-boundary rules don't apply the same way to Hebrew script)
+    'צה"ל',
+    'צה״ל',
+    'צבא',
+)
+
+_MILITARY_COMPANY_PHRASES = (
+    'israel defense forces',
+    'israeli defense forces',
+    'israel defence forces',
+    'israeli defence forces',
+    'israeli army',
+    'israel army',
+    'israeli military',
+    'unit 8200',
+    # Hebrew
+    'צה"ל',
+    'צה״ל',
+    'צבא',
+)
+
+# Short Latin tokens — matched only at word boundaries to avoid false positives
+# like "idf" inside "midfield" or "army" inside "armyard".
+_MILITARY_TITLE_SHORT_TOKENS = (
+    r'\bidf\b',
+    r'\barmy\b',
+    r'\b8200\b',
+    r'\bmamram\b',
+    r'\btalpiot\b',
+    r'\bmatzov\b',
+    r'\bshaldag\b',
+    r'\bsayeret\b',
+)
+
+_MILITARY_COMPANY_SHORT_TOKENS = (
+    r'\bidf\b',
+    r'\b8200\b',
+    r'\bmamram\b',
+    r'\btalpiot\b',
+    r'\bmatzov\b',
+)
+
+
+def _is_military_position(title: Any, company: Any) -> bool:
+    """
+    Return True if the given position (title + company) looks like IDF /
+    Israeli military service rather than a civilian engineering role.
+
+    Conservative by design — only matches well-known military markers so
+    civilian "defense" or "security" jobs are not filtered. Short Latin
+    tokens (idf, army, 8200, etc.) are matched at word boundaries to avoid
+    false positives like "Midfield Engineer".
+    """
+    title_str = ''
+    if not is_nan_or_none(title):
+        title_str = str(title).lower()
+
+    company_str = ''
+    if not is_nan_or_none(company):
+        company_str = str(company).lower()
+
+    if not title_str and not company_str:
+        return False
+
+    # Phrase matches (substring) — title
+    for phrase in _MILITARY_TITLE_PHRASES:
+        if phrase and phrase.lower() in title_str:
+            return True
+
+    # Phrase matches (substring) — company
+    for phrase in _MILITARY_COMPANY_PHRASES:
+        if phrase and phrase.lower() in company_str:
+            return True
+
+    # Short-token matches (word boundary) — title
+    for pattern in _MILITARY_TITLE_SHORT_TOKENS:
+        if re.search(pattern, title_str, re.IGNORECASE):
+            return True
+
+    # Short-token matches (word boundary) — company
+    for pattern in _MILITARY_COMPANY_SHORT_TOKENS:
+        if re.search(pattern, company_str, re.IGNORECASE):
+            return True
+
+    return False
+
+
+def _position_duration_years(position: dict) -> Optional[float]:
+    """
+    Best-effort: extract a single position's duration in years.
+
+    Tries the explicit `duration` string first (e.g. "2y 9m"), then falls
+    back to computing from `start_date` / `end_date` (YYYY-MM or YYYY).
+    Returns None if no usable duration can be derived.
+    """
+    if not isinstance(position, dict):
+        return None
+
+    # 1. Explicit duration string
+    duration = position.get('duration')
+    years = parse_duration(duration)
+    if years is not None:
+        return years
+
+    # 2. Compute from start/end dates
+    start = position.get('start_date') or position.get('startDate')
+    end = position.get('end_date') or position.get('endDate')
+    if not start:
+        return None
+
+    def _parse_ym(s):
+        if is_nan_or_none(s):
+            return None
+        s = str(s).strip()
+        # Try YYYY-MM
+        m = re.match(r'^(\d{4})-(\d{1,2})', s)
+        if m:
+            return int(m.group(1)) * 12 + int(m.group(2))
+        # Try YYYY only
+        m = re.match(r'^(\d{4})$', s)
+        if m:
+            return int(m.group(1)) * 12 + 1
+        return None
+
+    start_m = _parse_ym(start)
+    if start_m is None:
+        return None
+
+    end_m = _parse_ym(end) if end else None
+    if end_m is None:
+        # Treat missing end_date as "current" — use today
+        now = datetime.utcnow()
+        end_m = now.year * 12 + now.month
+
+    diff_months = max(0, end_m - start_m)
+    return round(diff_months / 12, 2)
+
+
+def compute_years_of_experience(
+    profile: dict,
+    exclude_military: bool = True,
+) -> Optional[float]:
+    """
+    Compute total years of professional experience for a profile, optionally
+    excluding IDF / military positions.
+
+    Sums durations across `current_employers` + `past_employers`. Falls back
+    to the raw Crustdata `years_of_experience_raw` / `years_of_experience`
+    field if per-position records are not available.
+
+    Args:
+        profile: Raw or normalized profile dict.
+        exclude_military: If True (default), military positions are skipped.
+
+    Returns:
+        Float years (rounded to 1 decimal), or None if we can't determine it.
+    """
+    if not isinstance(profile, dict):
+        return None
+
+    positions = []
+    for key in ('current_employers', 'past_employers'):
+        items = profile.get(key)
+        if isinstance(items, list):
+            positions.extend(p for p in items if isinstance(p, dict))
+
+    if not positions:
+        # Fallback to whatever raw aggregate Crustdata gave us — we cannot
+        # filter without per-position records.
+        raw = profile.get('years_of_experience_raw')
+        if raw is None:
+            raw = profile.get('years_of_experience')
+        if raw is None:
+            return None
+        try:
+            return round(float(raw), 1)
+        except (TypeError, ValueError):
+            return None
+
+    total_years = 0.0
+    counted_any = False
+    for pos in positions:
+        title = pos.get('employee_title') or pos.get('title') or ''
+        company = pos.get('employer_name') or pos.get('company_name') or pos.get('name') or ''
+        if exclude_military and _is_military_position(title, company):
+            continue
+        years = _position_duration_years(pos)
+        if years is None:
+            continue
+        total_years += years
+        counted_any = True
+
+    if not counted_any:
+        return None
+
+    return round(total_years, 1)
 
 
 # ============================================================================

@@ -45,6 +45,7 @@ from normalizers import (
     profiles_to_display_df,
     parse_duration,
     clean_dict,
+    compute_years_of_experience,
 )
 from helpers import format_past_positions, format_education
 
@@ -4937,7 +4938,7 @@ with tab_search:
                     "Seniority": seniority,
                     "Size": company_size,
                     "Location": profile.get("region", ""),
-                    "Exp": f"{profile.get('years_of_experience_raw', '')}y" if profile.get('years_of_experience_raw') else "",
+                    "Exp": (lambda _y: f"{_y}y" if _y else "")(compute_years_of_experience(profile)),
                     "Skills": top_skills,
                     "LinkedIn": linkedin_url,
                 })

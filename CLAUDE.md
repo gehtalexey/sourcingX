@@ -16,7 +16,7 @@ This repo uses GitHub PRs as the coordination layer between Claude (the code-wri
 4. **CI is required.** The GitHub Actions workflow under `.github/workflows/test.yml` runs focused tests on every push and PR targeting `master`. PRs do not merge until CI is green.
 5. **No auto-merge.** Merges are manual. Alexey reviews the final state and clicks merge himself.
 6. **No broad write permissions for CI.** The workflow declares `permissions: contents: read` explicitly. Any future job that needs write access must be added narrowly and reviewed.
-7. **No secrets in the repo.** Real API keys live in `config.json` (gitignored) or GitHub Actions secrets, never in source. Test code uses placeholder keys (`"test-key"`) which the workflow injects via env. Local agent state (`.claude/`, `.agent/`, `.continue/`, scratch JSON/CSV outputs) is gitignored and must never be committed.
+7. **No secrets in the repo.** Real API keys live in `config.json` (gitignored) or GitHub Actions secrets, never in source. Test code uses placeholder keys (`"test-key"`) which the workflow injects via env. Local agent state such as `.claude/settings.local.json`, `.claude/launch.json`, `.claude/scheduled_tasks.lock`, `.claude/worktrees/`, `.agent/`, `.agents/`, `.continue/`, and scratch JSON/CSV outputs is gitignored and must never be committed. Tracked project skill files under `.claude/skills/` are allowed only when intentionally maintained as repo instructions.
 
 ### Commit messages
 

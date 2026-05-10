@@ -9994,6 +9994,11 @@ with tab_database:
                 if all_profiles:
                     df = profiles_to_dataframe(all_profiles)
 
+                    # Capture pre-filter count so we can show users where the funnel
+                    # collapsed (a confused user reported "0 results" without knowing
+                    # whether the column filters or the fulltext was responsible).
+                    _pre_column_filter_count = len(df)
+
                     # Create combined name column only if name is empty
                     if 'name' not in df.columns:
                         df['name'] = ''
@@ -10238,11 +10243,33 @@ with tab_database:
                     # Display limit to prevent browser freeze
                     DISPLAY_LIMIT = 500
 
-                    # Results
-                    if len(filtered_df) > DISPLAY_LIMIT:
-                        st.info(f"Found **{len(filtered_df)}** profiles (showing first {DISPLAY_LIMIT})")
+                    # Results — show the search funnel so users can see where the
+                    # narrowing happened (e.g. "FT found 500, column filters left 0").
+                    _final_count = len(filtered_df)
+                    _ft_active = bool(ft and ft.strip())
+                    _columns_narrowed = (
+                        _ft_active and has_column_filters and _final_count < _pre_column_filter_count
+                    )
+
+                    if _final_count > DISPLAY_LIMIT:
+                        st.info(f"Found **{_final_count}** profiles (showing first {DISPLAY_LIMIT})")
                     else:
-                        st.info(f"Found **{len(filtered_df)}** profiles")
+                        st.info(f"Found **{_final_count}** profiles")
+
+                    if _columns_narrowed:
+                        _dropped = _pre_column_filter_count - _final_count
+                        st.caption(
+                            f"Full-text search matched **{_pre_column_filter_count}** profiles; "
+                            f"column filters dropped **{_dropped}**. "
+                            "If that's not what you expected, try removing one column filter "
+                            "(e.g. *Current Company* or *Current Title*) to see broader matches."
+                        )
+                    elif _final_count == 0 and (_ft_active or has_column_filters):
+                        st.caption(
+                            "Tip: 0 results often means the DB doesn't have profiles enriched "
+                            "for these criteria yet, not that the filter is broken. Try relaxing "
+                            "one filter at a time."
+                        )
 
                     # Toggle to show all columns
                     show_all_db_cols = st.checkbox("Show all columns", value=False, key="db_show_all_cols")

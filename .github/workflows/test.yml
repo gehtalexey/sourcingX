@@ -47,4 +47,5 @@ jobs:
             test_mocking_services.py \
             test_screening_parameterized.py \
             test_profiles_status_dropped.py \
-            test_hard_constraints_prompt.py
+            test_hard_constraints_prompt.py \
+            test_tenure_constraint_override.py

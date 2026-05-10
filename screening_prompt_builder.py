@@ -400,12 +400,28 @@ def screen_with_structured_prompt(
         else:
             category = "No Fit"
 
-    return {
+    result = {
         "name": profile.get("name", "Unknown"),
         "score": score,
         "category": category,
         "reasoning": raw_response,
     }
+
+    # Deterministic post-screening: tenure hard-constraint override.
+    # Issue 7 — if the recruiter wrote a minimum-tenure rule in the must-haves
+    # or reject-ifs and the candidate violates it, force "No Fit" regardless
+    # of what the model returned.
+    try:
+        from tenure_constraint_validator import enforce_tenure_constraint
+        constraint_text = "\n".join(
+            (must_haves or []) + (reject_ifs or [])
+        )
+        result = enforce_tenure_constraint(result, constraint_text, profile)
+    except Exception:
+        # Never crash screening on validator failure.
+        pass
+
+    return result
 
 
 def screen_batch_structured(

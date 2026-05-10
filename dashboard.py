@@ -2731,6 +2731,65 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 
+_GSPREAD_SERVICE_ACCOUNT = "linkedin-enricher@linkedin-enricher-485616.iam.gserviceaccount.com"
+
+
+def render_filter_sheet_status(filter_sheets: dict, gspread_client) -> bool:
+    """Render a visible Google Sheets connection status badge in the current tab.
+
+    Returns True iff the sheet is actually reachable (the helper has successfully
+    opened it via gspread). Used by both the Filter and Filter+ tabs so the
+    user can always tell whether their sheet-based filters will run.
+
+    States:
+      - No URL configured        → st.info  ("paste a URL")
+      - URL but no gspread client → st.error ("credentials missing/invalid")
+      - URL + client but open fails → st.error (actual exception class + msg)
+      - All good                  → st.success ("Filter sheet connected: <name>")
+    """
+    url = filter_sheets.get('url') if filter_sheets else None
+    if not url:
+        st.info(
+            "No filter sheet URL configured — paste a Google Sheets URL above "
+            "to enable sheet-based filters (blacklist, not-relevant, target companies, etc.)."
+        )
+        return False
+    if gspread_client is None:
+        st.error(
+            "**Couldn't connect — Google credentials missing or invalid.** "
+            "Sheet-based filters (blacklist, not-relevant, target companies, etc.) "
+            "will be skipped. Check `config.json`'s `google_credentials_file` setting, "
+            "or set `google_credentials` in your Streamlit secrets."
+        )
+        return False
+
+    # Try to open the sheet (cached in session_state to avoid repeated API calls
+    # within one Streamlit run). Store both the OK title and any error reason so
+    # repeated renders don't retry on every interaction.
+    cache_key = f"sheet_status::{url}"
+    if cache_key not in st.session_state:
+        try:
+            title = gspread_client.open_by_url(url).title
+            st.session_state[cache_key] = ('ok', title)
+        except Exception as e:
+            st.session_state[cache_key] = ('error', f"{type(e).__name__}: {e}")
+
+    status, payload = st.session_state[cache_key]
+    if status == 'ok':
+        st.success(f"Filter sheet connected: **{payload}**")
+        return True
+
+    st.error(
+        f"**Couldn't open the filter sheet.** {payload}\n\n"
+        "Common causes:\n"
+        f"- The sheet isn't shared with the service account `{_GSPREAD_SERVICE_ACCOUNT}`.\n"
+        "- The URL doesn't point at a Google Sheet (it should look like "
+        "`https://docs.google.com/spreadsheets/d/…`).\n"
+        "- The sheet was deleted or moved."
+    )
+    return False
+
+
 @st.cache_data(ttl=600, max_entries=10, show_spinner="Loading sheet...")
 def load_sheet_as_df(sheet_url: str, worksheet_name: str = None) -> pd.DataFrame:
     """Load a Google Sheet as a pandas DataFrame.
@@ -5861,41 +5920,25 @@ with tab_filter:
             if not filter_sheets.get('client_wanted_companies'):
                 filter_sheets['client_wanted_companies'] = 'Client specific wanted companies'
 
-        has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
+        sheet_connected = render_filter_sheet_status(filter_sheets, gspread_client)
+        has_sheets = sheet_connected
 
-        if filter_sheets.get('url') and gspread_client is None:
-            st.error("Google credentials not configured. Cannot connect to Google Sheets.")
-
-        if has_sheets:
-            # Show sheet name (cached to avoid repeated API calls)
-            cache_key = f"sheet_title_{filter_sheets.get('url', '')}"
-            if cache_key not in st.session_state:
+        # Detailed verification — only useful when the sheet is reachable.
+        if sheet_connected and st.button("Verify Sheet Connection", key="verify_sheet"):
+            with st.spinner("Checking sheet access..."):
                 try:
-                    st.session_state[cache_key] = gspread_client.open_by_url(filter_sheets['url']).title
-                except Exception:
-                    st.session_state[cache_key] = None
-            sheet_name = st.session_state.get(cache_key)
-            if sheet_name:
-                st.success(f"Filter sheet configured: **{sheet_name}**")
-            else:
-                st.success("Filter sheet configured")
-
-            # Validate sheet connection
-            if st.button("Verify Sheet Connection", key="verify_sheet"):
-                with st.spinner("Checking sheet access..."):
-                    try:
-                        spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
-                        tabs = [ws.title for ws in spreadsheet.worksheets()]
-                        st.success(f"Connected to **{spreadsheet.title}**! Found {len(tabs)} tabs")
-                        expected_tabs = ['Past Candidates', 'Blacklist', 'NotRelevant Companies', 'Target Companies', 'Universities', 'Tech Alerts']
-                        missing = [t for t in expected_tabs if t not in tabs]
-                        if missing:
-                            st.warning(f"Missing expected tabs: {', '.join(missing)}")
-                        else:
-                            st.info(f"All expected tabs found")
-                    except Exception as e:
-                        st.error(f"Cannot access sheet: {e}")
-                        st.info("Make sure you shared the sheet with the service account email above")
+                    spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
+                    tabs = [ws.title for ws in spreadsheet.worksheets()]
+                    st.success(f"Connected to **{spreadsheet.title}**! Found {len(tabs)} tabs")
+                    expected_tabs = ['Past Candidates', 'Blacklist', 'NotRelevant Companies', 'Target Companies', 'Universities', 'Tech Alerts']
+                    missing = [t for t in expected_tabs if t not in tabs]
+                    if missing:
+                        st.warning(f"Missing expected tabs: {', '.join(missing)}")
+                    else:
+                        st.info("All expected tabs found")
+                except Exception as e:
+                    st.error(f"Cannot access sheet: {e}")
+                    st.info("Make sure you shared the sheet with the service account email above")
 
         st.divider()
         col1, col2 = st.columns(2)
@@ -7617,20 +7660,7 @@ with tab_filter2:
             if 'client_wanted_companies' not in filter_sheets:
                 filter_sheets['client_wanted_companies'] = 'Client specific wanted companies'
 
-        has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
-
-        if has_sheets:
-            cache_key = f"sheet_title_{filter_sheets.get('url', '')}"
-            if cache_key not in st.session_state:
-                try:
-                    st.session_state[cache_key] = gspread_client.open_by_url(filter_sheets['url']).title
-                except Exception:
-                    st.session_state[cache_key] = None
-            sheet_name = st.session_state.get(cache_key)
-            if sheet_name:
-                st.success(f"Filter sheet configured: **{sheet_name}**")
-            else:
-                st.success("Filter sheet configured")
+        has_sheets = render_filter_sheet_status(filter_sheets, gspread_client)
 
         st.divider()
         st.markdown("**Filter Options:**")

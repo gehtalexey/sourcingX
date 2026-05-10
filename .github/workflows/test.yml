@@ -46,4 +46,5 @@ jobs:
           pytest -v --tb=short \
             test_mocking_services.py \
             test_screening_parameterized.py \
-            test_profiles_status_dropped.py
+            test_profiles_status_dropped.py \
+            test_company_filter_matching.py

@@ -47,6 +47,11 @@ from normalizers import (
     clean_dict,
 )
 from helpers import format_past_positions, format_education
+from company_matching import (
+    normalize_company_name as _normalize_company_name,
+    company_matches_filter_list as _company_matches_filter_list,
+)
+
 
 # Email generator module
 try:
@@ -3129,38 +3134,9 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
 
     df = df.copy()  # Avoid SettingWithCopyWarning
 
-    # Helper functions
-    def normalize_company(name):
-        """Normalize company name for comparison."""
-        if pd.isna(name) or not str(name).strip():
-            return ''
-        # Lowercase and strip
-        name = str(name).lower().strip()
-        # Remove common suffixes
-        for suffix in [' ltd', ' inc', ' corp', ' llc', ' limited', ' israel', ' il', ' technologies', ' tech', ' software', ' solutions', ' group']:
-            if name.endswith(suffix):
-                name = name[:-len(suffix)].strip()
-        return name
-
-    def matches_list(company, company_list):
-        """Check if company matches any in the list - uses normalized exact match."""
-        if pd.isna(company) or not str(company).strip():
-            return False
-        company_norm = normalize_company(company)
-        if not company_norm:
-            return False
-        for c in company_list:
-            c_norm = normalize_company(c)
-            if not c_norm:
-                continue
-            # Exact match after normalization
-            if company_norm == c_norm:
-                return True
-            # One contains the other fully (for cases like "Bank Leumi" vs "Bank Leumi Le-Israel")
-            if len(c_norm) >= 4 and len(company_norm) >= 4:
-                if company_norm.startswith(c_norm) or c_norm.startswith(company_norm):
-                    return True
-        return False
+    # Filter helpers — module-level versions are used so they can be unit-tested
+    # and so the same matching rules apply across every filter callsite.
+    matches_list = _company_matches_filter_list
 
     def matches_list_in_text(text, company_list):
         """Check if any company from list appears in text - uses word boundary matching."""
@@ -3168,10 +3144,9 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
             return False
         text_lower = str(text).lower()
         for c in company_list:
-            c_norm = normalize_company(c)
+            c_norm = _normalize_company_name(c)
             if not c_norm or len(c_norm) < 3:
                 continue
-            # Use word boundary pattern for longer names
             pattern = r'\b' + re.escape(c_norm) + r'\b'
             if re.search(pattern, text_lower):
                 return True
@@ -6384,32 +6359,9 @@ with tab_filter:
                 sheet_url = filter_sheets.get('url', '')
                 priority_loaded = []
 
-                # Helper function for matching
-                def normalize_company(name):
-                    if pd.isna(name) or not str(name).strip():
-                        return ''
-                    name = str(name).lower().strip()
-                    for suffix in [' ltd', ' inc', ' corp', ' llc', ' limited', ' israel', ' il', ' technologies', ' tech', ' software', ' solutions', ' group']:
-                        if name.endswith(suffix):
-                            name = name[:-len(suffix)].strip()
-                    return name
-
-                def matches_list(company, company_list):
-                    if pd.isna(company) or not str(company).strip():
-                        return False
-                    company_norm = normalize_company(company)
-                    if not company_norm:
-                        return False
-                    for c in company_list:
-                        c_norm = normalize_company(c)
-                        if not c_norm:
-                            continue
-                        if company_norm == c_norm:
-                            return True
-                        if len(c_norm) >= 4 and len(company_norm) >= 4:
-                            if company_norm.startswith(c_norm) or c_norm.startswith(company_norm):
-                                return True
-                    return False
+                # Use the module-level company-filter helper so all callsites
+                # share the same matching rules (incl. token-subset).
+                matches_list = _company_matches_filter_list
 
                 # Target companies
                 if load_target_companies and filter_sheets.get('target_companies'):
@@ -7774,16 +7726,16 @@ with tab_filter2:
                 if use_blacklist and has_sheets and filter_sheets.get('blacklist'):
                     bl_df = load_sheet_as_df(sheet_url, filter_sheets['blacklist'])
                     if bl_df is not None and not bl_df.empty:
-                        blacklist_items = set()
+                        blacklist_items = []
                         for c in bl_df.columns:
-                            blacklist_items.update(bl_df[c].dropna().str.lower().str.strip().tolist())
+                            blacklist_items.extend(bl_df[c].dropna().tolist())
+                        blacklist_items = [str(b).strip() for b in blacklist_items if str(b).strip()]
                         if blacklist_items and 'current_company' in df.columns:
-                            def _matches_blacklist(company):
-                                if pd.isna(company) or not company:
-                                    return False
-                                comp = str(company).lower().strip()
-                                return any(bl in comp or comp in bl for bl in blacklist_items if bl)
-                            mask = df['current_company'].apply(_matches_blacklist)
+                            # Use the central matcher so variants like
+                            # "Elad Systems" vs "Elad Software Systems" match.
+                            mask = df['current_company'].apply(
+                                lambda x: _company_matches_filter_list(x, blacklist_items)
+                            )
                             removed['Blacklist Companies'] = mask.sum()
                             df = df[~mask]
 
@@ -7791,10 +7743,11 @@ with tab_filter2:
                 if use_not_relevant and has_sheets and filter_sheets.get('not_relevant'):
                     nr_df = load_sheet_as_df(sheet_url, filter_sheets['not_relevant'])
                     if nr_df is not None and not nr_df.empty:
-                        not_relevant_companies = set()
+                        not_relevant_list = []
                         for col in nr_df.columns:
-                            not_relevant_companies.update(nr_df[col].dropna().str.lower().str.strip().tolist())
-                        if 'all_employers' in df.columns:
+                            not_relevant_list.extend(nr_df[col].dropna().tolist())
+                        not_relevant_list = [str(n).strip() for n in not_relevant_list if str(n).strip()]
+                        if not_relevant_list and 'all_employers' in df.columns:
                             def has_not_relevant_employer(employers_data):
                                 # Handle None, NaN, empty
                                 if employers_data is None:
@@ -7808,10 +7761,16 @@ with tab_filter2:
                                     return False
                                 # Handle list/array or comma-separated string
                                 if isinstance(employers_data, (list, tuple)):
-                                    employers = [str(e).strip().lower() for e in employers_data if e]
+                                    employers = [str(e).strip() for e in employers_data if e]
                                 else:
-                                    employers = [e.strip().lower() for e in str(employers_data).split(',')]
-                                return any(emp in not_relevant_companies for emp in employers)
+                                    employers = [e.strip() for e in str(employers_data).split(',')]
+                                # Match ANY past employer via central matcher so
+                                # "Elad Systems" hits "Elad Software Systems".
+                                return any(
+                                    _company_matches_filter_list(emp, not_relevant_list)
+                                    for emp in employers
+                                    if emp
+                                )
                             mask = df['all_employers'].apply(has_not_relevant_employer)
                             # MEMORY FIX: Store only count, not full records (saves 10-50MB)
                             removed['Not Relevant Companies'] = mask.sum()
@@ -7821,39 +7780,22 @@ with tab_filter2:
                 if target_company_mode != "Off" and has_sheets and filter_sheets.get('target_companies'):
                     tc_df = load_sheet_as_df(sheet_url, filter_sheets['target_companies'])
                     if tc_df is not None and not tc_df.empty:
-                        target_companies = set()
+                        target_companies = []
                         for col in tc_df.columns:
                             if 'company' in col.lower() or 'name' in col.lower():
-                                target_companies.update(tc_df[col].dropna().str.lower().str.strip().tolist())
+                                target_companies.extend(tc_df[col].dropna().tolist())
                         # If no matching columns, use all columns
                         if not target_companies:
                             for col in tc_df.columns:
-                                target_companies.update(tc_df[col].dropna().str.lower().str.strip().tolist())
+                                target_companies.extend(tc_df[col].dropna().tolist())
+                        target_companies = [str(t).strip() for t in target_companies if str(t).strip()]
                         if target_companies:
-                            def matches_target_company(value):
-                                """Check if a single company value matches any target company."""
-                                if value is None:
-                                    return False
-                                try:
-                                    if pd.isna(value):
-                                        return False
-                                except (ValueError, TypeError):
-                                    pass
-                                if not value:
-                                    return False
-                                val_lower = str(value).strip().lower()
-                                for target in target_companies:
-                                    if not target:
-                                        continue
-                                    if val_lower == target or target in val_lower or val_lower in target:
-                                        return True
-                                return False
-
                             def has_target_company(row):
                                 """Check if profile worked at a target company (current or past)."""
-                                # Check current company
-                                if 'current_company' in row.index and matches_target_company(row.get('current_company')):
-                                    return True
+                                # Check current company via central matcher.
+                                if 'current_company' in row.index:
+                                    if _company_matches_filter_list(row.get('current_company'), target_companies):
+                                        return True
                                 # Check all employers (past + current)
                                 employers_data = row.get('all_employers') if 'all_employers' in row.index else None
                                 if employers_data is None:
@@ -7867,17 +7809,15 @@ with tab_filter2:
                                     return False
                                 # Handle list/array or comma-separated string
                                 if isinstance(employers_data, (list, tuple)):
-                                    employers = [str(e).strip().lower() for e in employers_data if e]
+                                    employers = [str(e).strip() for e in employers_data if e]
                                 else:
-                                    employers = [e.strip().lower() for e in str(employers_data).split(',')]
-                                # Check if any employer matches a target company
-                                for emp in employers:
-                                    for target in target_companies:
-                                        if not target:
-                                            continue
-                                        if emp == target or target in emp or emp in target:
-                                            return True
-                                return False
+                                    employers = [e.strip() for e in str(employers_data).split(',')]
+                                # Match ANY past employer via central matcher.
+                                return any(
+                                    _company_matches_filter_list(emp, target_companies)
+                                    for emp in employers
+                                    if emp
+                                )
                             df['_target_company'] = df.apply(has_target_company, axis=1)
                             target_company_matches = df[df['_target_company']].index.tolist()
 
@@ -7962,39 +7902,24 @@ with tab_filter2:
                 if client_wanted_mode != "Off" and has_sheets and filter_sheets.get('client_wanted_companies'):
                     cw_df = load_sheet_as_df(sheet_url, filter_sheets['client_wanted_companies'])
                     if cw_df is not None and not cw_df.empty:
-                        client_wanted_companies = set()
+                        client_wanted_companies = []
                         for col in cw_df.columns:
                             if 'company' in col.lower() or 'name' in col.lower():
-                                client_wanted_companies.update(cw_df[col].dropna().str.lower().str.strip().tolist())
+                                client_wanted_companies.extend(cw_df[col].dropna().tolist())
                         # If no matching columns, use all columns
                         if not client_wanted_companies:
                             for col in cw_df.columns:
-                                client_wanted_companies.update(cw_df[col].dropna().str.lower().str.strip().tolist())
+                                client_wanted_companies.extend(cw_df[col].dropna().tolist())
+                        client_wanted_companies = [
+                            str(w).strip() for w in client_wanted_companies if str(w).strip()
+                        ]
                         if client_wanted_companies:
-                            def matches_client_wanted(value):
-                                """Check if a single company value matches any client wanted company."""
-                                if value is None:
-                                    return False
-                                try:
-                                    if pd.isna(value):
-                                        return False
-                                except (ValueError, TypeError):
-                                    pass
-                                if not value:
-                                    return False
-                                val_lower = str(value).strip().lower()
-                                for wanted in client_wanted_companies:
-                                    if not wanted:
-                                        continue
-                                    if val_lower == wanted or wanted in val_lower or val_lower in wanted:
-                                        return True
-                                return False
-
                             def has_client_wanted_company(row):
                                 """Check if profile worked at a client wanted company."""
-                                # Check current company
-                                if 'current_company' in row.index and matches_client_wanted(row.get('current_company')):
-                                    return True
+                                # Check current company via central matcher.
+                                if 'current_company' in row.index:
+                                    if _company_matches_filter_list(row.get('current_company'), client_wanted_companies):
+                                        return True
                                 # Check all employers only if scope is "All employers"
                                 if client_wanted_scope == "All employers":
                                     employers_data = row.get('all_employers') if 'all_employers' in row.index else None
@@ -8009,16 +7934,15 @@ with tab_filter2:
                                         return False
                                     # Handle list/array or comma-separated string
                                     if isinstance(employers_data, (list, tuple)):
-                                        employers = [str(e).strip().lower() for e in employers_data if e]
+                                        employers = [str(e).strip() for e in employers_data if e]
                                     else:
-                                        employers = [e.strip().lower() for e in str(employers_data).split(',')]
-                                    # Check if any employer matches a client wanted company
-                                    for emp in employers:
-                                        for wanted in client_wanted_companies:
-                                            if not wanted:
-                                                continue
-                                            if emp == wanted or wanted in emp or emp in wanted:
-                                                return True
+                                        employers = [e.strip() for e in str(employers_data).split(',')]
+                                    # Match ANY past employer via central matcher.
+                                    return any(
+                                        _company_matches_filter_list(emp, client_wanted_companies)
+                                        for emp in employers
+                                        if emp
+                                    )
                                 return False
                             df['_client_wanted'] = df.apply(has_client_wanted_company, axis=1)
                             client_wanted_matches = df[df['_client_wanted']].index.tolist()

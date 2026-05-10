@@ -10264,6 +10264,14 @@ with tab_database:
                             "If that's not what you expected, try removing one column filter "
                             "(e.g. *Current Company* or *Current Title*) to see broader matches."
                         )
+                    elif _final_count == 0 and not _ft_active and has_column_filters:
+                        # Column-filter-only search collapsed to 0 after client-side
+                        # filtering — surface the server-side phase so the user knows
+                        # which filter to relax first.
+                        st.caption(
+                            "Server-side filters returned 0 matches. Try relaxing one "
+                            "filter (e.g. broaden Current Company or Current Title)."
+                        )
                     elif _final_count == 0 and (_ft_active or has_column_filters):
                         st.caption(
                             "Tip: 0 results often means the DB doesn't have profiles enriched "
@@ -10362,6 +10370,28 @@ with tab_database:
                             # Show success message after rerun
                             if st.session_state.pop('db_send_success', None):
                                 st.success(f"Loaded {st.session_state.get('enriched_df', pd.DataFrame()).shape[0]} profiles. Go to **Filter+** tab to continue.")
+                elif search_executed:
+                    # Search ran but returned zero rows before any client-side
+                    # filtering. Tell the user explicitly and point at the most
+                    # likely cause so they can relax the right filter.
+                    _ft_active = bool(ft and ft.strip())
+                    st.info("Found **0** profiles")
+                    if _ft_active:
+                        st.caption(
+                            "Full-text search returned 0 matches. Try a broader query "
+                            "(fewer terms, OR instead of AND), or remove the full-text "
+                            "search and rely on column filters."
+                        )
+                    elif has_column_filters:
+                        st.caption(
+                            "Server-side filters returned 0 matches. Try relaxing one "
+                            "filter (e.g. broaden Current Company or Current Title)."
+                        )
+                    else:
+                        st.caption(
+                            "No profiles in the database yet. Enrich some profiles first "
+                            "via the Enrich tab."
+                        )
                 else:
                     st.info("No profiles in database yet")
 

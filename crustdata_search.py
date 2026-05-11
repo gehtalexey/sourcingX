@@ -175,6 +175,53 @@ def _parse_keyword_boolean(expr: str) -> List[List[str]]:
     return [[expr.strip()]]
 
 
+# Compound role names that LinkedIn users spell three different ways. Each
+# tuple lists the variant SOURCINGX should match against — they're substring
+# matched on current_employers.title, so we OR them together when any one of
+# them appears in the user input. Why this matters: typing "fullstack
+# developer" alone returns 16k matches in Crustdata, but combined with a
+# tight company filter it returns ~0 because almost nobody at Wiz / Monday /
+# Forter spells the title "Fullstack" as one word — they spell it
+# "Full Stack" or "Full-Stack". Auto-expansion fixes the AND combo without
+# making the user enter every spelling by hand.
+_TITLE_VARIANT_GROUPS: tuple = (
+    ('fullstack', 'full stack', 'full-stack'),
+    ('frontend', 'front end', 'front-end'),
+    ('backend', 'back end', 'back-end'),
+    ('devops', 'dev ops', 'dev-ops'),
+)
+
+
+def _expand_title_variants(value: str) -> list:
+    """Expand a title fragment into all spelling variants that should match.
+
+    Case-insensitive: substitutes by case-folded match, but preserves the
+    rest of the user's input verbatim. Always returns the original value
+    first, then any additional variants.
+
+    Examples:
+        "fullstack developer"  -> ["fullstack developer", "full stack developer", "full-stack developer"]
+        "Senior Front-End Dev" -> ["Senior Front-End Dev", "Senior frontend Dev", "Senior front end Dev"]
+        "team lead"            -> ["team lead"]  (no variant group hit)
+    """
+    if not value:
+        return [value]
+    out = [value]
+    folded = value.casefold()
+    for group in _TITLE_VARIANT_GROUPS:
+        hit = next((v for v in group if v in folded), None)
+        if not hit:
+            continue
+        idx = folded.find(hit)
+        prefix = value[:idx]
+        suffix = value[idx + len(hit):]
+        for variant in group:
+            if variant == hit:
+                continue
+            out.append(f"{prefix}{variant}{suffix}")
+    return out
+
+
 def build_filters(
     title: str = None,
     company: str = None,
@@ -232,8 +279,19 @@ def build_filters(
 
     # Title filter (substring match on current job title)
     # Supports comma-separated values for OR logic
+    # Auto-expands common spelling variants so "fullstack developer" also
+    # matches "Full Stack Developer" / "Full-Stack Developer" (and vice versa).
     if title and title.strip():
         title_values = [t.strip() for t in title.split(",") if t.strip()]
+        expanded = []
+        seen = set()
+        for t in title_values:
+            for variant in _expand_title_variants(t):
+                key = variant.casefold()
+                if key not in seen:
+                    seen.add(key)
+                    expanded.append(variant)
+        title_values = expanded
         if len(title_values) == 1:
             # Single title - simple condition
             conditions.append({

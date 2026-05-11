@@ -50,4 +50,5 @@ jobs:
             test_company_filter_matching.py \
             test_hard_constraints_prompt.py \
             test_tenure_constraint_override.py \
-            test_pick_current_employer.py
+            test_pick_current_employer.py \
+            test_crustdata_title_variants.py

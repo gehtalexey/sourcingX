@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 import anthropic
 
+from normalizers import pick_current_employer
+
 
 class RequirementType(Enum):
     SKILL_FRONTEND = "skill_frontend"
@@ -316,12 +318,12 @@ def check_leadership_years(profile: Dict, requirement: Requirement) -> CheckResu
 
 def check_company_type(profile: Dict, requirement: Requirement, is_reject: bool = False, client=None) -> CheckResult:
     """Check if current company is appropriate using AI."""
-    current_employers = profile.get("current_employers", [])
-    if not current_employers:
+    emp = pick_current_employer(profile.get("current_employers"))
+    if not emp:
         return CheckResult(requirement=requirement, passed=not is_reject, reason="No current employer info", evidence=[])
 
-    company = current_employers[0].get("employer_name", "")
-    description = current_employers[0].get("employer_linkedin_description") or ""
+    company = emp.get("employer_name", "")
+    description = emp.get("employer_linkedin_description") or ""
 
     if not client:
         # Fallback to keyword check
@@ -390,11 +392,11 @@ Return JSON: {{"passed": true/false, "reason": "brief explanation"}}"""
 
 def check_title_reject(profile: Dict, requirement: Requirement, client=None) -> CheckResult:
     """Check if current title indicates wrong specialization using AI."""
-    current_employers = profile.get("current_employers", [])
-    if not current_employers:
+    emp = pick_current_employer(profile.get("current_employers"))
+    if not emp:
         return CheckResult(requirement=requirement, passed=True, reason="No current title info", evidence=[])
 
-    title = current_employers[0].get("employee_title") or ""
+    title = emp.get("employee_title") or ""
 
     if not client:
         # Fallback to simple check

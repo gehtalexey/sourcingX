@@ -47,4 +47,5 @@ jobs:
             test_mocking_services.py \
             test_screening_parameterized.py \
             test_profiles_status_dropped.py \
-            test_company_filter_matching.py
+            test_company_filter_matching.py \
+            test_pick_current_employer.py

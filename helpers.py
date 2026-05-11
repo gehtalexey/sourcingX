@@ -5,6 +5,8 @@ This is the ONE place where Crustdata field names are mapped to display fields.
 If Crustdata changes their API, update only this file.
 """
 
+from normalizers import pick_current_employer
+
 
 def extract_display_fields(raw_data: dict) -> dict:
     """Extract display fields from Crustdata raw response.
@@ -17,9 +19,8 @@ def extract_display_fields(raw_data: dict) -> dict:
     """
     cd = raw_data or {}
 
-    # Current employer (first in list)
-    current_employers = cd.get('current_employers') or []
-    emp = current_employers[0] if current_employers else {}
+    # Current employer — most recent when multiple are present
+    emp = pick_current_employer(cd.get('current_employers')) or {}
 
     # Name
     name = cd.get('name', '')

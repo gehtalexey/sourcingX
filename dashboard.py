@@ -45,6 +45,7 @@ from normalizers import (
     profiles_to_display_df,
     parse_duration,
     clean_dict,
+    pick_current_employer,
 )
 from helpers import format_past_positions, format_education
 from company_matching import (
@@ -4932,14 +4933,13 @@ with tab_search:
             # Build dataframe for display
             display_data = []
             for i, profile in enumerate(results):
-                # Extract current employer info
+                # Extract current employer info — most recent when multiple
                 current_company = ""
                 current_title = ""
                 seniority = ""
                 company_size = ""
-                current_employers = profile.get("current_employers", [])
-                if current_employers and len(current_employers) > 0:
-                    emp = current_employers[0]
+                emp = pick_current_employer(profile.get("current_employers"))
+                if emp:
                     current_company = emp.get("employer_name") or emp.get("name", "")
                     current_title = emp.get("employee_title") or emp.get("title", "")
                     seniority = emp.get("seniority_level", "")
@@ -10577,14 +10577,12 @@ with tab_database:
                                     if not name:
                                         name = f"{cd.get('first_name', '')} {cd.get('last_name', '')}".strip()
 
-                                    # Extract title/company
+                                    # Extract title/company — most recent current employer
                                     current_title, current_company = None, None
-                                    current_employers = cd.get('current_employers') or []
-                                    if current_employers and isinstance(current_employers, list) and current_employers[0]:
-                                        emp = current_employers[0]
-                                        if isinstance(emp, dict):
-                                            current_title = emp.get('employee_title') or emp.get('title')
-                                            current_company = emp.get('employer_name') or emp.get('company_name')
+                                    emp = pick_current_employer(cd.get('current_employers'))
+                                    if emp:
+                                        current_title = emp.get('employee_title') or emp.get('title')
+                                        current_company = emp.get('employer_name') or emp.get('company_name')
 
                                     if not current_title or not current_company:
                                         headline = cd.get('headline', '')

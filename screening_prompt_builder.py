@@ -9,6 +9,8 @@ This module assembles them into a user prompt for the generic system prompt.
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 
+from normalizers import pick_current_employer
+
 
 # ============================================================================
 # GENERIC SYSTEM PROMPT - Teaches AI HOW to evaluate
@@ -278,10 +280,9 @@ def format_profile_for_prompt(profile: Dict) -> str:
     if skills:
         lines.append(f"Skills: {', '.join(skills[:20])}")
 
-    # Current role
-    current_employers = profile.get("current_employers", [])
-    if current_employers:
-        curr = current_employers[0]
+    # Current role — most recent when multiple current employers
+    curr = pick_current_employer(profile.get("current_employers"))
+    if curr:
         title = curr.get("employee_title", "N/A")
         company = curr.get("employer_name", "N/A")
         description = curr.get("employer_linkedin_description", "")

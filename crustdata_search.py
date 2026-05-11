@@ -42,7 +42,7 @@ from error_handling import (
     ServiceUnavailableError,
     classify_http_error,
 )
-from normalizers import normalize_linkedin_url, clean_value, is_nan_or_none
+from normalizers import normalize_linkedin_url, clean_value, is_nan_or_none, pick_current_employer
 
 
 # =============================================================================
@@ -766,15 +766,17 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
     if not full_name and (first_name or last_name):
         full_name = f"{first_name} {last_name}".strip()
 
-    # Current employer info
+    # Current employer info — pick the most recent when multiple are present
     current_company = ''
     current_title = ''
-    current_employers = profile.get('current_employers', [])
-    if current_employers and isinstance(current_employers, list) and len(current_employers) > 0:
-        emp = current_employers[0]
-        if isinstance(emp, dict):
-            current_company = emp.get('employer_name') or emp.get('name') or ''
-            current_title = emp.get('employee_title') or emp.get('title') or ''
+    seniority = ''
+    company_size = ''
+    emp = pick_current_employer(profile.get('current_employers'))
+    if emp:
+        current_company = emp.get('employer_name') or emp.get('name') or ''
+        current_title = emp.get('employee_title') or emp.get('title') or ''
+        seniority = emp.get('seniority_level') or emp.get('seniority') or ''
+        company_size = emp.get('company_headcount_range') or emp.get('headcount') or ''
 
     # Fallback to top-level fields
     if not current_title:
@@ -795,20 +797,6 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
     years_exp = profile.get('years_of_experience_raw')
     if years_exp is None:
         years_exp = profile.get('years_of_experience')
-
-    # Extract seniority from current employer
-    seniority = ''
-    if current_employers and isinstance(current_employers, list) and len(current_employers) > 0:
-        emp = current_employers[0]
-        if isinstance(emp, dict):
-            seniority = emp.get('seniority_level') or emp.get('seniority') or ''
-
-    # Extract company size from current employer
-    company_size = ''
-    if current_employers and isinstance(current_employers, list) and len(current_employers) > 0:
-        emp = current_employers[0]
-        if isinstance(emp, dict):
-            company_size = emp.get('company_headcount_range') or emp.get('headcount') or ''
 
     return {
         # Core identifiers (snake_case to match pipeline)

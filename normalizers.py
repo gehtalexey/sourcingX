@@ -353,6 +353,31 @@ def parse_full_name(full_name: str) -> tuple[Optional[str], Optional[str]]:
     return first_name, last_name
 
 
+def pick_current_employer(current_employers: Any) -> Optional[dict]:
+    """
+    Pick the most recent entry from a current_employers array.
+
+    Crustdata can return multiple entries in current_employers when a person
+    has parallel/active roles (advisor + full-time job, two current jobs after
+    a switch, IDF reserve + civilian role). The list is not guaranteed to be
+    ordered by recency, so taking [0] blindly can silently surface the WRONG
+    current employer — e.g. a reserve unit instead of the actual current job.
+
+    Sorts by start_date descending and returns the most recent. Entries with
+    missing or invalid start_date sort last (treated as oldest).
+
+    Returns None when the input is not a list, is empty, or contains no dicts.
+    """
+    if not isinstance(current_employers, list):
+        return None
+    valid = [e for e in current_employers if isinstance(e, dict)]
+    if not valid:
+        return None
+    if len(valid) == 1:
+        return valid[0]
+    return sorted(valid, key=lambda e: str(e.get('start_date') or ''), reverse=True)[0]
+
+
 # ============================================================================
 # PHANTOMBUSTER NORMALIZATION
 # ============================================================================
@@ -463,12 +488,10 @@ def normalize_crustdata_profile(raw: dict, original_url: str = None) -> Optional
     current_title = None
     current_company = None
 
-    current_employers = raw.get('current_employers', [])
-    if current_employers and isinstance(current_employers, list) and len(current_employers) > 0:
-        emp = current_employers[0]
-        if isinstance(emp, dict):
-            current_title = emp.get('employee_title') or emp.get('title')
-            current_company = emp.get('employer_name') or emp.get('company_name')
+    emp = pick_current_employer(raw.get('current_employers'))
+    if emp:
+        current_title = emp.get('employee_title') or emp.get('title')
+        current_company = emp.get('employer_name') or emp.get('company_name')
 
     # Fallback to top-level fields
     if not current_title:

@@ -5893,17 +5893,23 @@ with tab_filter:
         st.markdown("**Your Filter Sheet:**")
         st.caption(f"Share your sheet with: `linkedin-enricher@linkedin-enricher-485616.iam.gserviceaccount.com`")
         user_sheet_url = st.text_input(
-            "Google Sheet URL (paste your own, or leave empty for default)",
+            "Google Sheet URL (required — paste your sheet)",
             value=st.session_state.get('user_sheet_url', ''),
             placeholder="https://docs.google.com/spreadsheets/d/...",
             key="user_sheet_input"
         )
 
-        # Save to session state and set default tab names
+        # Save to session state and set default tab names.
+        # No fallback to a baked-in default sheet: if the user hasn't pasted a
+        # URL, clear it so render_filter_sheet_status shows the "paste a URL"
+        # hint and downstream filters skip cleanly. Multi-user setups must not
+        # share a single default sheet from config.json / secrets.toml.
         if user_sheet_url:
             st.session_state['user_sheet_url'] = user_sheet_url
             filter_sheets['url'] = user_sheet_url
-            # Set default tab names if not already configured
+            # Set default tab names if not already configured. These are tab
+            # names within the user's own spreadsheet, not URLs, so the
+            # defaults are safe to keep.
             if not filter_sheets.get('past_candidates'):
                 filter_sheets['past_candidates'] = 'Past Candidates'
             if not filter_sheets.get('blacklist'):
@@ -5918,6 +5924,9 @@ with tab_filter:
                 filter_sheets['universities'] = 'Universities'
             if not filter_sheets.get('client_wanted_companies'):
                 filter_sheets['client_wanted_companies'] = 'Client specific wanted companies'
+        else:
+            # User left the input empty — treat the sheet as not connected.
+            filter_sheets['url'] = ''
 
         sheet_connected = render_filter_sheet_status(filter_sheets, gspread_client)
         has_sheets = sheet_connected
@@ -7636,12 +7645,15 @@ with tab_filter2:
         st.markdown("**Your Filter Sheet:**")
         st.caption(f"Share your sheet with: `linkedin-enricher@linkedin-enricher-485616.iam.gserviceaccount.com`")
         user_sheet_url = st.text_input(
-            "Google Sheet URL for filtering",
+            "Google Sheet URL (required — paste your sheet)",
             value=st.session_state.get('user_sheet_url', ''),
             placeholder="https://docs.google.com/spreadsheets/d/...",
             key="filter2_sheet_input"
         )
 
+        # No fallback to a baked-in default sheet: see the Filter tab above for
+        # the rationale. Tab-name defaults below stay because those are sheet
+        # tabs inside the user's own spreadsheet, not URLs.
         if user_sheet_url:
             st.session_state['user_sheet_url'] = user_sheet_url
             filter_sheets['url'] = user_sheet_url
@@ -7658,6 +7670,9 @@ with tab_filter2:
                 filter_sheets['target_companies'] = 'Target Companies'
             if 'client_wanted_companies' not in filter_sheets:
                 filter_sheets['client_wanted_companies'] = 'Client specific wanted companies'
+        else:
+            # User left the input empty — treat the sheet as not connected.
+            filter_sheets['url'] = ''
 
         has_sheets = render_filter_sheet_status(filter_sheets, gspread_client)
 

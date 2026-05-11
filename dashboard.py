@@ -47,6 +47,11 @@ from normalizers import (
     clean_dict,
 )
 from helpers import format_past_positions, format_education
+from company_matching import (
+    normalize_company_name as _normalize_company_name,
+    company_matches_filter_list as _company_matches_filter_list,
+)
+
 
 # Email generator module
 try:
@@ -2725,6 +2730,65 @@ def get_gspread_client():
     return gspread.authorize(creds)
 
 
+_GSPREAD_SERVICE_ACCOUNT = "linkedin-enricher@linkedin-enricher-485616.iam.gserviceaccount.com"
+
+
+def render_filter_sheet_status(filter_sheets: dict, gspread_client) -> bool:
+    """Render a visible Google Sheets connection status badge in the current tab.
+
+    Returns True iff the sheet is actually reachable (the helper has successfully
+    opened it via gspread). Used by both the Filter and Filter+ tabs so the
+    user can always tell whether their sheet-based filters will run.
+
+    States:
+      - No URL configured        → st.info  ("paste a URL")
+      - URL but no gspread client → st.error ("credentials missing/invalid")
+      - URL + client but open fails → st.error (actual exception class + msg)
+      - All good                  → st.success ("Filter sheet connected: <name>")
+    """
+    url = filter_sheets.get('url') if filter_sheets else None
+    if not url:
+        st.info(
+            "No filter sheet URL configured — paste a Google Sheets URL above "
+            "to enable sheet-based filters (blacklist, not-relevant, target companies, etc.)."
+        )
+        return False
+    if gspread_client is None:
+        st.error(
+            "**Couldn't connect — Google credentials missing or invalid.** "
+            "Sheet-based filters (blacklist, not-relevant, target companies, etc.) "
+            "will be skipped. Check `config.json`'s `google_credentials_file` setting, "
+            "or set `google_credentials` in your Streamlit secrets."
+        )
+        return False
+
+    # Try to open the sheet (cached in session_state to avoid repeated API calls
+    # within one Streamlit run). Store both the OK title and any error reason so
+    # repeated renders don't retry on every interaction.
+    cache_key = f"sheet_status::{url}"
+    if cache_key not in st.session_state:
+        try:
+            title = gspread_client.open_by_url(url).title
+            st.session_state[cache_key] = ('ok', title)
+        except Exception as e:
+            st.session_state[cache_key] = ('error', f"{type(e).__name__}: {e}")
+
+    status, payload = st.session_state[cache_key]
+    if status == 'ok':
+        st.success(f"Filter sheet connected: **{payload}**")
+        return True
+
+    st.error(
+        f"**Couldn't open the filter sheet.** {payload}\n\n"
+        "Common causes:\n"
+        f"- The sheet isn't shared with the service account `{_GSPREAD_SERVICE_ACCOUNT}`.\n"
+        "- The URL doesn't point at a Google Sheet (it should look like "
+        "`https://docs.google.com/spreadsheets/d/…`).\n"
+        "- The sheet was deleted or moved."
+    )
+    return False
+
+
 @st.cache_data(ttl=600, max_entries=10, show_spinner="Loading sheet...")
 def load_sheet_as_df(sheet_url: str, worksheet_name: str = None) -> pd.DataFrame:
     """Load a Google Sheet as a pandas DataFrame.
@@ -3129,38 +3193,9 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
 
     df = df.copy()  # Avoid SettingWithCopyWarning
 
-    # Helper functions
-    def normalize_company(name):
-        """Normalize company name for comparison."""
-        if pd.isna(name) or not str(name).strip():
-            return ''
-        # Lowercase and strip
-        name = str(name).lower().strip()
-        # Remove common suffixes
-        for suffix in [' ltd', ' inc', ' corp', ' llc', ' limited', ' israel', ' il', ' technologies', ' tech', ' software', ' solutions', ' group']:
-            if name.endswith(suffix):
-                name = name[:-len(suffix)].strip()
-        return name
-
-    def matches_list(company, company_list):
-        """Check if company matches any in the list - uses normalized exact match."""
-        if pd.isna(company) or not str(company).strip():
-            return False
-        company_norm = normalize_company(company)
-        if not company_norm:
-            return False
-        for c in company_list:
-            c_norm = normalize_company(c)
-            if not c_norm:
-                continue
-            # Exact match after normalization
-            if company_norm == c_norm:
-                return True
-            # One contains the other fully (for cases like "Bank Leumi" vs "Bank Leumi Le-Israel")
-            if len(c_norm) >= 4 and len(company_norm) >= 4:
-                if company_norm.startswith(c_norm) or c_norm.startswith(company_norm):
-                    return True
-        return False
+    # Filter helpers — module-level versions are used so they can be unit-tested
+    # and so the same matching rules apply across every filter callsite.
+    matches_list = _company_matches_filter_list
 
     def matches_list_in_text(text, company_list):
         """Check if any company from list appears in text - uses word boundary matching."""
@@ -3168,10 +3203,9 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
             return False
         text_lower = str(text).lower()
         for c in company_list:
-            c_norm = normalize_company(c)
+            c_norm = _normalize_company_name(c)
             if not c_norm or len(c_norm) < 3:
                 continue
-            # Use word boundary pattern for longer names
             pattern = r'\b' + re.escape(c_norm) + r'\b'
             if re.search(pattern, text_lower):
                 return True
@@ -5885,41 +5919,25 @@ with tab_filter:
             if not filter_sheets.get('client_wanted_companies'):
                 filter_sheets['client_wanted_companies'] = 'Client specific wanted companies'
 
-        has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
+        sheet_connected = render_filter_sheet_status(filter_sheets, gspread_client)
+        has_sheets = sheet_connected
 
-        if filter_sheets.get('url') and gspread_client is None:
-            st.error("Google credentials not configured. Cannot connect to Google Sheets.")
-
-        if has_sheets:
-            # Show sheet name (cached to avoid repeated API calls)
-            cache_key = f"sheet_title_{filter_sheets.get('url', '')}"
-            if cache_key not in st.session_state:
+        # Detailed verification — only useful when the sheet is reachable.
+        if sheet_connected and st.button("Verify Sheet Connection", key="verify_sheet"):
+            with st.spinner("Checking sheet access..."):
                 try:
-                    st.session_state[cache_key] = gspread_client.open_by_url(filter_sheets['url']).title
-                except Exception:
-                    st.session_state[cache_key] = None
-            sheet_name = st.session_state.get(cache_key)
-            if sheet_name:
-                st.success(f"Filter sheet configured: **{sheet_name}**")
-            else:
-                st.success("Filter sheet configured")
-
-            # Validate sheet connection
-            if st.button("Verify Sheet Connection", key="verify_sheet"):
-                with st.spinner("Checking sheet access..."):
-                    try:
-                        spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
-                        tabs = [ws.title for ws in spreadsheet.worksheets()]
-                        st.success(f"Connected to **{spreadsheet.title}**! Found {len(tabs)} tabs")
-                        expected_tabs = ['Past Candidates', 'Blacklist', 'NotRelevant Companies', 'Target Companies', 'Universities', 'Tech Alerts']
-                        missing = [t for t in expected_tabs if t not in tabs]
-                        if missing:
-                            st.warning(f"Missing expected tabs: {', '.join(missing)}")
-                        else:
-                            st.info(f"All expected tabs found")
-                    except Exception as e:
-                        st.error(f"Cannot access sheet: {e}")
-                        st.info("Make sure you shared the sheet with the service account email above")
+                    spreadsheet = gspread_client.open_by_url(filter_sheets['url'])
+                    tabs = [ws.title for ws in spreadsheet.worksheets()]
+                    st.success(f"Connected to **{spreadsheet.title}**! Found {len(tabs)} tabs")
+                    expected_tabs = ['Past Candidates', 'Blacklist', 'NotRelevant Companies', 'Target Companies', 'Universities', 'Tech Alerts']
+                    missing = [t for t in expected_tabs if t not in tabs]
+                    if missing:
+                        st.warning(f"Missing expected tabs: {', '.join(missing)}")
+                    else:
+                        st.info("All expected tabs found")
+                except Exception as e:
+                    st.error(f"Cannot access sheet: {e}")
+                    st.info("Make sure you shared the sheet with the service account email above")
 
         st.divider()
         col1, col2 = st.columns(2)
@@ -5980,27 +5998,65 @@ with tab_filter:
             # Quick select buttons - organized in rows
             st.caption("Quick select (click to toggle):")
 
-            # Row 1: All + first 5 categories
-            row1_cols = st.columns(6)
-            with row1_cols[0]:
-                st.button("All", key="exc_all", width="stretch",
-                          on_click=_cb_set_value, args=('exclude_title_presets', ALL_EXCLUDE_TITLES))
+            # Scoped CSS: keep button labels on one line within a word and let
+            # multi-word labels wrap at spaces rather than character-by-character.
+            # Without this, Streamlit buttons inside a narrow nested column
+            # collapse min-width and break every character onto its own line
+            # (e.g. "C-Level/Founders" -> "C-/Lev/el/F/oun/der/s").
+            #
+            # Selectors are scoped to `.exclude-quick-select` so the styles only
+            # apply to the exclude quick-select buttons (wrapped below) and do
+            # NOT affect any other Streamlit buttons rendered on the page.
+            st.markdown(
+                """
+                <style>
+                .exclude-quick-select div[data-testid="stButton"] > button {
+                    white-space: normal;
+                    word-break: keep-all;
+                    overflow-wrap: normal;
+                    min-width: 0;
+                    padding-left: 0.25rem;
+                    padding-right: 0.25rem;
+                }
+                .exclude-quick-select div[data-testid="stButton"] > button > div,
+                .exclude-quick-select div[data-testid="stButton"] > button p {
+                    white-space: normal;
+                    word-break: keep-all;
+                    overflow-wrap: normal;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # Open a scoping wrapper so the CSS above only targets buttons
+            # rendered inside this block.
+            st.markdown('<div class="exclude-quick-select">', unsafe_allow_html=True)
 
             category_items = list(EXCLUDE_CATEGORIES.items())
-            for i, (cat_name, cat_keywords) in enumerate(category_items[:5]):
-                with row1_cols[i + 1]:
-                    st.button(cat_name, key=f"exc_{cat_name}", width="stretch",
-                              on_click=_cb_toggle_exclude_preset, args=(cat_keywords,))
+            # Lay out as rows of 3 so each button has enough horizontal room
+            # for its label (longest is "C-Level/Founders"). Buttons wrap to a
+            # new row naturally as we re-enter the loop.
+            buttons_per_row = 3
+            quick_buttons = (
+                [("All", ALL_EXCLUDE_TITLES, "exc_all", _cb_set_value,
+                  ('exclude_title_presets', ALL_EXCLUDE_TITLES))]
+                + [(name, kws, f"exc_{name}", _cb_toggle_exclude_preset, (kws,))
+                   for name, kws in category_items]
+                + [("Clear", [], "exc_clear", _cb_set_value,
+                    ('exclude_title_presets', []))]
+            )
 
-            # Row 2: Remaining categories + Clear button
-            row2_cols = st.columns(len(category_items) - 5 + 1)
-            for i, (cat_name, cat_keywords) in enumerate(category_items[5:]):
-                with row2_cols[i]:
-                    st.button(cat_name, key=f"exc_{cat_name}", width="stretch",
-                              on_click=_cb_toggle_exclude_preset, args=(cat_keywords,))
-            with row2_cols[-1]:
-                st.button("Clear", key="exc_clear", width="stretch",
-                          on_click=_cb_set_value, args=('exclude_title_presets', []))
+            for row_start in range(0, len(quick_buttons), buttons_per_row):
+                row = quick_buttons[row_start:row_start + buttons_per_row]
+                row_cols = st.columns(buttons_per_row)
+                for col_idx, (label, _kws, key, cb, cb_args) in enumerate(row):
+                    with row_cols[col_idx]:
+                        st.button(label, key=key, width="stretch",
+                                  on_click=cb, args=cb_args)
+
+            # Close the scoping wrapper.
+            st.markdown('</div>', unsafe_allow_html=True)
 
             selected_exclude = st.multiselect(
                 "Selected exclusions",
@@ -6361,32 +6417,9 @@ with tab_filter:
                 sheet_url = filter_sheets.get('url', '')
                 priority_loaded = []
 
-                # Helper function for matching
-                def normalize_company(name):
-                    if pd.isna(name) or not str(name).strip():
-                        return ''
-                    name = str(name).lower().strip()
-                    for suffix in [' ltd', ' inc', ' corp', ' llc', ' limited', ' israel', ' il', ' technologies', ' tech', ' software', ' solutions', ' group']:
-                        if name.endswith(suffix):
-                            name = name[:-len(suffix)].strip()
-                    return name
-
-                def matches_list(company, company_list):
-                    if pd.isna(company) or not str(company).strip():
-                        return False
-                    company_norm = normalize_company(company)
-                    if not company_norm:
-                        return False
-                    for c in company_list:
-                        c_norm = normalize_company(c)
-                        if not c_norm:
-                            continue
-                        if company_norm == c_norm:
-                            return True
-                        if len(c_norm) >= 4 and len(company_norm) >= 4:
-                            if company_norm.startswith(c_norm) or c_norm.startswith(company_norm):
-                                return True
-                    return False
+                # Use the module-level company-filter helper so all callsites
+                # share the same matching rules (incl. token-subset).
+                matches_list = _company_matches_filter_list
 
                 # Target companies
                 if load_target_companies and filter_sheets.get('target_companies'):
@@ -7626,20 +7659,7 @@ with tab_filter2:
             if 'client_wanted_companies' not in filter_sheets:
                 filter_sheets['client_wanted_companies'] = 'Client specific wanted companies'
 
-        has_sheets = bool(filter_sheets.get('url')) and gspread_client is not None
-
-        if has_sheets:
-            cache_key = f"sheet_title_{filter_sheets.get('url', '')}"
-            if cache_key not in st.session_state:
-                try:
-                    st.session_state[cache_key] = gspread_client.open_by_url(filter_sheets['url']).title
-                except Exception:
-                    st.session_state[cache_key] = None
-            sheet_name = st.session_state.get(cache_key)
-            if sheet_name:
-                st.success(f"Filter sheet configured: **{sheet_name}**")
-            else:
-                st.success("Filter sheet configured")
+        has_sheets = render_filter_sheet_status(filter_sheets, gspread_client)
 
         st.divider()
         st.markdown("**Filter Options:**")
@@ -7751,16 +7771,16 @@ with tab_filter2:
                 if use_blacklist and has_sheets and filter_sheets.get('blacklist'):
                     bl_df = load_sheet_as_df(sheet_url, filter_sheets['blacklist'])
                     if bl_df is not None and not bl_df.empty:
-                        blacklist_items = set()
+                        blacklist_items = []
                         for c in bl_df.columns:
-                            blacklist_items.update(bl_df[c].dropna().str.lower().str.strip().tolist())
+                            blacklist_items.extend(bl_df[c].dropna().tolist())
+                        blacklist_items = [str(b).strip() for b in blacklist_items if str(b).strip()]
                         if blacklist_items and 'current_company' in df.columns:
-                            def _matches_blacklist(company):
-                                if pd.isna(company) or not company:
-                                    return False
-                                comp = str(company).lower().strip()
-                                return any(bl in comp or comp in bl for bl in blacklist_items if bl)
-                            mask = df['current_company'].apply(_matches_blacklist)
+                            # Use the central matcher so variants like
+                            # "Elad Systems" vs "Elad Software Systems" match.
+                            mask = df['current_company'].apply(
+                                lambda x: _company_matches_filter_list(x, blacklist_items)
+                            )
                             removed['Blacklist Companies'] = mask.sum()
                             df = df[~mask]
 
@@ -7768,10 +7788,11 @@ with tab_filter2:
                 if use_not_relevant and has_sheets and filter_sheets.get('not_relevant'):
                     nr_df = load_sheet_as_df(sheet_url, filter_sheets['not_relevant'])
                     if nr_df is not None and not nr_df.empty:
-                        not_relevant_companies = set()
+                        not_relevant_list = []
                         for col in nr_df.columns:
-                            not_relevant_companies.update(nr_df[col].dropna().str.lower().str.strip().tolist())
-                        if 'all_employers' in df.columns:
+                            not_relevant_list.extend(nr_df[col].dropna().tolist())
+                        not_relevant_list = [str(n).strip() for n in not_relevant_list if str(n).strip()]
+                        if not_relevant_list and 'all_employers' in df.columns:
                             def has_not_relevant_employer(employers_data):
                                 # Handle None, NaN, empty
                                 if employers_data is None:
@@ -7785,10 +7806,16 @@ with tab_filter2:
                                     return False
                                 # Handle list/array or comma-separated string
                                 if isinstance(employers_data, (list, tuple)):
-                                    employers = [str(e).strip().lower() for e in employers_data if e]
+                                    employers = [str(e).strip() for e in employers_data if e]
                                 else:
-                                    employers = [e.strip().lower() for e in str(employers_data).split(',')]
-                                return any(emp in not_relevant_companies for emp in employers)
+                                    employers = [e.strip() for e in str(employers_data).split(',')]
+                                # Match ANY past employer via central matcher so
+                                # "Elad Systems" hits "Elad Software Systems".
+                                return any(
+                                    _company_matches_filter_list(emp, not_relevant_list)
+                                    for emp in employers
+                                    if emp
+                                )
                             mask = df['all_employers'].apply(has_not_relevant_employer)
                             # MEMORY FIX: Store only count, not full records (saves 10-50MB)
                             removed['Not Relevant Companies'] = mask.sum()
@@ -7798,39 +7825,22 @@ with tab_filter2:
                 if target_company_mode != "Off" and has_sheets and filter_sheets.get('target_companies'):
                     tc_df = load_sheet_as_df(sheet_url, filter_sheets['target_companies'])
                     if tc_df is not None and not tc_df.empty:
-                        target_companies = set()
+                        target_companies = []
                         for col in tc_df.columns:
                             if 'company' in col.lower() or 'name' in col.lower():
-                                target_companies.update(tc_df[col].dropna().str.lower().str.strip().tolist())
+                                target_companies.extend(tc_df[col].dropna().tolist())
                         # If no matching columns, use all columns
                         if not target_companies:
                             for col in tc_df.columns:
-                                target_companies.update(tc_df[col].dropna().str.lower().str.strip().tolist())
+                                target_companies.extend(tc_df[col].dropna().tolist())
+                        target_companies = [str(t).strip() for t in target_companies if str(t).strip()]
                         if target_companies:
-                            def matches_target_company(value):
-                                """Check if a single company value matches any target company."""
-                                if value is None:
-                                    return False
-                                try:
-                                    if pd.isna(value):
-                                        return False
-                                except (ValueError, TypeError):
-                                    pass
-                                if not value:
-                                    return False
-                                val_lower = str(value).strip().lower()
-                                for target in target_companies:
-                                    if not target:
-                                        continue
-                                    if val_lower == target or target in val_lower or val_lower in target:
-                                        return True
-                                return False
-
                             def has_target_company(row):
                                 """Check if profile worked at a target company (current or past)."""
-                                # Check current company
-                                if 'current_company' in row.index and matches_target_company(row.get('current_company')):
-                                    return True
+                                # Check current company via central matcher.
+                                if 'current_company' in row.index:
+                                    if _company_matches_filter_list(row.get('current_company'), target_companies):
+                                        return True
                                 # Check all employers (past + current)
                                 employers_data = row.get('all_employers') if 'all_employers' in row.index else None
                                 if employers_data is None:
@@ -7844,17 +7854,15 @@ with tab_filter2:
                                     return False
                                 # Handle list/array or comma-separated string
                                 if isinstance(employers_data, (list, tuple)):
-                                    employers = [str(e).strip().lower() for e in employers_data if e]
+                                    employers = [str(e).strip() for e in employers_data if e]
                                 else:
-                                    employers = [e.strip().lower() for e in str(employers_data).split(',')]
-                                # Check if any employer matches a target company
-                                for emp in employers:
-                                    for target in target_companies:
-                                        if not target:
-                                            continue
-                                        if emp == target or target in emp or emp in target:
-                                            return True
-                                return False
+                                    employers = [e.strip() for e in str(employers_data).split(',')]
+                                # Match ANY past employer via central matcher.
+                                return any(
+                                    _company_matches_filter_list(emp, target_companies)
+                                    for emp in employers
+                                    if emp
+                                )
                             df['_target_company'] = df.apply(has_target_company, axis=1)
                             target_company_matches = df[df['_target_company']].index.tolist()
 
@@ -7939,39 +7947,24 @@ with tab_filter2:
                 if client_wanted_mode != "Off" and has_sheets and filter_sheets.get('client_wanted_companies'):
                     cw_df = load_sheet_as_df(sheet_url, filter_sheets['client_wanted_companies'])
                     if cw_df is not None and not cw_df.empty:
-                        client_wanted_companies = set()
+                        client_wanted_companies = []
                         for col in cw_df.columns:
                             if 'company' in col.lower() or 'name' in col.lower():
-                                client_wanted_companies.update(cw_df[col].dropna().str.lower().str.strip().tolist())
+                                client_wanted_companies.extend(cw_df[col].dropna().tolist())
                         # If no matching columns, use all columns
                         if not client_wanted_companies:
                             for col in cw_df.columns:
-                                client_wanted_companies.update(cw_df[col].dropna().str.lower().str.strip().tolist())
+                                client_wanted_companies.extend(cw_df[col].dropna().tolist())
+                        client_wanted_companies = [
+                            str(w).strip() for w in client_wanted_companies if str(w).strip()
+                        ]
                         if client_wanted_companies:
-                            def matches_client_wanted(value):
-                                """Check if a single company value matches any client wanted company."""
-                                if value is None:
-                                    return False
-                                try:
-                                    if pd.isna(value):
-                                        return False
-                                except (ValueError, TypeError):
-                                    pass
-                                if not value:
-                                    return False
-                                val_lower = str(value).strip().lower()
-                                for wanted in client_wanted_companies:
-                                    if not wanted:
-                                        continue
-                                    if val_lower == wanted or wanted in val_lower or val_lower in wanted:
-                                        return True
-                                return False
-
                             def has_client_wanted_company(row):
                                 """Check if profile worked at a client wanted company."""
-                                # Check current company
-                                if 'current_company' in row.index and matches_client_wanted(row.get('current_company')):
-                                    return True
+                                # Check current company via central matcher.
+                                if 'current_company' in row.index:
+                                    if _company_matches_filter_list(row.get('current_company'), client_wanted_companies):
+                                        return True
                                 # Check all employers only if scope is "All employers"
                                 if client_wanted_scope == "All employers":
                                     employers_data = row.get('all_employers') if 'all_employers' in row.index else None
@@ -7986,16 +7979,15 @@ with tab_filter2:
                                         return False
                                     # Handle list/array or comma-separated string
                                     if isinstance(employers_data, (list, tuple)):
-                                        employers = [str(e).strip().lower() for e in employers_data if e]
+                                        employers = [str(e).strip() for e in employers_data if e]
                                     else:
-                                        employers = [e.strip().lower() for e in str(employers_data).split(',')]
-                                    # Check if any employer matches a client wanted company
-                                    for emp in employers:
-                                        for wanted in client_wanted_companies:
-                                            if not wanted:
-                                                continue
-                                            if emp == wanted or wanted in emp or emp in wanted:
-                                                return True
+                                        employers = [e.strip() for e in str(employers_data).split(',')]
+                                    # Match ANY past employer via central matcher.
+                                    return any(
+                                        _company_matches_filter_list(emp, client_wanted_companies)
+                                        for emp in employers
+                                        if emp
+                                    )
                                 return False
                             df['_client_wanted'] = df.apply(has_client_wanted_company, axis=1)
                             client_wanted_matches = df[df['_client_wanted']].index.tolist()
@@ -10009,6 +10001,11 @@ with tab_database:
                 if all_profiles:
                     df = profiles_to_dataframe(all_profiles)
 
+                    # Capture pre-filter count so we can show users where the funnel
+                    # collapsed (a confused user reported "0 results" without knowing
+                    # whether the column filters or the fulltext was responsible).
+                    _pre_column_filter_count = len(df)
+
                     # Create combined name column only if name is empty
                     if 'name' not in df.columns:
                         df['name'] = ''
@@ -10253,11 +10250,41 @@ with tab_database:
                     # Display limit to prevent browser freeze
                     DISPLAY_LIMIT = 500
 
-                    # Results
-                    if len(filtered_df) > DISPLAY_LIMIT:
-                        st.info(f"Found **{len(filtered_df)}** profiles (showing first {DISPLAY_LIMIT})")
+                    # Results — show the search funnel so users can see where the
+                    # narrowing happened (e.g. "FT found 500, column filters left 0").
+                    _final_count = len(filtered_df)
+                    _ft_active = bool(ft and ft.strip())
+                    _columns_narrowed = (
+                        _ft_active and has_column_filters and _final_count < _pre_column_filter_count
+                    )
+
+                    if _final_count > DISPLAY_LIMIT:
+                        st.info(f"Found **{_final_count}** profiles (showing first {DISPLAY_LIMIT})")
                     else:
-                        st.info(f"Found **{len(filtered_df)}** profiles")
+                        st.info(f"Found **{_final_count}** profiles")
+
+                    if _columns_narrowed:
+                        _dropped = _pre_column_filter_count - _final_count
+                        st.caption(
+                            f"Full-text search matched **{_pre_column_filter_count}** profiles; "
+                            f"column filters dropped **{_dropped}**. "
+                            "If that's not what you expected, try removing one column filter "
+                            "(e.g. *Current Company* or *Current Title*) to see broader matches."
+                        )
+                    elif _final_count == 0 and not _ft_active and has_column_filters:
+                        # Column-filter-only search collapsed to 0 after client-side
+                        # filtering — surface the server-side phase so the user knows
+                        # which filter to relax first.
+                        st.caption(
+                            "Server-side filters returned 0 matches. Try relaxing one "
+                            "filter (e.g. broaden Current Company or Current Title)."
+                        )
+                    elif _final_count == 0 and (_ft_active or has_column_filters):
+                        st.caption(
+                            "Tip: 0 results often means the DB doesn't have profiles enriched "
+                            "for these criteria yet, not that the filter is broken. Try relaxing "
+                            "one filter at a time."
+                        )
 
                     # Toggle to show all columns
                     show_all_db_cols = st.checkbox("Show all columns", value=False, key="db_show_all_cols")
@@ -10350,6 +10377,28 @@ with tab_database:
                             # Show success message after rerun
                             if st.session_state.pop('db_send_success', None):
                                 st.success(f"Loaded {st.session_state.get('enriched_df', pd.DataFrame()).shape[0]} profiles. Go to **Filter+** tab to continue.")
+                elif search_executed:
+                    # Search ran but returned zero rows before any client-side
+                    # filtering. Tell the user explicitly and point at the most
+                    # likely cause so they can relax the right filter.
+                    _ft_active = bool(ft and ft.strip())
+                    st.info("Found **0** profiles")
+                    if _ft_active:
+                        st.caption(
+                            "Full-text search returned 0 matches. Try a broader query "
+                            "(fewer terms, OR instead of AND), or remove the full-text "
+                            "search and rely on column filters."
+                        )
+                    elif has_column_filters:
+                        st.caption(
+                            "Server-side filters returned 0 matches. Try relaxing one "
+                            "filter (e.g. broaden Current Company or Current Title)."
+                        )
+                    else:
+                        st.caption(
+                            "No profiles in the database yet. Enrich some profiles first "
+                            "via the Enrich tab."
+                        )
                 else:
                     st.info("No profiles in database yet")
 

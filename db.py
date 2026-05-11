@@ -15,7 +15,7 @@ from typing import Optional
 from pathlib import Path
 import pandas as pd
 
-from normalizers import normalize_linkedin_url
+from normalizers import normalize_linkedin_url, pick_current_employer
 
 # Refresh threshold for re-enriching stale profiles
 ENRICHMENT_REFRESH_MONTHS = 3
@@ -305,13 +305,11 @@ def _prepare_profile_row(linkedin_url: str, crustdata_response: dict, original_u
     current_title = None
     current_company = None
 
-    # Try current_employers first (Crustdata format)
-    current_employers = cd.get('current_employers') or []
-    if current_employers and isinstance(current_employers, list):
-        emp = current_employers[0] if current_employers else {}
-        if isinstance(emp, dict):
-            current_title = emp.get('employee_title') or emp.get('title')
-            current_company = emp.get('employer_name') or emp.get('company_name')
+    # Try current_employers first (Crustdata format) — pick most recent
+    emp = pick_current_employer(cd.get('current_employers'))
+    if emp:
+        current_title = emp.get('employee_title') or emp.get('title')
+        current_company = emp.get('employer_name') or emp.get('company_name')
 
     # Fallback: extract from headline (e.g., "CEO at Company")
     if not current_title or not current_company:

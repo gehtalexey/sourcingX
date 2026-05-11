@@ -13,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from openai import OpenAI
 
+from normalizers import pick_current_employer
+
 # Try to import anthropic (optional)
 try:
     import anthropic
@@ -638,13 +640,13 @@ def generate_emails_batch(
 
             name = raw.get('name') or profile.get('name') or f"Profile {index}"
 
-            # Get current role info
-            current_employers = raw.get('current_employers', [])
+            # Get current role info — most recent when multiple current employers
+            emp = pick_current_employer(raw.get('current_employers'))
             current_title = ''
             current_company = ''
-            if current_employers:
-                current_title = current_employers[0].get('employee_title', '')
-                current_company = normalize_company_name(current_employers[0].get('employer_name', ''))
+            if emp:
+                current_title = emp.get('employee_title', '')
+                current_company = normalize_company_name(emp.get('employer_name', ''))
 
             result['name'] = name
             result['current_title'] = current_title or profile.get('current_title', '')

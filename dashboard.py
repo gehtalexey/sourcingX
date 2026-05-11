@@ -4873,12 +4873,62 @@ with tab_search:
                     has_verified_email=search_has_email if search_has_email else None,
                 )
 
+                # Capture full state for the debug expander rendered below.
+                st.session_state['_tab0_debug'] = {
+                    'inputs_raw': {
+                        'crust_search_title': st.session_state.get('crust_search_title', ''),
+                        'crust_search_company': st.session_state.get('crust_search_company', ''),
+                        'crust_search_location': st.session_state.get('crust_search_location', ''),
+                        'crust_search_keywords': st.session_state.get('crust_search_keywords', ''),
+                        'crust_search_skills': st.session_state.get('crust_search_skills', ''),
+                        'crust_search_past_titles': st.session_state.get('crust_search_past_titles', ''),
+                        'crust_search_past_companies': st.session_state.get('crust_search_past_companies', ''),
+                        'crust_search_school': st.session_state.get('crust_search_school', ''),
+                    },
+                    'ai_multiselect_sel': {
+                        'sel_expanded_titles': st.session_state.get('sel_expanded_titles', []),
+                        'sel_expanded_companies': st.session_state.get('sel_expanded_companies', []),
+                        'sel_expanded_locations': st.session_state.get('sel_expanded_locations', []),
+                        'sel_expanded_keywords': st.session_state.get('sel_expanded_keywords', []),
+                        'sel_expanded_skills': st.session_state.get('sel_expanded_skills', []),
+                        'sel_expanded_past_titles': st.session_state.get('sel_expanded_past_titles', []),
+                        'sel_expanded_past_companies': st.session_state.get('sel_expanded_past_companies', []),
+                        'sel_expanded_schools': st.session_state.get('sel_expanded_schools', []),
+                    },
+                    'effective': {
+                        'title': effective_title,
+                        'company': effective_company,
+                        'location': effective_location,
+                        'keywords': effective_keywords,
+                        'skills': effective_skills,
+                        'past_titles': effective_past_titles,
+                        'past_companies': effective_past_companies,
+                        'school': effective_school,
+                    },
+                    'other_filters': {
+                        'seniority': list(search_seniority) if search_seniority else [],
+                        'headcount': list(search_headcount) if search_headcount else [],
+                        'experience_min': search_exp_min,
+                        'experience_max': search_exp_max,
+                        'recently_changed_jobs': bool(search_recently_changed),
+                        'has_verified_email': bool(search_has_email),
+                        'search_limit': search_limit,
+                    },
+                    'filter_payload': filters,
+                }
+
                 try:
                     # First request (API caps at 1000 per request)
                     progress_placeholder = st.empty()
                     progress_placeholder.info("Searching Crustdata database...")
 
                     results = search_people_db(filters, limit=min(search_limit, 1000), api_key=api_key)
+                    st.session_state['_tab0_debug']['raw_response'] = {
+                        'total_count': results.get('total_count'),
+                        'profiles_in_first_page': len(results.get('profiles', [])),
+                        'credits_used': results.get('credits_used'),
+                        'cursor_present': bool(results.get('cursor')),
+                    }
 
                     if results.get("profiles"):
                         all_profiles = results['profiles']
@@ -4922,6 +4972,35 @@ with tab_search:
 
                 except Exception as e:
                     st.error(f"Search failed: {str(e)}")
+
+        # ===== Debug expander (always visible after a search; helps diagnose
+        # the "Crustdata search returns almost zero" class of UI bugs). =====
+        if '_tab0_debug' in st.session_state:
+            with st.expander("🔍 Debug: filter payload + raw Crustdata response", expanded=False):
+                dbg = st.session_state['_tab0_debug']
+                st.caption(
+                    "Use this to diagnose Tab 0 'almost zero results' reports. "
+                    "Compare what you TYPED (inputs_raw) against what was actually SENT "
+                    "(effective + filter_payload) and what Crustdata RETURNED (raw_response)."
+                )
+                st.markdown("**1. Inputs you typed (raw text inputs)**")
+                st.json(dbg.get('inputs_raw', {}))
+                st.markdown(
+                    "**2. AI-multiselect selections — STALE ONES SILENTLY WIDEN OR NARROW YOUR QUERY.** "
+                    "These are appended to your typed input by `_effective_val` before the query is built."
+                )
+                st.json(dbg.get('ai_multiselect_sel', {}))
+                st.markdown("**3. Effective values passed to `build_filters` (merge of 1 + 2, deduped, comma-joined)**")
+                st.json(dbg.get('effective', {}))
+                st.markdown("**4. Other filters (seniority, headcount, exp range, search_limit, toggles)**")
+                st.json(dbg.get('other_filters', {}))
+                st.markdown(
+                    "**5. Filter payload built by `build_filters` — this is exactly what gets POSTed "
+                    "to `https://api.crustdata.com/screener/persondb/search` in the `filters` field**"
+                )
+                st.json(dbg.get('filter_payload', {}))
+                st.markdown("**6. Raw Crustdata response (first page only)**")
+                st.json(dbg.get('raw_response', {}))
 
         # ===== Results Section =====
         if 'crustdata_search_results' in st.session_state and st.session_state['crustdata_search_results']:

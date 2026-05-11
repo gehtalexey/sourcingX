@@ -91,6 +91,71 @@ def test_filters_non_dict_entries():
     assert pick_current_employer([None, valid, "garbage", 42]) is valid
 
 
+def test_unparseable_string_start_date_sorts_last():
+    """Non-ISO start_date values ("Present", "May 2025") must sort LAST so
+    they never win against a real ISO date. Lexicographic string sort would
+    fail here because "P"/"M" > "2" in ASCII."""
+    present = {'employer_name': 'PresentCo', 'start_date': 'Present'}
+    real_iso = {'employer_name': 'RealCo', 'start_date': '2020-01-01'}
+    assert pick_current_employer([present, real_iso])['employer_name'] == 'RealCo'
+    assert pick_current_employer([real_iso, present])['employer_name'] == 'RealCo'
+
+    localized = {'employer_name': 'LocCo', 'start_date': 'May 2025'}
+    iso_2024 = {'employer_name': 'IsoCo', 'start_date': '2024-06-01'}
+    assert pick_current_employer([localized, iso_2024])['employer_name'] == 'IsoCo'
+    assert pick_current_employer([iso_2024, localized])['employer_name'] == 'IsoCo'
+
+
+def test_parses_year_month_short_format():
+    """Crustdata short forms like "2025-07" must parse and compare correctly
+    against full ISO timestamps."""
+    short = {'employer_name': 'ShortCo', 'start_date': '2025-07'}
+    older_full = {'employer_name': 'OlderCo', 'start_date': '2020-01-01T00:00:00+00:00'}
+    assert pick_current_employer([short, older_full])['employer_name'] == 'ShortCo'
+    assert pick_current_employer([older_full, short])['employer_name'] == 'ShortCo'
+
+
+def test_parses_year_only_format():
+    """Year-only ("2024") must parse and compare correctly."""
+    year_only = {'employer_name': 'YearCo', 'start_date': '2024'}
+    older = {'employer_name': 'OlderCo', 'start_date': '2023-12-31'}
+    assert pick_current_employer([year_only, older])['employer_name'] == 'YearCo'
+
+
+def test_parses_iso_with_z_suffix():
+    """ISO with 'Z' (UTC) and ISO with explicit '+00:00' must both parse."""
+    with_z = {'employer_name': 'ZCo', 'start_date': '2025-05-01T00:00:00Z'}
+    with_offset = {'employer_name': 'OffsetCo', 'start_date': '2020-05-01T00:00:00+00:00'}
+    assert pick_current_employer([with_z, with_offset])['employer_name'] == 'ZCo'
+
+
+def test_naive_and_aware_datetimes_compare_without_typeerror():
+    """Mixed tz-aware ISO and naive year-month strings must not raise
+    TypeError when sorted. The parser strips tzinfo to keep all datetimes
+    naive."""
+    aware = {'employer_name': 'AwareCo', 'start_date': '2025-05-01T00:00:00+00:00'}
+    naive = {'employer_name': 'NaiveCo', 'start_date': '2024-01'}
+    result = pick_current_employer([aware, naive])
+    assert result['employer_name'] == 'AwareCo'
+
+
+def test_tie_break_is_deterministic_on_equal_dates():
+    """When two entries have the same start_date, stable sort preserves input
+    order. The first one in the input wins."""
+    first = {'employer_name': 'FirstIn', 'start_date': '2024-01-01'}
+    second = {'employer_name': 'SecondIn', 'start_date': '2024-01-01'}
+    assert pick_current_employer([first, second])['employer_name'] == 'FirstIn'
+    assert pick_current_employer([second, first])['employer_name'] == 'SecondIn'
+
+
+def test_two_unparseable_dates_tie_break_is_stable():
+    """When both entries are unparseable, stable sort preserves input order."""
+    a = {'employer_name': 'A', 'start_date': 'Present'}
+    b = {'employer_name': 'B', 'start_date': 'who knows'}
+    assert pick_current_employer([a, b])['employer_name'] == 'A'
+    assert pick_current_employer([b, a])['employer_name'] == 'B'
+
+
 def test_normalize_crustdata_profile_uses_most_recent():
     """End-to-end pin: normalize_crustdata_profile should surface the most
     recent current employer in current_company / current_title."""

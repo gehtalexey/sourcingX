@@ -73,10 +73,16 @@ Output: "STABILITY: [X] short stints, current=[Y] months → PASS/CAPPED AT [Z]"
 
 Role durations are PRE-CALCULATED. Use those numbers, do NOT recalculate from dates.
 
+The pre-computed EXPERIENCE SUMMARY contains TWO metrics:
+- TOTAL CAREER SPAN — first job to today, INCLUDES Israeli military service. Use ONLY for seniority context.
+- INDUSTRY EXPERIENCE — TOTAL CAREER SPAN minus Israeli military service. **Use this — never TOTAL CAREER SPAN — for any user-stated "max N years" / "min N years" / "reject >N years" / "between A and B years" tenure rule that appears in the requirements.**
+
+When a requirement says "X years experience" without further qualification, it means INDUSTRY EXPERIENCE (not TOTAL CAREER SPAN). A candidate whose TOTAL CAREER SPAN exceeds the limit but whose INDUSTRY EXPERIENCE is under the limit (because the extra years are mandatory Israeli military service) PASSES the experience gate.
+
 What counts as relevant experience:
 - Count FULL: Software Engineer, Developer, Frontend/Backend/Fullstack Engineer, Tech Lead, Team Lead, Staff Engineer, Engineering Manager
 - Count HALF: DevOps/SRE/Platform Engineer (only if skills show coding: APIs, services)
-- Count HALF: Military service (IDF, 8200, Mamram, Talpiot, C4I, IAF)
+- Count HALF: Military service (IDF, 8200, Mamram, Talpiot, C4I, IAF) — but ONLY for "minimum X years relevant tech experience" gates. NEVER count military toward a "maximum X years experience" cap.
 - DO NOT count: QA, Project Manager, Product Manager, Customer Success, Support, IT, Data Analyst, Business roles
 
 Leadership experience (for team lead roles):
@@ -139,8 +145,8 @@ Read `employer_description` carefully. Don't guess from company name.
 +1 point: 3+ years at current company (stability)
 
 ## Military Service:
-- Israeli military is mandatory (ages 18-21)
-- Exclude from "max years experience" calculations
+- Israeli military is mandatory (ages 18-21) and MUST NOT count toward any "max N years experience" / "reject >N years" rule. Always compare experience caps against INDUSTRY EXPERIENCE from the pre-computed EXPERIENCE SUMMARY, never TOTAL CAREER SPAN.
+- Recognized military signals include (non-exhaustive): IDF, Israel Defense Forces, Israeli Army, Israeli Air Force (IAF), Israeli Navy, Mamram, Unit 8200 / 8200, Unit 9900 / 9900, Unit 81, Talpiot, Matzov, C4I, J6 & Cyber Defense, IDF Intelligence / Intelligence Corps, Sayeret Matkal, Shaldag, Duvdevan, Shayetet 13, Egoz, Maglan, Givati, Golani, Nahal, Paratroopers, and Hebrew equivalents (צה"ל, צבא, יחידה 8200, ממר"ם, תלפיות, מודיעין).
 - 8200 = signals intelligence (technical)
 - Mamram = IT corps (technical)
 - Talpiot = elite tech program (very strong signal)

@@ -52,4 +52,5 @@ jobs:
             test_tenure_constraint_override.py \
             test_pick_current_employer.py \
             test_reenrich_sparse_profiles.py \
-            test_ai_screen_excludes_army.py
+            test_ai_screen_excludes_army.py \
+            test_helpers_extract_display_fields.py

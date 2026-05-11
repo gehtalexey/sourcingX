@@ -19,8 +19,12 @@ def extract_display_fields(raw_data: dict) -> dict:
     """
     cd = raw_data or {}
 
+    # Keep the raw list around — downstream output dict surfaces it for
+    # display (full role history) and uses len() for num_positions math.
+    current_employers = cd.get('current_employers') or []
+
     # Current employer — most recent when multiple are present
-    emp = pick_current_employer(cd.get('current_employers')) or {}
+    emp = pick_current_employer(current_employers) or {}
 
     # Name
     name = cd.get('name', '')

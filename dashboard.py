@@ -200,6 +200,14 @@ def _cb_toggle_exclude_preset(cat_keywords: list):
     else:
         st.session_state['exclude_title_presets'] = list(set(current + cat_keywords))
 
+def _cb_toggle_f2_exclude_preset(cat_keywords: list):
+    """Toggle exclude title preset category for the Filter+ tab."""
+    current = st.session_state.get('f2_exclude_title_presets', [])
+    if all(kw in current for kw in cat_keywords):
+        st.session_state['f2_exclude_title_presets'] = [k for k in current if k not in cat_keywords]
+    else:
+        st.session_state['f2_exclude_title_presets'] = list(set(current + cat_keywords))
+
 
 # ===== Performance: Module-level cached functions (avoid re-creating in tabs) =====
 # These were previously nested inside tab logic and re-created on every render
@@ -5902,17 +5910,23 @@ with tab_filter:
         st.markdown("**Your Filter Sheet:**")
         st.caption(f"Share your sheet with: `linkedin-enricher@linkedin-enricher-485616.iam.gserviceaccount.com`")
         user_sheet_url = st.text_input(
-            "Google Sheet URL (paste your own, or leave empty for default)",
+            "Google Sheet URL (required — paste your sheet)",
             value=st.session_state.get('user_sheet_url', ''),
             placeholder="https://docs.google.com/spreadsheets/d/...",
             key="user_sheet_input"
         )
 
-        # Save to session state and set default tab names
+        # Save to session state and set default tab names.
+        # No fallback to a baked-in default sheet: if the user hasn't pasted a
+        # URL, clear it so render_filter_sheet_status shows the "paste a URL"
+        # hint and downstream filters skip cleanly. Multi-user setups must not
+        # share a single default sheet from config.json / secrets.toml.
         if user_sheet_url:
             st.session_state['user_sheet_url'] = user_sheet_url
             filter_sheets['url'] = user_sheet_url
-            # Set default tab names if not already configured
+            # Set default tab names if not already configured. These are tab
+            # names within the user's own spreadsheet, not URLs, so the
+            # defaults are safe to keep.
             if not filter_sheets.get('past_candidates'):
                 filter_sheets['past_candidates'] = 'Past Candidates'
             if not filter_sheets.get('blacklist'):
@@ -5927,6 +5941,9 @@ with tab_filter:
                 filter_sheets['universities'] = 'Universities'
             if not filter_sheets.get('client_wanted_companies'):
                 filter_sheets['client_wanted_companies'] = 'Client specific wanted companies'
+        else:
+            # User left the input empty — treat the sheet as not connected.
+            filter_sheets['url'] = ''
 
         sheet_connected = render_filter_sheet_status(filter_sheets, gspread_client)
         has_sheets = sheet_connected
@@ -7645,12 +7662,15 @@ with tab_filter2:
         st.markdown("**Your Filter Sheet:**")
         st.caption(f"Share your sheet with: `linkedin-enricher@linkedin-enricher-485616.iam.gserviceaccount.com`")
         user_sheet_url = st.text_input(
-            "Google Sheet URL for filtering",
+            "Google Sheet URL (required — paste your sheet)",
             value=st.session_state.get('user_sheet_url', ''),
             placeholder="https://docs.google.com/spreadsheets/d/...",
             key="filter2_sheet_input"
         )
 
+        # No fallback to a baked-in default sheet: see the Filter tab above for
+        # the rationale. Tab-name defaults below stay because those are sheet
+        # tabs inside the user's own spreadsheet, not URLs.
         if user_sheet_url:
             st.session_state['user_sheet_url'] = user_sheet_url
             filter_sheets['url'] = user_sheet_url
@@ -7667,6 +7687,9 @@ with tab_filter2:
                 filter_sheets['target_companies'] = 'Target Companies'
             if 'client_wanted_companies' not in filter_sheets:
                 filter_sheets['client_wanted_companies'] = 'Client specific wanted companies'
+        else:
+            # User left the input empty — treat the sheet as not connected.
+            filter_sheets['url'] = ''
 
         has_sheets = render_filter_sheet_status(filter_sheets, gspread_client)
 
@@ -7709,6 +7732,93 @@ with tab_filter2:
             exclude_keywords = st.text_input("Exclude keywords (comma-separated)", key="f2_exclude_kw",
                                             placeholder="e.g., intern, student, freelance",
                                             help="Exclude profiles with these in job titles")
+
+            # Predefined exclusion keywords by category (mirrors the Filter tab).
+            F2_EXCLUDE_CATEGORIES = {
+                "Leadership": ["vp", "director", "manager", "head of", "product manager"],
+                "C-Level/Founders": ["cto", "ceo", "coo", "cfo", "owner", "founder", "co-founder"],
+                "Non-Employee": ["freelancer", "self employed", "consultant"],
+                "Junior": ["student", "intern", "junior"],
+                "Technical": ["qa", "automation", "embedded", "low level", "real time", "hardware", "firmware", "c++", "gui", "dsp", "unity", "integration", "test", "system", "systems"],
+                "Mobile": ["mobile", "ios", "android"],
+                "Design": ["ui", "ux", "design", "designer"],
+                "Data/ML": ["big data", "machine learning", "data", "bi", "science", "ml", "algorithm", "algorithms", "computer vision", "algo"],
+                "DevOps/Security": ["devops", "devsecops", "security", "it", "infra", "infrastructure"],
+                "Product": ["product", "analyst", "research", "business"],
+                "Support/Quality": ["client", "clients", "escalation", "quality", "support", "sales"]
+            }
+            F2_ALL_EXCLUDE_TITLES = [kw for keywords in F2_EXCLUDE_CATEGORIES.values() for kw in keywords]
+
+            st.caption("Quick select (click to toggle):")
+
+            # Scoped CSS: keep button labels on one line within a word and let
+            # multi-word labels wrap at spaces rather than character-by-character.
+            # Without this, Streamlit buttons inside a narrow nested column
+            # collapse min-width and break every character onto its own line
+            # (e.g. "C-Level/Founders" -> "C-/Lev/el/F/oun/der/s").
+            #
+            # Selectors are scoped to `.f2-exclude-quick-select` so the styles
+            # only apply to the Filter+ tab's quick-select buttons (wrapped
+            # below) and do NOT affect any other Streamlit buttons rendered on
+            # the page (including the Filter tab's own quick-select row, which
+            # has its own scoped style).
+            st.markdown(
+                """
+                <style>
+                .f2-exclude-quick-select div[data-testid="stButton"] > button {
+                    white-space: normal;
+                    word-break: keep-all;
+                    overflow-wrap: normal;
+                    min-width: 0;
+                    padding-left: 0.25rem;
+                    padding-right: 0.25rem;
+                }
+                .f2-exclude-quick-select div[data-testid="stButton"] > button > div,
+                .f2-exclude-quick-select div[data-testid="stButton"] > button p {
+                    white-space: normal;
+                    word-break: keep-all;
+                    overflow-wrap: normal;
+                }
+                </style>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            # Open a scoping wrapper so the CSS above only targets buttons
+            # rendered inside this block.
+            st.markdown('<div class="f2-exclude-quick-select">', unsafe_allow_html=True)
+
+            f2_category_items = list(F2_EXCLUDE_CATEGORIES.items())
+            # Lay out as rows of 3 so each button has enough horizontal room
+            # for its label (longest is "C-Level/Founders"). Buttons wrap to a
+            # new row naturally as we re-enter the loop.
+            f2_buttons_per_row = 3
+            f2_quick_buttons = (
+                [("All", F2_ALL_EXCLUDE_TITLES, "exc2_all", _cb_set_value,
+                  ('f2_exclude_title_presets', F2_ALL_EXCLUDE_TITLES))]
+                + [(name, kws, f"exc2_{name}", _cb_toggle_f2_exclude_preset, (kws,))
+                   for name, kws in f2_category_items]
+                + [("Clear", [], "exc2_clear", _cb_set_value,
+                    ('f2_exclude_title_presets', []))]
+            )
+
+            for row_start in range(0, len(f2_quick_buttons), f2_buttons_per_row):
+                row = f2_quick_buttons[row_start:row_start + f2_buttons_per_row]
+                row_cols = st.columns(f2_buttons_per_row)
+                for col_idx, (label, _kws, key, cb, cb_args) in enumerate(row):
+                    with row_cols[col_idx]:
+                        st.button(label, key=key, width="stretch",
+                                  on_click=cb, args=cb_args)
+
+            # Close the scoping wrapper.
+            st.markdown('</div>', unsafe_allow_html=True)
+
+            f2_selected_exclude = st.multiselect(
+                "Selected exclusions",
+                options=F2_ALL_EXCLUDE_TITLES,
+                default=st.session_state.get('f2_exclude_title_presets', []),
+                key="f2_exclude_title_presets"
+            )
 
         # Required skills/keywords
         skill_col1, skill_col2, skill_col3 = st.columns([3, 1, 2])
@@ -8035,24 +8145,34 @@ with tab_filter2:
                         df = df[mask]
 
                 # Exclude keywords filter (job titles only, word boundary matching)
-                if exclude_keywords and exclude_keywords.strip():
+                # Combine the free-text input with the quick-select preset list.
+                exclude_kw_typed = [
+                    k.strip().lower()
+                    for k in (exclude_keywords or '').split(',')
+                    if k.strip()
+                ]
+                exclude_kw_preset = [
+                    str(k).strip().lower()
+                    for k in (f2_selected_exclude or [])
+                    if str(k).strip()
+                ]
+                keywords = list({kw for kw in (exclude_kw_typed + exclude_kw_preset) if kw})
+                if keywords:
                     import re
-                    keywords = [k.strip().lower() for k in exclude_keywords.split(',') if k.strip()]
-                    if keywords:
-                        exc_patterns = []
-                        for kw in keywords:
-                            escaped = re.escape(kw)
-                            exc_patterns.append(escaped if ' ' in kw else r'\b' + escaped + r'\b')
-                        exc_regex = re.compile('|'.join(exc_patterns), re.IGNORECASE)
-                        search_cols = ['past_positions', 'current_title']
-                        available_search_cols = [c for c in search_cols if c in df.columns]
-                        def has_exclude_keyword(row):
-                            text = ' '.join(str(row[c]) for c in available_search_cols if row.get(c) is not None)
-                            return bool(exc_regex.search(text))
-                        mask = df.apply(has_exclude_keyword, axis=1)
-                        # MEMORY FIX: Store only count, not full records
-                        removed['Excluded Title Keywords'] = mask.sum()
-                        df = df[~mask]
+                    exc_patterns = []
+                    for kw in keywords:
+                        escaped = re.escape(kw)
+                        exc_patterns.append(escaped if ' ' in kw else r'\b' + escaped + r'\b')
+                    exc_regex = re.compile('|'.join(exc_patterns), re.IGNORECASE)
+                    search_cols = ['past_positions', 'current_title']
+                    available_search_cols = [c for c in search_cols if c in df.columns]
+                    def has_exclude_keyword(row):
+                        text = ' '.join(str(row[c]) for c in available_search_cols if row.get(c) is not None)
+                        return bool(exc_regex.search(text))
+                    mask = df.apply(has_exclude_keyword, axis=1)
+                    # MEMORY FIX: Store only count, not full records
+                    removed['Excluded Title Keywords'] = mask.sum()
+                    df = df[~mask]
 
                 # Required keywords filter (skills or full experience)
                 if required_skills and required_skills.strip():

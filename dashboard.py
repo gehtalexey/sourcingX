@@ -3692,13 +3692,19 @@ def compute_role_durations(raw):
     else:
         lines.append('>>> STABILITY VERDICT: PASS <<<')
 
-    # Pre-computed EXPERIENCE SUMMARY — total career span and military detection
-    _mil_keywords = {'idf', 'israel defense forces', 'israeli air force', 'mamram', 'unit 8200',
-                     'talpiot', 'c4i', 'israeli navy', 'israeli military', 'iaf',
-                     'j6 & cyber defense', 'cyber defense directorate'}
+    # Pre-computed EXPERIENCE SUMMARY — total career span and military detection.
+    # Israeli military service (IDF / 8200 / Mamram / Talpiot / C4I / Hebrew
+    # variants) is mandatory at age 18-21 and MUST NOT count toward any
+    # user-stated "max N years experience" / "reject >N years" rule.
+    # Detection is centralized in normalizers.is_military_position so the
+    # keyword list (English + Hebrew + bare unit numbers) is the single
+    # source of truth used by the regression test in
+    # test_ai_screen_excludes_army.py.
+    from normalizers import is_military_position
     all_starts = []
     all_starts_non_mil = []
     military_months = 0
+    military_positions = []
     for emp_key in ['past_employers', 'current_employers']:
         for emp in (raw.get(emp_key) or []):
             title = (emp.get('employee_title') or '').strip()
@@ -3708,29 +3714,32 @@ def compute_role_durations(raw):
             end = _parse_date(emp.get('end_date')) or today
             if not start:
                 continue
-            emp_name = (emp.get('employer_name') or '').lower()
-            emp_title = title.lower()
-            is_military = any(kw in emp_name or kw in emp_title for kw in _mil_keywords)
+            is_military = is_military_position(title, emp.get('employer_name'))
             all_starts.append(start)
             if is_military:
-                military_months += max(0, (end.year - start.year) * 12 + (end.month - start.month))
+                mil_months = max(0, (end.year - start.year) * 12 + (end.month - start.month))
+                military_months += mil_months
+                military_positions.append(f"{title} at {emp.get('employer_name', '?')} ({_fmt_duration(mil_months)})")
             else:
                 all_starts_non_mil.append(start)
 
     if all_starts:
         lines.append('')
-        lines.append('EXPERIENCE SUMMARY (pre-calculated):')
+        lines.append('EXPERIENCE SUMMARY (pre-calculated — DO NOT recalculate):')
         earliest = min(all_starts)
         total_months = max(0, (today.year - earliest.year) * 12 + (today.month - earliest.month))
-        lines.append(f'  TOTAL CAREER SPAN: {_fmt_duration(total_months)} (from {earliest.strftime("%b %Y")} to today)')
+        lines.append(f'  TOTAL CAREER SPAN: {_fmt_duration(total_months)} (from {earliest.strftime("%b %Y")} to today — includes military)')
         if military_months > 0:
             half_mil = military_months // 2
-            lines.append(f'  MILITARY SERVICE: {_fmt_duration(military_months)} (counts as HALF = {_fmt_duration(half_mil)} for role-specific)')
+            lines.append(f'  MILITARY SERVICE: {_fmt_duration(military_months)} — {"; ".join(military_positions)}')
+            lines.append(f'    → counts as HALF = {_fmt_duration(half_mil)} for role-specific experience')
             # Calculate industry experience as total minus military
             industry_months = max(0, total_months - military_months)
             lines.append(f'  INDUSTRY EXPERIENCE (excl military): {_fmt_duration(industry_months)}')
+            lines.append('>>> EXPERIENCE LIMIT CHECK: for any user-stated "max N years" / "min N years" / "reject >N years" rule, COMPARE AGAINST INDUSTRY EXPERIENCE ABOVE, NEVER TOTAL CAREER SPAN. Israeli military service is mandatory and MUST NOT count toward years-of-experience limits. <<<')
         else:
             lines.append(f'  INDUSTRY EXPERIENCE: {_fmt_duration(total_months)} (no military service detected)')
+            lines.append('>>> EXPERIENCE LIMIT CHECK: for any user-stated "max N years" / "min N years" / "reject >N years" rule, use INDUSTRY EXPERIENCE above. <<<')
         lines.append('  NOTE: AI must determine which roles are role-specific from the durations above. The baseline above is a starting point.')
 
     # Detect SWE roles with DevOps skill overlap — flag for AI to consider half-credit
@@ -3748,9 +3757,7 @@ def compute_role_durations(raw):
                 if not title:
                     continue
                 title_lower = title.lower()
-                emp_name = (emp.get('employer_name') or '').lower()
-                is_military = any(kw in emp_name or kw in title_lower for kw in _mil_keywords)
-                if is_military:
+                if is_military_position(title, emp.get('employer_name')):
                     continue
                 if any(kw in title_lower for kw in _swe_keywords):
                     start = _parse_date(emp.get('start_date'))
@@ -3818,15 +3825,17 @@ Role durations, stability, and experience summary are pre-calculated above the p
 
 ## EXPERIENCE RULES (MANDATORY)
 Three experience metrics are pre-calculated above:
-- TOTAL CAREER SPAN: all jobs from first to today (for general seniority context)
+- TOTAL CAREER SPAN: all jobs from first to today, INCLUDES military (general seniority context ONLY)
 - MILITARY SERVICE: Israeli military time (excluded from industry experience, counts as half for role-specific)
 - INDUSTRY EXPERIENCE: career span minus military (general non-military career)
+
+For any JD experience rule ("max N years", "min N years", "reject >N years", "between A and B years"), compare against INDUSTRY EXPERIENCE — NEVER TOTAL CAREER SPAN. Israeli military service (IDF, 8200, Mamram, Talpiot, C4I, etc.) is mandatory at age 18-21 and MUST NOT count toward years-of-experience caps. A candidate whose TOTAL CAREER SPAN is over the limit but whose INDUSTRY EXPERIENCE is under it (because the extra years are mandatory military) PASSES the experience check.
 
 YOU must determine ROLE-SPECIFIC EXPERIENCE from the role durations above:
 - Only count roles relevant to the JD (e.g. DevOps/Infrastructure/SRE roles for a DevOps JD)
 - Do NOT count unrelated early-career roles (tech support, QA, sysadmin) toward role-specific experience
 - The JD's year range (e.g. "5-15 years") and rejection threshold (e.g. "reject >15 years") apply to ROLE-SPECIFIC experience
-- Military service counts as HALF toward role-specific experience (mandatory service, positive signal)
+- Military service counts as HALF toward role-specific experience floors (e.g. "min 5 years tech") — but NEVER toward role-specific experience caps (e.g. "max 5 years")
 
 ## Role Classification Edge Cases
 - "Software Engineer" / "Senior Software Engineer" is NOT automatically relevant or irrelevant.
@@ -3862,7 +3871,7 @@ Today's date: {today}
 
 ## Key Rules:
 - Nice-to-Have = bonus only, NOT a penalty if missing
-- Israeli military service (IDF, 8200, Mamram) is mandatory in Israel and a POSITIVE signal. Counts as HALF for role-specific experience
+- Israeli military service (IDF, 8200, Mamram, Talpiot, C4I, IAF, and Hebrew variants like צה"ל / צבא / ממר"ם / תלפיות) is mandatory in Israel (age 18-21) and a POSITIVE signal. It counts as HALF toward role-specific experience FLOORS, but NEVER toward years-of-experience CAPS — for any "max N years" / "reject >N years" rule, compare against INDUSTRY EXPERIENCE only.
 - Role durations and experience summary are pre-calculated above the profile JSON. Use those numbers, do NOT recalculate from dates
 - If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at the company once
 - The JD year range (e.g. "5-15 years") applies to ROLE-SPECIFIC experience — only count roles relevant to the JD

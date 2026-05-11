@@ -694,3 +694,115 @@ def profiles_to_display_df(profiles: list[dict]):
 
     display_data = [profile_to_display_dict(p) for p in profiles]
     return pd.DataFrame(display_data)
+
+
+# ============================================================================
+# ISRAELI MILITARY SERVICE DETECTION
+# ============================================================================
+#
+# Israeli military service is mandatory (ages 18-21) and MUST NOT count toward
+# any user-stated "max N years experience" / "reject >N years" rule. Single
+# source of truth — used by AI Screen prompt pre-computation in dashboard.py
+# (compute_role_durations) AND by the regression test
+# test_ai_screen_excludes_army.py. Keep them in sync.
+#
+# Match rule: a position is military if any keyword appears as a substring of
+# the lowercased employer name OR the lowercased role title. The list is
+# intentionally generous (Hebrew + English + bare unit numbers) so the
+# detection works against Crustdata's inconsistent formatting (sometimes
+# "Unit 8200", sometimes just "8200", sometimes "IDF - 8200").
+#
+# Hebrew tokens are matched on the raw Hebrew string (no transliteration).
+# - צה"ל / צה״ל = IDF
+# - צבא = army
+# - יחידה = unit
+# - מודיעין = intelligence
+#
+# DO NOT add civilian "security" or "defense" companies here — that would
+# wrongly exclude legitimate civilian work (e.g. Check Point, Palo Alto).
+
+MILITARY_KEYWORDS = frozenset({
+    # English — generic
+    "idf",
+    "israel defense forces",
+    "israeli defense forces",
+    "israeli army",
+    "israeli military",
+    "israeli air force",
+    "israeli navy",
+    "iaf",
+    "israeli intelligence",
+    "idf intelligence",
+    "intelligence corps",
+    "military service",
+    "mandatory service",
+
+    # English — well-known IDF tech / intelligence units
+    "unit 8200",
+    "8200",
+    "unit 9900",
+    "9900",
+    "unit 81",
+    "mamram",
+    "talpiot",
+    "matzov",
+    "c4i",
+    "j6 & cyber defense",
+    "cyber defense directorate",
+    "ofek unit",
+
+    # English — common combat / special units (recruiters sometimes leave
+    # them in the work history and they still must not count as industry yoe)
+    "sayeret matkal",
+    "shaldag",
+    "duvdevan",
+    "shayetet 13",
+    "egoz",
+    "maglan",
+    "givati",
+    "golani",
+    "nahal",
+    "paratroopers",
+
+    # Hebrew
+    'צה"ל',
+    "צה״ל",
+    "צבא",
+    "צבא ההגנה לישראל",
+    "8200 יחידה",
+    "יחידה 8200",
+    "יחידה 9900",
+    "ממר\"ם",
+    "ממר״ם",
+    "ממרם",
+    "תלפיות",
+    "מודיעין",
+})
+
+
+def is_military_position(title: Optional[str], company: Optional[str]) -> bool:
+    """Return True if a role title / employer name looks like Israeli military
+    service. Conservative substring match against MILITARY_KEYWORDS.
+
+    Used by AI Screen's pre-computed EXPERIENCE SUMMARY block to exclude
+    mandatory IDF / 8200 / Mamram / Talpiot / C4I / etc. service from
+    INDUSTRY EXPERIENCE so the model does not count it toward user-stated
+    "max N years" / "reject >N years" rules.
+    """
+    title_l = (title or "").lower()
+    company_l = (company or "").lower()
+    if not title_l and not company_l:
+        return False
+    for kw in MILITARY_KEYWORDS:
+        # Hebrew keywords are not lowercased (case is meaningless for Hebrew
+        # consonant text). We still match against the lowercased haystack
+        # because mixed-case Hebrew in English text is uncommon and
+        # .lower() is a no-op on Hebrew characters.
+        if kw in company_l or kw in title_l:
+            return True
+        # Also check the raw (non-lowercased) original strings so Hebrew
+        # quote-mark variants (״ vs ") match regardless of input casing
+        # decisions upstream.
+        if kw in (company or "") or kw in (title or ""):
+            return True
+    return False

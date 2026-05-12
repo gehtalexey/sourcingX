@@ -60,4 +60,5 @@ jobs:
             test_check_monthly_credit_budget.py \
             test_geo_aware_ai_expansion.py \
             test_api_key_strip.py \
-            test_filter_funnel_breakdown.py
+            test_filter_funnel_breakdown.py \
+            test_csv_upload_clears_derived_state.py

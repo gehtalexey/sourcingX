@@ -931,6 +931,37 @@ def cleanup_memory():
     gc.collect()
 
 
+# Session-state keys derived from the loaded results_df. When the user replaces
+# or appends the loaded set, these must be cleared so downstream tabs (Filter+,
+# Enrich, AI Screen) don't feed stale data forward — e.g. the Enrich tab prefers
+# passed_candidates_df when present, so leaving it would silently ignore a fresh
+# upload.
+_RESULTS_DERIVED_KEYS = (
+    'passed_candidates_df',
+    'enriched_df',
+    'enriched_profiles_raw',
+    'filter_stats',
+    'f2_filter_stats',
+    'filtered_out',
+    'f2_filtered_out',
+    'filtered_out_counts',
+    'filtered_out_light',
+    'screening_results',
+    'enriched_results',
+    'results',
+)
+
+
+def clear_results_derived_state(state) -> None:
+    """Drop every session-state value derived from the previously loaded results_df.
+
+    Used when a CSV/JSON upload replaces or appends to the loaded set. Operates
+    on any mapping with .pop(key, None) so it's unit-testable without Streamlit.
+    """
+    for key in _RESULTS_DERIVED_KEYS:
+        state.pop(key, None)
+
+
 def get_profiles_df() -> pd.DataFrame:
     """Get the current profiles DataFrame. Single source of truth."""
     # Priority: enriched_df > results_df > empty
@@ -5402,42 +5433,103 @@ with tab_upload:
 
     # ===== File Upload Section =====
     st.markdown("### Upload File")
+    _csv_uploader_nonce = st.session_state.get('pre_enriched_upload_nonce', 0)
     pre_enriched_file = st.file_uploader(
         "Upload pre-enriched CSV or JSON",
         type=['csv', 'json'],
-        key="pre_enriched_upload"
+        key=f"pre_enriched_upload_{_csv_uploader_nonce}",
     )
 
     if pre_enriched_file:
         try:
+            # Parse the uploaded file into a DataFrame (no commit to session yet)
             if pre_enriched_file.name.endswith('.json'):
                 pre_enriched_data = json.load(pre_enriched_file)
                 if isinstance(pre_enriched_data, list):
-                    df_json = flatten_for_csv(pre_enriched_data)
-                    st.session_state['results_df'] = df_json
-                    st.session_state['original_results_df'] = df_json.copy()
-                    st.success(f"Loaded **{len(pre_enriched_data)}** profiles!")
+                    df_uploaded = flatten_for_csv(pre_enriched_data)
+                    skipped_no_url = 0
+                else:
+                    df_uploaded = pd.DataFrame()
+                    skipped_no_url = 0
             else:
                 pre_enriched_file.seek(0)
                 df_uploaded = pd.read_csv(pre_enriched_file, encoding='utf-8')
-
-                # Normalize columns (handles GEM and other CSV formats)
                 df_uploaded = normalize_uploaded_csv(df_uploaded)
-
-                # Get count of skipped profiles (no LinkedIn URL)
                 skipped_no_url = df_uploaded.attrs.get('_skipped_no_url', 0)
 
-                # PhantomBuster/CSV data stays in session state only (not saved to DB)
-                # DB save happens after Crustdata enrichment
-                st.session_state['results_df'] = df_uploaded
-                st.session_state['original_results_df'] = df_uploaded.copy()
-                save_session_state()  # Save for restore
+            if df_uploaded.empty:
+                st.error("No profiles parsed from the uploaded file.")
+            else:
+                # If there are existing profiles, let the user pick append vs replace.
+                # Otherwise just load directly (matches the prior single-step UX).
+                existing_df = st.session_state.get('results_df')
+                has_existing = existing_df is not None and not existing_df.empty
 
-                # Show success message with details
-                msg = f"Loaded **{len(df_uploaded)}** profiles"
-                if skipped_no_url > 0:
-                    msg += f" ({skipped_no_url} skipped - no LinkedIn URL)"
-                st.success(msg)
+                def _commit_results(new_df):
+                    st.session_state['results_df'] = new_df
+                    st.session_state['original_results_df'] = new_df.copy()
+                    clear_results_derived_state(st.session_state)
+                    save_session_state()
+
+                def _apply_replace_with_existing():
+                    _commit_results(df_uploaded)
+                    st.session_state['last_load_count'] = len(df_uploaded)
+                    st.session_state['last_load_file'] = pre_enriched_file.name
+                    st.session_state['last_load_mode'] = 'loaded'
+
+                def _apply_append():
+                    combined_df = pd.concat([existing_df, df_uploaded], ignore_index=True)
+                    if 'linkedin_url' in combined_df.columns:
+                        combined_df = combined_df.drop_duplicates(subset=['linkedin_url'], keep='first')
+                    elif 'public_url' in combined_df.columns:
+                        combined_df = combined_df.drop_duplicates(subset=['public_url'], keep='first')
+                    elif 'name' in combined_df.columns:
+                        combined_df = combined_df.drop_duplicates(subset=['name'], keep='first')
+                    new_count = len(combined_df) - len(existing_df)
+                    _commit_results(combined_df)
+                    st.session_state['last_load_count'] = new_count
+                    st.session_state['last_load_file'] = pre_enriched_file.name
+                    st.session_state['last_load_mode'] = 'added'
+                    st.session_state['last_load_total'] = len(combined_df)
+
+                def _reset_uploader():
+                    st.session_state['pre_enriched_upload_nonce'] = _csv_uploader_nonce + 1
+
+                if not has_existing:
+                    # Fresh load — preserve original single-step UX with inline success.
+                    _commit_results(df_uploaded)
+                    msg = f"Loaded **{len(df_uploaded)}** profiles"
+                    if skipped_no_url > 0:
+                        msg += f" ({skipped_no_url} skipped - no LinkedIn URL)"
+                    st.success(msg)
+                else:
+                    st.info(
+                        f"You already have **{len(existing_df)}** profiles loaded. "
+                        f"This file has **{len(df_uploaded)}** profiles — "
+                        "add them to the existing set, or replace it?"
+                    )
+                    col_replace, col_append = st.columns(2)
+                    with col_replace:
+                        if st.button(
+                            "Replace existing",
+                            key="csv_replace_btn",
+                            width="stretch",
+                            help="Discard the current profiles and load only the uploaded file",
+                        ):
+                            _apply_replace_with_existing()
+                            _reset_uploader()
+                            st.rerun()
+                    with col_append:
+                        if st.button(
+                            "+ Add to existing",
+                            type="primary",
+                            key="csv_append_btn",
+                            width="stretch",
+                            help="Keep current profiles and merge in the uploaded file (deduped by LinkedIn URL)",
+                        ):
+                            _apply_append()
+                            _reset_uploader()
+                            st.rerun()
 
         except Exception as e:
             st.error(f"Error: {e}")

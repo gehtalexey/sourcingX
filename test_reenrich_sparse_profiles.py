@@ -1,15 +1,6 @@
 """Tests for scripts/reenrich_sparse_profiles.py.
 
 All external services are mocked. No real network calls, no real DB writes.
-
-The script switched from per-profile enrich (3 credits/profile) to bulk search
-(3 credits/100 results) — these tests assert the new code path:
-
-  - URLs are passed to ``bulk_search_by_flagship_urls`` in batches of 100.
-  - URLs absent from the search response are recorded as Failed.
-  - The cost estimate uses ``ceil(N / 100) * 3`` math.
-  - Email column is preserved (the search payload has no email; the write
-    path must not overwrite an existing email with empty/null).
 """
 
 from __future__ import annotations
@@ -109,8 +100,6 @@ class TestArgParsing:
         assert args.min_current_employers == 1
         assert args.execute is False
         assert args.verbose is False
-        # New default batch size matches Crustdata's billing batch (3¢/100).
-        assert args.batch_size == 100
 
     def test_all_flags(self, script):
         parser = script.build_arg_parser()
@@ -120,14 +109,14 @@ class TestArgParsing:
             "--min-current-employers", "0",
             "--execute",
             "--verbose",
-            "--batch-size", "50",
+            "--batch-size", "3",
         ])
         assert args.max_age_days == 14
         assert args.limit == 100
         assert args.min_current_employers == 0
         assert args.execute is True
         assert args.verbose is True
-        assert args.batch_size == 50
+        assert args.batch_size == 3
 
     def test_help_does_not_crash(self, script):
         parser = script.build_arg_parser()
@@ -251,38 +240,49 @@ class TestCutoffIso:
 
 
 # ---------------------------------------------------------------------------
-# Cost estimation — search pricing (3 credits per 100 results)
+# Response matching
 # ---------------------------------------------------------------------------
 
 
-class TestEstimateCredits:
+class TestMatchResponseToInput:
 
-    def test_zero_candidates(self, script):
-        assert script._estimate_credits(0) == 0
+    def test_matches_query_field(self, script):
+        response = [
+            {"query_linkedin_profile_urn_or_slug": ["gil-gitlin-87b720200"],
+             "current_employers": [{"employer_name": "Cytactic"}]},
+            {"query_linkedin_profile_urn_or_slug": ["someone-else"],
+             "current_employers": [{"employer_name": "Other"}]},
+        ]
+        url = "https://www.linkedin.com/in/gil-gitlin-87b720200"
+        matched = script._match_response_to_input(response, url)
+        assert matched is not None
+        assert matched["current_employers"][0]["employer_name"] == "Cytactic"
 
-    def test_one_candidate_costs_one_batch(self, script):
-        # Single profile → still one search request → 3 credits.
-        assert script._estimate_credits(1) == 3
+    def test_falls_back_to_flagship_slug(self, script):
+        response = [
+            {"linkedin_flagship_url": "https://linkedin.com/in/barak-ben-shimon",
+             "current_employers": [{"employer_name": "monday.com"}]},
+        ]
+        url = "https://www.linkedin.com/in/barak-ben-shimon"
+        matched = script._match_response_to_input(response, url)
+        assert matched is not None
+        assert matched["current_employers"][0]["employer_name"] == "monday.com"
 
-    def test_exactly_one_batch(self, script):
-        assert script._estimate_credits(100) == 3
+    def test_returns_none_when_no_match(self, script):
+        response = [
+            {"query_linkedin_profile_urn_or_slug": ["other-person"]},
+            {"query_linkedin_profile_urn_or_slug": ["yet-another"]},
+        ]
+        assert script._match_response_to_input(
+            response, "https://www.linkedin.com/in/nobody"
+        ) is None
 
-    def test_just_over_one_batch(self, script):
-        # 101 → two batches → 6 credits.
-        assert script._estimate_credits(101) == 6
-
-    def test_two_full_batches(self, script):
-        assert script._estimate_credits(200) == 6
-
-    def test_default_limit_250(self, script):
-        # The workflow uses --limit 250. With the new cost model that's
-        # ceil(250/100) = 3 batches * 3 credits = 9 credits (down from
-        # 750 credits under the old per-profile pricing).
-        assert script._estimate_credits(250) == 9
-
-    def test_respects_custom_batch_size(self, script):
-        # ceil(250/50) = 5 batches * 3 credits = 15 credits.
-        assert script._estimate_credits(250, batch_size=50) == 15
+    def test_single_response_takes_when_unique(self, script):
+        response = [{"current_employers": [{"employer_name": "Sole"}]}]
+        matched = script._match_response_to_input(
+            response, "https://www.linkedin.com/in/someone"
+        )
+        assert matched is not None
 
 
 # ---------------------------------------------------------------------------
@@ -322,14 +322,14 @@ class TestDryRunFlow:
     def test_dry_run_prints_candidates_and_does_not_write(self, script, capsys):
         client = self._make_client(script)
         with patch.object(script, "get_supabase_client", return_value=client), \
-             patch.object(script, "bulk_search_by_flagship_urls") as mock_search, \
+             patch.object(script, "crustdata_enrich_batch") as mock_enrich, \
              patch.object(script, "_load_crustdata_api_key") as mock_key:
             rc = script.main(["--limit", "10", "--max-age-days", "30"])
 
         out = capsys.readouterr().out
         assert rc == 0
         # Dry run must not call Crustdata or read the API key.
-        mock_search.assert_not_called()
+        mock_enrich.assert_not_called()
         mock_key.assert_not_called()
         # Must not write anything.
         assert client.upsert_calls == []
@@ -339,33 +339,6 @@ class TestDryRunFlow:
         assert "Dense Person" not in out
         assert "DRY-RUN" in out
         assert "credits" in out.lower()
-
-    def test_dry_run_estimate_uses_search_pricing(self, script, capsys):
-        # Synthesize a list of 250 sparse rows so we can exercise the
-        # ceil(N/100)*3 math directly from main().
-        old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
-        rows = [
-            {
-                "linkedin_url": f"https://www.linkedin.com/in/p{i}",
-                "name": f"P {i}",
-                "enriched_at": old,
-                "raw_data": {"current_employers": [{"employer_name": "OldCo"}]},
-            }
-            for i in range(250)
-        ]
-        client = FakeSupabaseClient(rows=rows)
-
-        with patch.object(script, "get_supabase_client", return_value=client):
-            rc = script.main(["--limit", "250", "--max-age-days", "30"])
-
-        out = capsys.readouterr().out
-        assert rc == 0
-        # 250 candidates → 3 batches → 9 credits.
-        assert "9 credits" in out
-        # Make sure the pricing rationale is in the output (the old wording
-        # "3 credits/profile" must NOT survive).
-        assert "3 credits per 100 results" in out
-        assert "3 credits/profile" not in out
 
     def test_dry_run_zero_limit_returns_error(self, script, capsys):
         client = self._make_client(script)
@@ -383,13 +356,13 @@ class TestDryRunFlow:
 
 
 # ---------------------------------------------------------------------------
-# Execute flow (mocked bulk search + DB)
+# Execute flow (mocked Crustdata + DB)
 # ---------------------------------------------------------------------------
 
 
 class TestExecuteFlow:
 
-    def test_execute_calls_bulk_search_and_writes(self, script, capsys):
+    def test_execute_calls_crustdata_and_writes(self, script, capsys):
         old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
         rows = [{
             "linkedin_url": "https://www.linkedin.com/in/gil-gitlin",
@@ -401,35 +374,31 @@ class TestExecuteFlow:
         }]
         client = FakeSupabaseClient(rows=rows)
 
-        # Bulk search returns a dict keyed by flagship_profile_url.
-        fake_search_results = {
-            "https://www.linkedin.com/in/gil-gitlin": {
-                "flagship_profile_url": "https://www.linkedin.com/in/gil-gitlin",
-                "first_name": "Gil",
-                "last_name": "Gitlin",
-                "current_employers": [
-                    {"employer_name": "Unit 8200", "start_date": "2019-01-01"},
-                    {"employer_name": "Cytactic", "employee_title": "Senior Software Engineer",
-                     "start_date": "2025-05-01"},
-                ],
-            }
-        }
+        fake_enrich_response = [{
+            "query_linkedin_profile_urn_or_slug": ["gil-gitlin"],
+            "linkedin_flagship_url": "https://www.linkedin.com/in/gil-gitlin",
+            "first_name": "Gil",
+            "last_name": "Gitlin",
+            "current_employers": [
+                {"employer_name": "Unit 8200", "start_date": "2019-01-01"},
+                {"employer_name": "Cytactic", "employee_title": "Senior Software Engineer",
+                 "start_date": "2025-05-01"},
+            ],
+        }]
 
         with patch.object(script, "get_supabase_client", return_value=client), \
              patch.object(script, "_load_crustdata_api_key", return_value="test-key"), \
-             patch.object(script, "bulk_search_by_flagship_urls",
-                          return_value=fake_search_results) as mock_search, \
+             patch.object(script, "crustdata_enrich_batch", return_value=fake_enrich_response) as mock_enrich, \
              patch.object(script, "save_enriched_profile") as mock_save:
             rc = script.main(["--limit", "5", "--max-age-days", "30", "--execute"])
 
         assert rc == 0
-        mock_search.assert_called_once()
+        mock_enrich.assert_called_once()
         # save_enriched_profile is called with the matched payload + url.
         mock_save.assert_called_once()
         args, kwargs = mock_save.call_args
         assert args[1] == "https://www.linkedin.com/in/gil-gitlin"
-        # The matched value should be the search result dict for this URL.
-        assert args[2] is fake_search_results["https://www.linkedin.com/in/gil-gitlin"]
+        assert args[2] is fake_enrich_response[0]
         out = capsys.readouterr().out
         assert "SUMMARY" in out
         assert "Updated" in out
@@ -437,15 +406,15 @@ class TestExecuteFlow:
     def test_execute_with_no_candidates_short_circuits(self, script, capsys):
         client = FakeSupabaseClient(rows=[])
         with patch.object(script, "get_supabase_client", return_value=client), \
-             patch.object(script, "bulk_search_by_flagship_urls") as mock_search, \
+             patch.object(script, "crustdata_enrich_batch") as mock_enrich, \
              patch.object(script, "_load_crustdata_api_key") as mock_key:
             rc = script.main(["--limit", "5", "--execute"])
         assert rc == 0
-        mock_search.assert_not_called()
+        mock_enrich.assert_not_called()
         mock_key.assert_not_called()
         assert "nothing to do" in capsys.readouterr().out.lower()
 
-    def test_execute_records_failure_when_bulk_search_raises(self, script):
+    def test_execute_records_failure_when_crustdata_raises(self, script):
         old = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
         rows = [{
             "linkedin_url": "https://www.linkedin.com/in/some-person",
@@ -461,9 +430,9 @@ class TestExecuteFlow:
         candidates = script.fetch_sparse_candidates(
             client, max_age_days=30, limit=5, min_current_employers=1
         )
-        with patch.object(script, "bulk_search_by_flagship_urls", side_effect=boom):
+        with patch.object(script, "crustdata_enrich_batch", side_effect=boom):
             stats = script.process_candidates(
-                client, candidates, api_key="test-key", batch_size=100
+                client, candidates, api_key="test-key", batch_size=5
             )
         assert stats["failed"] == 1
         assert stats["updated"] == 0
@@ -471,7 +440,7 @@ class TestExecuteFlow:
 
 
 # ---------------------------------------------------------------------------
-# process_candidates — change detection, not-found path, batching, email
+# Smoke: process_candidates updates change list correctly
 # ---------------------------------------------------------------------------
 
 
@@ -493,21 +462,18 @@ class TestProcessCandidatesChangeDetection:
             "current_employers_count": 1,
         }]
 
-        fake_search_results = {
-            "https://www.linkedin.com/in/x": {
-                "flagship_profile_url": "https://www.linkedin.com/in/x",
-                "current_employers": [
-                    {"employer_name": "New Co", "employee_title": "New Title",
-                     "start_date": "2025-05-01"},
-                ],
-            }
-        }
+        fake_response = [{
+            "query_linkedin_profile_urn_or_slug": ["x"],
+            "current_employers": [
+                {"employer_name": "New Co", "employee_title": "New Title",
+                 "start_date": "2025-05-01"},
+            ],
+        }]
 
-        with patch.object(script, "bulk_search_by_flagship_urls",
-                          return_value=fake_search_results), \
+        with patch.object(script, "crustdata_enrich_batch", return_value=fake_response), \
              patch.object(script, "save_enriched_profile") as mock_save:
             stats = script.process_candidates(
-                client, candidates, api_key="test-key", batch_size=100
+                client, candidates, api_key="test-key", batch_size=5
             )
         assert stats["processed"] == 1
         assert stats["updated"] == 1
@@ -532,183 +498,21 @@ class TestProcessCandidatesChangeDetection:
             "current_employers_count": 1,
         }]
 
-        fake_search_results = {
-            "https://www.linkedin.com/in/y": {
-                "flagship_profile_url": "https://www.linkedin.com/in/y",
-                "current_employers": [
-                    {"employer_name": "Same Co", "employee_title": "Eng",
-                     "start_date": "2024-01-01"},
-                ],
-            }
-        }
+        fake_response = [{
+            "query_linkedin_profile_urn_or_slug": ["y"],
+            "current_employers": [
+                {"employer_name": "Same Co", "employee_title": "Eng",
+                 "start_date": "2024-01-01"},
+            ],
+        }]
 
-        with patch.object(script, "bulk_search_by_flagship_urls",
-                          return_value=fake_search_results), \
+        with patch.object(script, "crustdata_enrich_batch", return_value=fake_response), \
              patch.object(script, "save_enriched_profile") as mock_save:
             stats = script.process_candidates(
-                client, candidates, api_key="test-key", batch_size=100
+                client, candidates, api_key="test-key", batch_size=5
             )
         assert stats["processed"] == 1
         assert stats["updated"] == 0
         assert stats["unchanged"] == 1
         assert stats["failed"] == 0
         mock_save.assert_called_once()
-
-    def test_url_not_in_search_response_is_failed(self, script):
-        """Crustdata may not know a URL (profile deleted, never indexed).
-
-        Those candidates count as `Failed: not found in Crustdata` — not as
-        an updated/unchanged row.
-        """
-        candidates = [{
-            "linkedin_url": "https://www.linkedin.com/in/missing",
-            "name": "Missing Person",
-            "enriched_at": "2026-01-01T00:00:00Z",
-            "current_employers_count": 1,
-        }]
-        client = FakeSupabaseClient(rows=[])
-
-        # Bulk search returns NOTHING for this URL.
-        with patch.object(script, "bulk_search_by_flagship_urls",
-                          return_value={}), \
-             patch.object(script, "save_enriched_profile") as mock_save:
-            stats = script.process_candidates(
-                client, candidates, api_key="test-key", batch_size=100
-            )
-        assert stats["processed"] == 1
-        assert stats["failed"] == 1
-        assert stats["updated"] == 0
-        assert stats["unchanged"] == 0
-        assert mock_save.call_count == 0
-        assert "not found" in stats["failures"][0]["error"].lower()
-
-
-class TestBulkSearchBatching:
-    """The script must split candidate URLs into batches of --batch-size and
-    pass each batch to ``bulk_search_by_flagship_urls`` separately.
-    """
-
-    def test_batches_at_100_boundary(self, script):
-        # 250 candidates with --batch-size=100 → 3 batches: 100, 100, 50.
-        candidates = [
-            {
-                "linkedin_url": f"https://www.linkedin.com/in/p{i}",
-                "name": f"P {i}",
-                "enriched_at": "2026-01-01T00:00:00Z",
-                "current_employers_count": 1,
-            }
-            for i in range(250)
-        ]
-        client = FakeSupabaseClient(rows=[])
-
-        calls = []
-
-        def fake_bulk_search(urls, api_key=None, batch_size=100):
-            calls.append(list(urls))
-            return {}  # Treat all as "not found" — we only care about batching.
-
-        with patch.object(script, "bulk_search_by_flagship_urls",
-                          side_effect=fake_bulk_search):
-            stats = script.process_candidates(
-                client, candidates, api_key="test-key", batch_size=100
-            )
-
-        # 3 batches of size 100, 100, 50.
-        assert len(calls) == 3
-        assert [len(b) for b in calls] == [100, 100, 50]
-        # And every candidate URL appears in exactly one batch.
-        flat = [u for b in calls for u in b]
-        assert len(flat) == 250
-        assert len(set(flat)) == 250
-
-    def test_small_batch_size_splits_correctly(self, script):
-        # 5 candidates with --batch-size=2 → 3 batches: 2, 2, 1.
-        candidates = [
-            {
-                "linkedin_url": f"https://www.linkedin.com/in/p{i}",
-                "name": f"P {i}",
-                "enriched_at": "2026-01-01T00:00:00Z",
-                "current_employers_count": 1,
-            }
-            for i in range(5)
-        ]
-        client = FakeSupabaseClient(rows=[])
-
-        calls = []
-
-        def fake_bulk_search(urls, api_key=None, batch_size=100):
-            calls.append(list(urls))
-            return {}
-
-        with patch.object(script, "bulk_search_by_flagship_urls",
-                          side_effect=fake_bulk_search):
-            script.process_candidates(
-                client, candidates, api_key="test-key", batch_size=2
-            )
-
-        assert [len(b) for b in calls] == [2, 2, 1]
-
-
-class TestEmailPreservation:
-    """The search payload has no email field. The write path must NOT
-    overwrite an existing email column. We verify this end-to-end by:
-
-      1. Letting ``process_candidates`` call the REAL ``save_enriched_profile``
-         against a FakeSupabaseClient (which records upserts).
-      2. Asserting the upserted row does NOT include an ``email`` key — i.e.
-         the upsert leaves the email column untouched (Postgres
-         merge-duplicates only writes columns we send).
-    """
-
-    def test_save_path_does_not_overwrite_email(self, script):
-        # Pre-existing row has a real email; the search result has none.
-        rows = [{
-            "linkedin_url": "https://www.linkedin.com/in/preserved",
-            "name": "Preserved",
-            "current_company": "OldCo",
-            "current_title": "Eng",
-            "email": "preserved@example.com",
-            "email_source": "csv",
-            "raw_data": {},
-        }]
-        client = FakeSupabaseClient(rows=rows)
-        candidates = [{
-            "linkedin_url": "https://www.linkedin.com/in/preserved",
-            "name": "Preserved",
-            "enriched_at": "2026-01-01T00:00:00Z",
-            "current_employers_count": 1,
-        }]
-
-        # The search response brings new employer data but NO email field.
-        fake_search_results = {
-            "https://www.linkedin.com/in/preserved": {
-                "flagship_profile_url": "https://www.linkedin.com/in/preserved",
-                "current_employers": [
-                    {"employer_name": "NewCo", "employee_title": "Senior Eng",
-                     "start_date": "2025-05-01"},
-                ],
-            }
-        }
-
-        with patch.object(script, "bulk_search_by_flagship_urls",
-                          return_value=fake_search_results):
-            # Use the REAL save_enriched_profile so we exercise the write path.
-            script.process_candidates(
-                client, candidates, api_key="test-key", batch_size=100
-            )
-
-        # At least one upsert happened (the new employer data was written).
-        assert client.upsert_calls, "expected save_enriched_profile to upsert"
-        for call in client.upsert_calls:
-            data = call["data"]
-            # The CRITICAL invariant: email must NOT be in the upsert payload.
-            # If it WERE, Postgres merge-duplicates would overwrite the
-            # existing real email with whatever we sent (likely None).
-            assert "email" not in data, (
-                f"upsert payload must not include `email` — got {data!r}. "
-                "Including the column (even as null) would clobber the "
-                "existing email populated by the separate email-flow."
-            )
-            assert "email_source" not in data, (
-                f"upsert payload must not include `email_source` — got {data!r}."
-            )

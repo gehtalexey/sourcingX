@@ -3043,6 +3043,31 @@ def render_filter_sheet_status(filter_sheets: dict, gspread_client) -> bool:
     return False
 
 
+def render_filter_funnel_breakdown(counts: dict) -> None:
+    """Render the per-filter "X candidates dropped by Y filter" funnel summary.
+
+    Used by both the Filter and Filter+ tabs so users see the same shape of
+    drop-off breakdown after applying filters. Reads a {filter_name: count}
+    dict and renders one bullet per non-zero filter, plus a hint if anything
+    was filtered out (or an info message if nothing was).
+
+    Args:
+        counts: Mapping of human-readable filter name -> number removed.
+                Values <= 0 are skipped.
+    """
+    st.divider()
+    st.markdown("### Filtered Candidates Summary")
+    st.caption("Counts of candidates removed by each filter (data not stored to save memory)")
+
+    filter_names = [k for k, v in (counts or {}).items() if v and int(v) > 0]
+    if filter_names:
+        for filter_name in filter_names:
+            st.markdown(f"- **{filter_name}**: {int(counts[filter_name])} removed")
+        st.info("💡 To restore candidates, reload original data and re-apply filters with different settings")
+    else:
+        st.info("No candidates were filtered out")
+
+
 @st.cache_data(ttl=600, max_entries=10, show_spinner="Loading sheet...")
 def load_sheet_as_df(sheet_url: str, worksheet_name: str = None) -> pd.DataFrame:
     """Load a Google Sheet as a pandas DataFrame.
@@ -6783,19 +6808,7 @@ with tab_filter:
 
     # Review filtered candidates section - MEMORY OPTIMIZED: only show counts
     if 'filtered_out_counts' in st.session_state and st.session_state['filtered_out_counts']:
-        st.divider()
-        st.markdown("### Filtered Candidates Summary")
-        st.caption("Counts of candidates removed by each filter (data not stored to save memory)")
-
-        counts = st.session_state['filtered_out_counts']
-        filter_names = [k for k, v in counts.items() if v > 0]
-
-        if filter_names:
-            for filter_name in filter_names:
-                st.markdown(f"- **{filter_name}**: {counts[filter_name]} removed")
-            st.info("💡 To restore candidates, reload original data and re-apply filters with different settings")
-        else:
-            st.info("No candidates were filtered out")
+        render_filter_funnel_breakdown(st.session_state['filtered_out_counts'])
 
     # ===== SalesQL Email Enrichment =====
     st.divider()
@@ -8434,6 +8447,11 @@ with tab_filter2:
                         st.caption("No individual filter breakdown available.")
                     else:
                         st.caption("No profiles were filtered out.")
+
+            # Persistent per-filter funnel breakdown (parity with Filter tab).
+            # Reuses the shared helper so wording/colors stay identical even if
+            # the Filter tab's summary evolves later.
+            render_filter_funnel_breakdown(removed_by)
 
         # Show passed candidates
         st.divider()

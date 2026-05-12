@@ -58,4 +58,5 @@ jobs:
             test_db_search_company_substring.py \
             test_check_monthly_credit_budget.py \
             test_geo_aware_ai_expansion.py \
-            test_api_key_strip.py
+            test_api_key_strip.py \
+            test_enrich_tab_autoload.py

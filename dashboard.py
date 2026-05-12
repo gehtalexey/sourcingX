@@ -509,6 +509,30 @@ def _cached_recently_enriched_urls(months: int) -> list:
     return []
 
 
+# Cap on profiles auto-loaded into the Enrich tab on first open. Keeps the
+# session-state dataframe at a size Streamlit can render without OOMing on the
+# free tier. Users with bigger pools can use Filter+ to narrow further.
+ENRICH_TAB_AUTOLOAD_LIMIT = 5000
+
+
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
+def _fetch_enriched_for_tab(limit: int = ENRICH_TAB_AUTOLOAD_LIMIT) -> list:
+    """Fetch enriched profiles for the Enrich tab auto-load.
+
+    Cached for 5 minutes so reopening the tab in the same session is instant.
+    The DB client is resolved inside the function (not passed in) so Streamlit's
+    cache key stays stable across reruns. Call `.clear()` to force a refresh.
+    """
+    try:
+        from db import get_profiles_by_enrichment_status
+        c = _get_db_client()
+        if c:
+            return get_profiles_by_enrichment_status(c, "enriched", limit=limit)
+    except Exception:
+        pass
+    return []
+
+
 def _start_keep_alive():
     """Ping the app's own URL every 10 minutes to prevent Streamlit Cloud from sleeping."""
     app_url = None
@@ -5451,36 +5475,17 @@ with tab_upload:
                         st.rerun()
                 st.divider()
 
-            # Database restore
+            # Database restore moved into the Enrich tab — enriched profiles
+            # now auto-load when that tab opens. See `_fetch_enriched_for_tab`.
             if HAS_DATABASE:
                 try:
-                    db_client = _get_db_client()
-                    if db_client:
-                        from db import get_profiles_by_enrichment_status
-
-                        # Use module-level cached function for efficiency
-                        enriched_count = _get_db_restore_counts_cached()
-
-                        if enriched_count > 0:
-                            st.markdown("**From Database**")
-                            st.caption("Load enriched profiles from Supabase (screening is always fresh per JD)")
-
-                            if st.button(f"Load Enriched ({enriched_count})", key="resume_enriched"):
-                                profiles = get_profiles_by_enrichment_status(db_client, "enriched", limit=500)  # Reduced for memory
-                                if profiles:
-                                    df = profiles_to_dataframe(profiles)
-                                    st.session_state['results_df'] = df
-                                    st.session_state['original_results_df'] = df.copy()
-                                    st.session_state['enriched_df'] = df
-                                    # Cache raw profile dicts so screening doesn't re-fetch from DB
-                                    # Only for small sets (<= 500) to save memory
-                                    if len(profiles) <= 500:
-                                        st.session_state['enriched_profiles_raw'] = {
-                                            p.get('linkedin_url', ''): p for p in profiles if p.get('raw_data')
-                                        }
-                                    cleanup_memory()
-                                    st.success(f"Loaded {len(profiles)} enriched profiles!")
-                                    st.rerun()
+                    enriched_count = _get_db_restore_counts_cached()
+                    if enriched_count > 0:
+                        st.markdown("**From Database**")
+                        st.caption(
+                            f"{enriched_count:,} enriched profiles available — they load "
+                            "automatically when you open the Enrich tab."
+                        )
                 except Exception as e:
                     st.caption(f"Database restore unavailable: {e}")
 
@@ -7015,9 +7020,89 @@ with tab_enrich:
         st.error("Supabase is not connected. Enrichment is disabled because results won't be saved. Check your supabase_url and supabase_key in secrets.")
     elif not has_crust_key:
         st.warning("Crust Data API key not configured. Add 'api_key' to config.json")
-    elif 'results_df' not in st.session_state or not isinstance(st.session_state.get('results_df'), pd.DataFrame) or st.session_state['results_df'].empty:
-        st.info("Load profiles first (tab 1). Filtering (tab 2) is optional.")
     else:
+        # ----- Auto-load enriched profiles from DB on first tab open -----
+        # Replaces the old manual "Load Enriched (N)" button in the Upload tab.
+        # `enriched_df` is the contract key consumed by the Filter+ and screening
+        # tabs; we also seed `results_df`/`original_results_df` so the rest of
+        # this block (which currently keys off `results_df`) keeps working.
+        needs_autoload = (
+            'results_df' not in st.session_state
+            or not isinstance(st.session_state.get('results_df'), pd.DataFrame)
+            or st.session_state['results_df'].empty
+        )
+        if needs_autoload:
+            with st.spinner("Loading enriched profiles... this may take a few seconds for large databases"):
+                try:
+                    profiles = _fetch_enriched_for_tab(ENRICH_TAB_AUTOLOAD_LIMIT)
+                except Exception as e:
+                    profiles = None
+                    st.error(f"Failed to load enriched profiles: {e}")
+                    if st.button("Retry", key="enrich_autoload_retry"):
+                        _fetch_enriched_for_tab.clear()
+                        _get_db_restore_counts_cached.clear()
+                        st.rerun()
+                    st.stop()
+
+                if profiles:
+                    df = profiles_to_dataframe(profiles)
+                    st.session_state['results_df'] = df
+                    st.session_state['original_results_df'] = df.copy()
+                    st.session_state['enriched_df'] = df
+                    # Preserve the downstream contract used by screening — only
+                    # populate `enriched_profiles_raw` when the set is small
+                    # enough to hold in memory (mirrors the old manual flow).
+                    if len(profiles) <= ENRICH_TAB_AUTOLOAD_LIMIT:
+                        st.session_state['enriched_profiles_raw'] = {
+                            p.get('linkedin_url', ''): p for p in profiles if p.get('raw_data')
+                        }
+                    cleanup_memory()
+
+            # Caption + refresh control. Total count comes from the existing
+            # module-level cached counter so we don't double-query.
+            try:
+                total_enriched = _get_db_restore_counts_cached()
+            except Exception:
+                total_enriched = 0
+            loaded_n = len(st.session_state.get('results_df', pd.DataFrame()))
+
+            caption_col, refresh_col = st.columns([5, 1])
+            with caption_col:
+                if total_enriched and total_enriched > ENRICH_TAB_AUTOLOAD_LIMIT:
+                    st.caption(
+                        f"Showing {ENRICH_TAB_AUTOLOAD_LIMIT:,} of {total_enriched:,} "
+                        f"enriched profiles. Use the Filter+ tab to narrow further."
+                    )
+                elif loaded_n:
+                    st.caption(f"Loaded {loaded_n:,} enriched profile(s) from database.")
+                else:
+                    st.caption("No enriched profiles in database yet. Upload + enrich a list to start.")
+            with refresh_col:
+                if st.button("Refresh", key="enrich_autoload_refresh", help="Re-fetch enriched profiles from Supabase"):
+                    _fetch_enriched_for_tab.clear()
+                    _get_db_restore_counts_cached.clear()
+                    for key in ('results_df', 'original_results_df', 'enriched_df', 'enriched_profiles_raw'):
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    st.rerun()
+
+            # If the auto-load came back empty there's nothing for the rest of
+            # the Enrich block to render — bail out cleanly.
+            if 'results_df' not in st.session_state or st.session_state['results_df'].empty:
+                st.stop()
+        else:
+            # Data already in session — still expose a refresh affordance so
+            # the user can force a re-fetch from Supabase without restarting.
+            _, refresh_col_inline = st.columns([5, 1])
+            with refresh_col_inline:
+                if st.button("Refresh", key="enrich_autoload_refresh_inline", help="Re-fetch enriched profiles from Supabase"):
+                    _fetch_enriched_for_tab.clear()
+                    _get_db_restore_counts_cached.clear()
+                    for key in ('results_df', 'original_results_df', 'enriched_df', 'enriched_profiles_raw'):
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    st.rerun()
+
         # Use filtered data if available (from Filter+ tab), otherwise use loaded data
         passed_df = st.session_state.get('passed_candidates_df')
         using_filtered = passed_df is not None and not passed_df.empty

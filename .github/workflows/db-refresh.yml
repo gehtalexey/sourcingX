@@ -3,7 +3,10 @@ name: DB Refresh (sparse profiles)
 # Daily auto-refresh of stale, sparse profiles.
 #
 # Guardrails (enforced in code, not just here):
-#   1) Daily cap: --limit 250 profiles per run (~750 Crustdata credits).
+#   1) Daily cap: --limit 250 profiles per run. The refresh script uses
+#      Crustdata's people_search_db endpoint (3 credits per 100 results),
+#      so 250 profiles costs ~9 credits — one billing unit per
+#      100-URL batch, not per profile.
 #   2) Monthly hard cap: 22,000 Crustdata credits across all consumers.
 #      Enforced by scripts/check_monthly_credit_budget.py before the refresh
 #      script runs. If proceeding would breach the cap, the workflow logs
@@ -24,11 +27,16 @@ permissions:
 # Configurable caps. To adjust, edit these AND the --limit flag below.
 env:
   DAILY_LIMIT: '250'
-  PROJECTED_DAILY_SPEND: '750'      # 250 profiles * 3 credits/profile
+  # Search-based pricing: 3 credits per 100 results. 250 profiles needs
+  # ceil(250/100) = 3 search requests = 9 credits. We project 30 (3x
+  # headroom) so the monthly-budget preflight has a defensive margin and
+  # we still skip a run if MTD spend is genuinely close to the cap.
+  PROJECTED_DAILY_SPEND: '30'
   MONTHLY_CAP: '22000'
   MAX_AGE_DAYS: '30'
   MIN_CURRENT_EMPLOYERS: '1'
-  BATCH_SIZE: '5'
+  # Batch size for people_search_db (max 100 = one 3-credit billing unit).
+  BATCH_SIZE: '100'
 
 jobs:
   refresh:
@@ -174,9 +182,17 @@ jobs:
           projected_total = preflight.get("projected_total", "?")
 
           # Estimate today's spend from the actual processed count.
-          # 3 credits/profile is the Crustdata enrich rate (see usage_tracker.CRUSTDATA_PRICING).
+          # The refresh script uses Crustdata's people_search_db endpoint
+          # (3 credits per 100 results), so a run that processed N profiles
+          # cost ceil(N / 100) * 3 credits — one billing unit per search
+          # batch, regardless of how many of the URLs in the batch resolved.
+          import math
           try:
-              today_spend = int(processed) * 3
+              processed_int = int(processed)
+              if processed_int <= 0:
+                  today_spend = 0
+              else:
+                  today_spend = math.ceil(processed_int / 100) * 3
           except Exception:
               today_spend = "?"
 

@@ -49,6 +49,7 @@ jobs:
             test_profiles_status_dropped.py \
             test_company_filter_matching.py \
             test_hard_constraints_prompt.py \
+            test_screening_policy_consolidation.py \
             test_tenure_constraint_override.py \
             test_pick_current_employer.py \
             test_reenrich_sparse_profiles.py \
@@ -60,4 +61,5 @@ jobs:
             test_geo_aware_ai_expansion.py \
             test_api_key_strip.py \
             test_filter_funnel_breakdown.py \
+            test_csv_upload_clears_derived_state.py \
             test_crustdata_title_variants.py

@@ -121,6 +121,10 @@ def run(args):
     def screen_one(profile):
         name = profile.get("name") or "Unknown"
         t0 = time.time()
+        # NOTE: The dashboard now uses a single unified screening_policy path —
+        # role-specific prompts (ROLE_PROMPT/VP_MARKETING_NYC) are no longer
+        # honored by screen_profile(). The recruiter's intent is passed via
+        # user_request instead. We feed the JD text so the policy has context.
         result = screen_profile(
             profile=profile,
             job_description=jd,
@@ -128,7 +132,7 @@ def run(args):
             mode=mode,
             ai_model=model,
             ai_provider=provider,
-            role_prompt=ROLE_PROMPT,
+            user_request=jd,
         )
         elapsed = round(time.time() - t0, 2)
         return {

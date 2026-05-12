@@ -56,4 +56,5 @@ jobs:
             test_helpers_extract_display_fields.py \
             test_db_search_ai_expansion.py \
             test_check_monthly_credit_budget.py \
-            test_geo_aware_ai_expansion.py
+            test_geo_aware_ai_expansion.py \
+            test_api_key_strip.py

@@ -139,7 +139,11 @@ def main():
 
     input_file = sys.argv[1]
 
-    # Load API key from environment or config
+    # Load API key from environment or config.
+    # .strip() guards against stray leading/trailing whitespace (e.g. a
+    # trailing newline left by `gh secret set --body`) that would otherwise
+    # break the HTTP header layer with "Invalid leading whitespace, reserved
+    # character(s), or return character(s) in header value".
     api_key = None
     config_path = Path(__file__).parent / 'config.json'
 
@@ -151,6 +155,9 @@ def main():
     if not api_key:
         import os
         api_key = os.environ.get('CRUSTDATA_API_KEY')
+
+    if api_key:
+        api_key = api_key.strip()
 
     if not api_key:
         print("Error: No API key found.")

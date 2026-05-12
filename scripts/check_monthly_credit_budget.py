@@ -206,7 +206,13 @@ def main(argv: Optional[list] = None) -> int:
         return EXIT_ERROR
 
     # Validate Supabase env up front — clearer error than letting select() 500.
-    if not os.environ.get("SUPABASE_URL") or not os.environ.get("SUPABASE_KEY"):
+    # .strip() guards against whitespace-only / trailing-newline secrets (e.g.
+    # from a sloppy `gh secret set --body`) which would otherwise pass this
+    # presence check but fail inside get_supabase_client(). The actual
+    # whitespace stripping for the runtime URL/key happens in get_supabase_client.
+    _sup_url = (os.environ.get("SUPABASE_URL") or "").strip()
+    _sup_key = (os.environ.get("SUPABASE_KEY") or "").strip()
+    if not _sup_url or not _sup_key:
         print(
             "ERROR: SUPABASE_URL and SUPABASE_KEY must both be set in the environment.",
             file=sys.stderr,

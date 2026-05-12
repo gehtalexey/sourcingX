@@ -89,7 +89,12 @@ def _load_crustdata_api_key() -> str:
     """Load the Crustdata API key from config.json or CRUSTDATA_API_KEY.
 
     Mirrors the pattern in ``enrich.py`` and ``crustdata_search.py``. Never
-    prints the key.
+    prints the key. The returned key is .strip()ed so a stray trailing
+    newline (most commonly from a sloppy ``gh secret set --body`` invocation)
+    doesn't blow up the HTTP header layer with "Invalid leading whitespace,
+    reserved character(s), or return character(s) in header value". This
+    incident happened on 2026-05-12 to the daily db-refresh cron and motivated
+    the strip.
     """
     config_path = REPO_ROOT / "config.json"
     if config_path.exists():
@@ -98,13 +103,13 @@ def _load_crustdata_api_key() -> str:
                 config = json.load(f)
                 api_key = config.get("api_key")
                 if api_key and api_key != "YOUR_CRUSTDATA_API_KEY_HERE":
-                    return api_key
+                    return api_key.strip()
         except (json.JSONDecodeError, IOError):
             pass
 
     api_key = os.environ.get("CRUSTDATA_API_KEY")
     if api_key:
-        return api_key
+        return api_key.strip()
 
     raise RuntimeError(
         "No Crustdata API key found. Add `api_key` to config.json or set "

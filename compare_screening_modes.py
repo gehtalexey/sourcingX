@@ -32,10 +32,13 @@ if not config_path.exists():
 with open(config_path) as f:
     config = json.load(f)
 
-OPENAI_KEY    = config.get("openai_api_key", "")
-ANTHROPIC_KEY = config.get("anthropic_api_key", "")
-SUPABASE_URL  = config.get("supabase_url", "")
-SUPABASE_KEY  = config.get("supabase_key", "")
+# .strip() guards against stray leading/trailing whitespace (e.g. trailing
+# newline from `gh secret set --body`) which would otherwise corrupt HTTP
+# headers downstream. Only outer whitespace is stripped.
+OPENAI_KEY    = config.get("openai_api_key", "").strip()
+ANTHROPIC_KEY = config.get("anthropic_api_key", "").strip()
+SUPABASE_URL  = config.get("supabase_url", "").strip()
+SUPABASE_KEY  = config.get("supabase_key", "").strip()
 
 if not OPENAI_KEY:
     print("ERROR: openai_api_key not set in config.json")

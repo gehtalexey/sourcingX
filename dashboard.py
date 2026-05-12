@@ -754,13 +754,30 @@ def load_config():
 
     return config
 
+def _strip_secret(val):
+    """Return ``val`` with surrounding whitespace removed, or ``val`` unchanged
+    when falsy (so empty/None semantics are preserved for callers that test
+    truthiness).
+
+    Defensive against secrets stored with a stray leading/trailing newline —
+    most often a trailing ``\\n`` from a sloppy ``gh secret set --body``
+    invocation — which otherwise blow up the HTTP layer with cryptic errors
+    like "Invalid leading whitespace, reserved character(s), or return
+    character(s) in header value". Only strips outer whitespace; an embedded
+    space in the middle of a key is left alone.
+    """
+    if val and isinstance(val, str):
+        return val.strip()
+    return val
+
+
 def load_api_key():
     config = load_config()
-    return config.get('api_key')
+    return _strip_secret(config.get('api_key'))
 
 def load_openai_key():
     config = load_config()
-    return config.get('openai_api_key')
+    return _strip_secret(config.get('openai_api_key'))
 
 def load_anthropic_key():
     config = load_config()
@@ -773,22 +790,22 @@ def load_anthropic_key():
                 key = st.secrets['ANTHROPIC_API_KEY']
         except Exception:
             pass
-    return key
+    return _strip_secret(key)
 
 
 def load_phantombuster_key():
     config = load_config()
-    return config.get('phantombuster_api_key')
+    return _strip_secret(config.get('phantombuster_api_key'))
 
 
 def load_phantombuster_agent_id():
     config = load_config()
-    return config.get('phantombuster_agent_id')
+    return _strip_secret(config.get('phantombuster_agent_id'))
 
 
 def load_salesql_key():
     config = load_config()
-    return config.get('salesql_api_key')
+    return _strip_secret(config.get('salesql_api_key'))
 
 
 # ===== Export Helpers =====

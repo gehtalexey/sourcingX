@@ -85,7 +85,13 @@ CREDITS_PER_100_RESULTS = 3
 # =============================================================================
 
 def _load_api_key() -> str:
-    """Load Crustdata API key from config.json or environment."""
+    """Load Crustdata API key from config.json or environment.
+
+    The returned key is .strip()ed so a stray trailing newline (common when a
+    secret is set via ``gh secret set --body``) doesn't poison the HTTP header
+    layer with errors like "Invalid leading whitespace, reserved character(s),
+    or return character(s) in header value".
+    """
     config_path = Path(__file__).parent / 'config.json'
 
     if config_path.exists():
@@ -94,7 +100,7 @@ def _load_api_key() -> str:
                 config = json.load(f)
                 api_key = config.get('api_key')
                 if api_key and api_key != "YOUR_CRUSTDATA_API_KEY_HERE":
-                    return api_key
+                    return api_key.strip()
         except (json.JSONDecodeError, IOError):
             pass
 
@@ -102,7 +108,7 @@ def _load_api_key() -> str:
     import os
     api_key = os.environ.get('CRUSTDATA_API_KEY')
     if api_key:
-        return api_key
+        return api_key.strip()
 
     raise AuthenticationError(
         "Crustdata",

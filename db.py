@@ -196,7 +196,13 @@ class SupabaseClient:
 
 
 def get_supabase_client() -> Optional[SupabaseClient]:
-    """Get Supabase client from config.json, Streamlit secrets, or environment."""
+    """Get Supabase client from config.json, Streamlit secrets, or environment.
+
+    Credentials are .strip()ed so a stray trailing newline (common when a
+    secret is set via ``gh secret set --body``) doesn't poison the HTTP header
+    layer with errors like "Invalid leading whitespace, reserved character(s),
+    or return character(s) in header value".
+    """
     url = None
     key = None
 
@@ -226,6 +232,13 @@ def get_supabase_client() -> Optional[SupabaseClient]:
         url = os.environ.get('SUPABASE_URL')
     if not key:
         key = os.environ.get('SUPABASE_KEY')
+
+    # Defensive strip: remove stray whitespace/newlines from any source so the
+    # values are safe to use as URL + HTTP header below.
+    if url:
+        url = url.strip()
+    if key:
+        key = key.strip()
 
     if url and key:
         return SupabaseClient(url, key)

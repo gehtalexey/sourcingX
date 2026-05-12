@@ -16,8 +16,25 @@ For those rows we have to re-pull from Crustdata. This script:
 
   1) Selects candidates from Supabase (filter on enriched_at + array length).
   2) DRY-RUN by default — prints the count, the first 10, and the credit cost.
-  3) On --execute, re-pulls each candidate from Crustdata in small batches,
-     writes the new raw_data + indexed columns back via db.save_enriched_profile.
+  3) On --execute, bulk-pulls candidates from Crustdata via the people_search_db
+     endpoint (3 credits per 100 results — ~1/80th the cost of per-profile
+     enrich), writes the new raw_data + indexed columns back via
+     ``db.save_enriched_profile``.
+
+Search vs enrich
+----------------
+
+Earlier versions of this script called the per-profile enrich endpoint, which
+costs 3 credits PER PROFILE. The search endpoint returns the same profile
+shape (``current_employers``, ``past_employers``, ``skills``, ``all_employers``,
+``all_titles``, ``all_schools``, etc.) at 3 credits per 100 results — i.e. a
+single batched call refreshes up to 100 profiles for the same 3 credits one
+enrich call would burn. The cost ratio is ~80x in our favour.
+
+The one trade-off: search returns NO personal email. That's fine — emails are
+populated by a separate flow (CSV import or `people_enrich`), and the daily
+refresh is about keeping current employer/title fresh, not about email. The
+write path therefore PRESERVES any existing email already in the row.
 
 Safety defaults:
   - --limit is REQUIRED. The script refuses to run without it.
@@ -54,30 +71,26 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import requests
 
 # Make repo root importable when running the script directly.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from api_helpers import get_rate_limiter  # noqa: E402
+from crustdata_search import bulk_search_by_flagship_urls  # noqa: E402
 from db import get_supabase_client, save_enriched_profile  # noqa: E402
-from normalizers import normalize_crustdata_profile, pick_current_employer  # noqa: E402
+from normalizers import normalize_linkedin_url, pick_current_employer  # noqa: E402
 
 
-CRUSTDATA_ENRICH_ENDPOINT = "https://api.crustdata.com/screener/person/enrich"
+# Crustdata pricing for people_search_db: 3 credits per 100 results, billed
+# per request (not per result returned). One batch of <=100 URLs costs 3
+# credits regardless of how many of them resolve.
+CREDITS_PER_SEARCH_BATCH = 3
+SEARCH_RESULTS_PER_BATCH = 100
 
-# Crustdata pricing for people-enrich. The repo's usage tracker records
-# 3 credits/profile (see usage_tracker.CRUSTDATA_PRICING). This is the rate
-# we use for the dry-run estimate; the live `crustdata_credits_check` endpoint
-# is the source of truth if Crustdata ever changes pricing.
-CREDITS_PER_ENRICH_PROFILE = 3
-
-# Crustdata's enrich endpoint accepts a comma-separated batch. We keep the
-# batch small for this maintenance job — the cost is the same, and small
-# batches make per-profile logging cleaner.
-DEFAULT_BATCH_SIZE = 5
+# Default search batch size — keep at 100 so each batch maps to exactly one
+# 3-credit billing unit and response payloads stay manageable.
+DEFAULT_BATCH_SIZE = 100
 
 
 # =============================================================================
@@ -194,88 +207,22 @@ def fetch_sparse_candidates(
 
 
 # =============================================================================
-# CRUSTDATA CALL
+# COST ESTIMATION
 # =============================================================================
 
 
-def crustdata_enrich_batch(
-    urls: List[str],
-    api_key: str,
-    timeout: int = 120,
-) -> List[Dict[str, Any]]:
-    """Call Crustdata's people-enrich endpoint for a batch of LinkedIn URLs.
+def _estimate_credits(num_candidates: int, batch_size: int = DEFAULT_BATCH_SIZE) -> int:
+    """Estimate credits for a bulk search refresh.
 
-    Uses the same endpoint + auth header as enrich.py / dashboard.enrich_batch.
-    We don't reuse those callers because enrich.py is a CLI main() and
-    dashboard.enrich_batch depends on Streamlit session state.
-
-    Returns the list of profile dicts as Crustdata returns them. On error,
-    raises an exception so the caller can decide how to handle.
+    Crustdata bills 3 credits per request, regardless of how many of the
+    requested URLs resolved. We chunk into ``batch_size``-sized requests,
+    so the estimate is ``ceil(N / batch_size) * 3``.
     """
-    if not urls:
-        return []
-
-    limiter = get_rate_limiter("crustdata")
-    limiter.wait_if_needed()
-    try:
-        response = requests.get(
-            CRUSTDATA_ENRICH_ENDPOINT,
-            params={"linkedin_profile_url": ",".join(urls)},
-            headers={"Authorization": f"Token {api_key}"},
-            timeout=timeout,
-        )
-    finally:
-        limiter.record_request()
-
-    if response.status_code != 200:
-        # Don't echo the auth header. response.text is body only.
-        raise RuntimeError(
-            f"Crustdata enrich failed: HTTP {response.status_code}: "
-            f"{response.text[:300]}"
-        )
-
-    data = response.json()
-    if isinstance(data, list):
-        return data
-    return [data] if isinstance(data, dict) else []
-
-
-def _match_response_to_input(
-    response: List[Dict[str, Any]],
-    input_url: str,
-) -> Optional[Dict[str, Any]]:
-    """Find the Crustdata result that matches a given input URL.
-
-    Crustdata echoes the input in ``query_linkedin_profile_urn_or_slug``. We
-    extract the slug from the input URL and look for the response item whose
-    echo matches. Falls back to ``linkedin_flagship_url`` slug.
-    """
-    def slug(url: Optional[str]) -> Optional[str]:
-        if not url or "/in/" not in str(url).lower():
-            return None
-        return str(url).lower().split("/in/")[-1].rstrip("/").split("?")[0]
-
-    target = slug(input_url)
-    if not target:
-        # Without a slug we can't match anything reliably.
-        return response[0] if len(response) == 1 else None
-
-    for item in response:
-        if not isinstance(item, dict):
-            continue
-        query = item.get("query_linkedin_profile_urn_or_slug") or []
-        if isinstance(query, list) and query:
-            if str(query[0]).lower() == target:
-                return item
-        # Fallback: match on flagship URL slug.
-        flag_slug = slug(item.get("linkedin_flagship_url") or item.get("linkedin_url"))
-        if flag_slug and flag_slug == target:
-            return item
-
-    # Last resort: if there is exactly one response item, take it.
-    if len(response) == 1 and isinstance(response[0], dict):
-        return response[0]
-    return None
+    if num_candidates <= 0:
+        return 0
+    if batch_size <= 0:
+        batch_size = SEARCH_RESULTS_PER_BATCH
+    return math.ceil(num_candidates / batch_size) * CREDITS_PER_SEARCH_BATCH
 
 
 # =============================================================================
@@ -298,14 +245,31 @@ def process_candidates(
     batch_size: int = DEFAULT_BATCH_SIZE,
     verbose: bool = False,
 ) -> Dict[str, Any]:
-    """Re-enrich candidates and write the new data back.
+    """Re-enrich candidates via bulk search and write the new data back.
+
+    Flow (see module docstring for the cost rationale):
+
+      1. Collect candidate URLs.
+      2. Call ``bulk_search_by_flagship_urls`` — one search request per batch
+         of up to ``batch_size`` URLs (default 100). Each request costs
+         exactly 3 credits.
+      3. For each candidate URL:
+         - If absent from the search response → record
+           ``Failed: not found in Crustdata``.
+         - Else → upsert via ``save_enriched_profile`` and compare
+           ``current_company`` to the stored value to classify as Updated
+           or Unchanged.
+
+    The write path PRESERVES any existing ``email`` on the row. We never
+    overwrite the email column with "" or null — the search payload has no
+    email, and ``save_enriched_profile`` only writes columns we pass.
 
     Returns a stats dict:
       {
         'processed': int,         # candidates we attempted
         'updated': int,           # rows where current_company actually changed
         'unchanged': int,         # re-enriched but current_company same as before
-        'failed': int,            # API or DB errors
+        'failed': int,            # API or DB errors (or "not found")
         'failures': [ {url, error}, ... ],
         'changes': [ {url, name, before, after}, ... ],
       }
@@ -319,98 +283,152 @@ def process_candidates(
         "changes": [],
     }
 
-    batches = [candidates[i:i + batch_size] for i in range(0, len(candidates), batch_size)]
+    # Build the URL list once. Use the stored DB URL as the key — that's the
+    # public ``flagship_profile_url`` form Crustdata will echo back.
+    urls = [c["linkedin_url"] for c in candidates if c.get("linkedin_url")]
+    if not urls:
+        return stats
+
+    # Chunk into batches so we can show per-batch progress in verbose mode and
+    # bound any single failure to one billing unit.
+    batches = [urls[i:i + batch_size] for i in range(0, len(urls), batch_size)]
     total_batches = len(batches)
 
-    for batch_idx, batch in enumerate(batches, start=1):
-        urls = [c["linkedin_url"] for c in batch if c.get("linkedin_url")]
-        if not urls:
-            continue
+    # Merge all batch results into one map keyed by flagship URL.
+    search_results: Dict[str, Dict[str, Any]] = {}
+    # URLs whose batch raised an exception — we record them as failed up front
+    # and skip them in the per-candidate resolution loop so we don't double-count.
+    batch_failed_urls: Dict[str, str] = {}
+    candidates_by_url = {c["linkedin_url"]: c for c in candidates if c.get("linkedin_url")}
 
+    for batch_idx, batch_urls in enumerate(batches, start=1):
         if verbose:
-            print(f"[batch {batch_idx}/{total_batches}] enriching {len(urls)} profile(s)...")
+            print(f"[batch {batch_idx}/{total_batches}] searching {len(batch_urls)} profile(s)...")
 
         try:
-            response = crustdata_enrich_batch(urls, api_key)
+            batch_results = bulk_search_by_flagship_urls(
+                batch_urls,
+                api_key=api_key,
+                batch_size=len(batch_urls),
+            )
         except Exception as e:
-            for c in batch:
-                stats["failed"] += 1
-                stats["failures"].append({
-                    "linkedin_url": c.get("linkedin_url"),
-                    "name": c.get("name"),
-                    "error": f"crustdata call failed: {str(e)[:200]}",
-                })
+            # Whole batch failed — mark every URL as failed in a dedicated
+            # set so the resolution loop skips them (avoids double-counting).
+            err_msg = f"crustdata search failed: {str(e)[:200]}"
+            for url in batch_urls:
+                batch_failed_urls[url] = err_msg
+                if verbose:
+                    cand = candidates_by_url.get(url, {})
+                    print(f"  FAIL {cand.get('name') or url}: search {e}")
+            # Be polite between batches; the rate limiter already throttles.
+            if batch_idx < total_batches:
+                time.sleep(0.5)
             continue
 
-        for c in batch:
-            stats["processed"] += 1
-            url = c["linkedin_url"]
-            name = c.get("name") or "(no name)"
+        # Also key by normalized form so URLs that came back in a slightly
+        # different shape still match. We trust Crustdata's
+        # `flagship_profile_url` to be the canonical public URL.
+        for key, profile in batch_results.items():
+            search_results[key] = profile
+            norm = normalize_linkedin_url(key)
+            if norm and norm not in search_results:
+                search_results[norm] = profile
 
-            matched = _match_response_to_input(response, url)
-            if not matched or matched.get("error"):
-                err = (matched or {}).get("error") if matched else "no match in response"
-                stats["failed"] += 1
-                stats["failures"].append({
-                    "linkedin_url": url,
-                    "name": name,
-                    "error": f"no enrichment data: {err}",
-                })
-                if verbose:
-                    print(f"  FAIL {name}: {err}")
-                continue
-
-            # Pull current_company "before" for change tracking.
-            before_row = client.select(
-                "profiles",
-                columns="current_company,current_title,raw_data",
-                filters={"linkedin_url": f"eq.{url}"},
-                limit=1,
-            )
-            before_company = None
-            before_title = None
-            if before_row:
-                before_company = before_row[0].get("current_company")
-                before_title = before_row[0].get("current_title")
-
-            # Compute "after" from the new Crustdata payload.
-            new_emp = pick_current_employer(matched.get("current_employers"))
-            after_company = (new_emp or {}).get("employer_name") or (new_emp or {}).get("company_name")
-            after_title = (new_emp or {}).get("employee_title") or (new_emp or {}).get("title")
-
-            try:
-                save_enriched_profile(client, url, matched, original_url=url)
-            except Exception as e:
-                stats["failed"] += 1
-                stats["failures"].append({
-                    "linkedin_url": url,
-                    "name": name,
-                    "error": f"db write failed: {str(e)[:200]}",
-                })
-                if verbose:
-                    print(f"  FAIL {name}: db write {e}")
-                continue
-
-            changed = bool(after_company) and (before_company != after_company)
-            if changed:
-                stats["updated"] += 1
-                stats["changes"].append({
-                    "linkedin_url": url,
-                    "name": name,
-                    "before": f"{before_title or '—'} @ {before_company or '—'}",
-                    "after": _summarize_employer(new_emp),
-                })
-                if verbose:
-                    print(f"  UPDATED {name}: {before_company!r} -> {after_company!r}")
-            else:
-                stats["unchanged"] += 1
-                if verbose:
-                    print(f"  unchanged {name} (current_company still {before_company!r})")
-
-        # Be polite between batches (the rate limiter already throttles, but
-        # this gives external services a beat).
         if batch_idx < total_batches:
             time.sleep(0.5)
+
+    # Now resolve each candidate against the merged map.
+    for c in candidates:
+        stats["processed"] += 1
+        url = c.get("linkedin_url")
+        name = c.get("name") or "(no name)"
+
+        if not url:
+            stats["failed"] += 1
+            stats["failures"].append({
+                "linkedin_url": url,
+                "name": name,
+                "error": "candidate has no linkedin_url",
+            })
+            continue
+
+        # If this URL's whole batch errored out, count it once here.
+        if url in batch_failed_urls:
+            stats["failed"] += 1
+            stats["failures"].append({
+                "linkedin_url": url,
+                "name": name,
+                "error": batch_failed_urls[url],
+            })
+            continue
+
+        matched = search_results.get(url)
+        if matched is None:
+            norm = normalize_linkedin_url(url)
+            if norm:
+                matched = search_results.get(norm)
+        if matched is None:
+            stats["failed"] += 1
+            stats["failures"].append({
+                "linkedin_url": url,
+                "name": name,
+                "error": "not found in Crustdata",
+            })
+            if verbose:
+                print(f"  FAIL {name}: not found in Crustdata")
+            continue
+
+        # Pull current_company "before" for change tracking.
+        before_row = client.select(
+            "profiles",
+            columns="current_company,current_title,raw_data",
+            filters={"linkedin_url": f"eq.{url}"},
+            limit=1,
+        )
+        before_company = None
+        before_title = None
+        if before_row:
+            before_company = before_row[0].get("current_company")
+            before_title = before_row[0].get("current_title")
+
+        # Compute "after" from the new Crustdata payload.
+        new_emp = pick_current_employer(matched.get("current_employers"))
+        after_company = (new_emp or {}).get("employer_name") or (new_emp or {}).get("company_name")
+        after_title = (new_emp or {}).get("employee_title") or (new_emp or {}).get("title")
+
+        try:
+            # NOTE: save_enriched_profile does NOT touch the email column
+            # when called without an email argument — see _prepare_profile_row
+            # in db.py. That's the contract that lets the daily refresh keep
+            # current_company/title fresh without nuking emails the email-flow
+            # populated.
+            save_enriched_profile(client, url, matched, original_url=url)
+        except Exception as e:
+            stats["failed"] += 1
+            stats["failures"].append({
+                "linkedin_url": url,
+                "name": name,
+                "error": f"db write failed: {str(e)[:200]}",
+            })
+            if verbose:
+                print(f"  FAIL {name}: db write {e}")
+            continue
+
+        changed = bool(after_company) and (before_company != after_company)
+        if changed:
+            stats["updated"] += 1
+            stats["changes"].append({
+                "linkedin_url": url,
+                "name": name,
+                "before": f"{before_title or '—'} @ {before_company or '—'}",
+                "after": _summarize_employer(new_emp),
+            })
+            if verbose:
+                print(f"  UPDATED {name}: {before_company!r} -> {after_company!r}")
+        else:
+            stats["unchanged"] += 1
+            if verbose:
+                print(f"  unchanged {name} (current_company still {before_company!r})")
 
     return stats
 
@@ -462,13 +480,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--batch-size",
         type=int,
         default=DEFAULT_BATCH_SIZE,
-        help=f"Crustdata batch size (default: {DEFAULT_BATCH_SIZE}).",
+        help=f"Crustdata search batch size (default: {DEFAULT_BATCH_SIZE}). "
+             "Each batch costs 3 credits regardless of size.",
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
-        help="Print per-profile progress during --execute.",
+        help="Print per-batch progress during --execute.",
     )
     return parser
 
@@ -478,13 +497,17 @@ def _print_dry_run(candidates: List[Dict[str, Any]], args: argparse.Namespace) -
     print(f"  --max-age-days        = {args.max_age_days}")
     print(f"  --min-current-employers = {args.min_current_employers}")
     print(f"  --limit               = {args.limit}")
+    print(f"  --batch-size          = {args.batch_size}")
     print(f"  matched               = {len(candidates)} profile(s)")
 
-    estimated_credits = len(candidates) * CREDITS_PER_ENRICH_PROFILE
+    estimated_credits = _estimate_credits(len(candidates), batch_size=args.batch_size)
+    num_batches = math.ceil(len(candidates) / args.batch_size) if candidates else 0
     print(
         f"\nEstimated credit cost: {estimated_credits} credits "
-        f"({CREDITS_PER_ENRICH_PROFILE} credits/profile, "
-        f"confirm rate with `crustdata_credits_check`)."
+        f"(ceil({len(candidates)} / {args.batch_size}) = {num_batches} search "
+        f"request(s) x {CREDITS_PER_SEARCH_BATCH} credits/request — "
+        f"people_search_db pricing is 3 credits per 100 results, not 3 "
+        f"credits per profile)."
     )
 
     if not candidates:
@@ -569,9 +592,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
 
+    estimated = _estimate_credits(len(candidates), batch_size=args.batch_size)
     print(
-        f"[EXECUTE] Re-enriching {len(candidates)} profile(s) — "
-        f"~{len(candidates) * CREDITS_PER_ENRICH_PROFILE} credits."
+        f"[EXECUTE] Re-enriching {len(candidates)} profile(s) via bulk search "
+        f"— ~{estimated} credits."
     )
 
     stats = process_candidates(

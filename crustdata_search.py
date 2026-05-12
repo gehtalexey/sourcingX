@@ -640,6 +640,113 @@ def search_people_db(
         )
 
 
+def bulk_search_by_flagship_urls(
+    urls: List[str],
+    api_key: str = None,
+    batch_size: int = 100,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Bulk-fetch full profile data for a list of public LinkedIn URLs.
+
+    Uses the people_search_db endpoint with a single ``flagship_profile_url in
+    [...]`` filter per batch. Pricing is 3 credits per 100 results — i.e. one
+    batch of up to 100 URLs costs 3 credits regardless of how many URLs we
+    pass (vs. 3 credits per profile for the enrich endpoint).
+
+    Notes on URL matching:
+      - Our DB stores public LinkedIn URLs (``https://www.linkedin.com/in/<slug>``).
+      - Crustdata exposes that public form on the ``flagship_profile_url``
+        field. Their ``linkedin_profile_url`` is the internal ``ACoAA...`` URN.
+      - Filtering by ``flagship_profile_url`` is therefore the right match
+        column for "give me the profiles whose public URL is X".
+
+    Args:
+        urls: List of full public LinkedIn URLs (e.g.
+            ``https://www.linkedin.com/in/<slug>``). Duplicates are deduped.
+        api_key: Optional Crustdata API key. If omitted, loaded from
+            ``config.json`` / ``CRUSTDATA_API_KEY``.
+        batch_size: Max URLs per request (default 100). Crustdata's hard cap
+            is 1000, but we keep batches at 100 to (a) match the per-100-result
+            billing batch and (b) keep response payload sizes manageable.
+
+    Returns:
+        Dict keyed by ``flagship_profile_url`` (the canonical public URL
+        echoed back by Crustdata). Value is the full profile dict as returned
+        by the search endpoint — same shape ``normalize_crustdata_profile``
+        already consumes (``current_employers``, ``past_employers``, ``skills``,
+        ``all_employers``, ``all_titles``, ``all_schools``, etc.).
+        URLs not found in any batch are simply absent from the dict — caller
+        decides how to report them.
+
+    Raises:
+        Same exception hierarchy as ``search_people_db``:
+        ``AuthenticationError``, ``RateLimitError``, ``ServiceUnavailableError``,
+        ``ExternalServiceError``. Errors are NOT swallowed.
+    """
+    if not urls:
+        return {}
+
+    if batch_size <= 0:
+        batch_size = 100
+    # Crustdata caps a single request at 1000.
+    batch_size = min(batch_size, 1000)
+
+    # Dedupe while preserving order, drop empty strings.
+    seen = set()
+    deduped: List[str] = []
+    for u in urls:
+        if not u or not isinstance(u, str):
+            continue
+        if u in seen:
+            continue
+        seen.add(u)
+        deduped.append(u)
+
+    if not deduped:
+        return {}
+
+    if not api_key:
+        api_key = _load_api_key()
+
+    results: Dict[str, Dict[str, Any]] = {}
+
+    for i in range(0, len(deduped), batch_size):
+        batch = deduped[i:i + batch_size]
+        filters = {
+            "filters": {
+                "column": "flagship_profile_url",
+                "type": "in",
+                "value": batch,
+            }
+        }
+
+        # Page through this batch if Crustdata returns a cursor (rare at
+        # batch_size <= 100, but we handle it defensively).
+        cursor: Optional[str] = None
+        while True:
+            response = search_people_db(
+                filters=filters,
+                limit=batch_size,
+                cursor=cursor,
+                api_key=api_key,
+            )
+            for profile in response.get("profiles") or []:
+                key = profile.get("flagship_profile_url")
+                if not key:
+                    # Without a flagship URL we can't map this back. Skip.
+                    continue
+                # First write wins (later pages are unlikely to dupe at this
+                # cardinality, but be defensive).
+                if key not in results:
+                    results[key] = profile
+
+            cursor = response.get("cursor")
+            if not cursor:
+                break
+
+    return results
+
+
 @retry_with_backoff(
     max_retries=2,
     base_delay=1.0,
@@ -1070,6 +1177,7 @@ __all__ = [
     'CREDITS_PER_100_RESULTS',
     # Main functions
     'search_people_db',
+    'bulk_search_by_flagship_urls',
     'build_filters',
     'check_credits',
     # Normalization

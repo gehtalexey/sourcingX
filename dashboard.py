@@ -10582,7 +10582,10 @@ with tab_database:
                             return series.apply(matches)
 
                         mask = pd.Series(True, index=df.index)
-                        str_filters = {'name': 'name', 'current_title': 'current_title',
+                        # current_title is handled separately below so it can OR
+                        # across current_title + headline — mirrors PR #44's
+                        # Crustdata-side fix for the same recall problem.
+                        str_filters = {'name': 'name',
                                        'current_company': 'current_company', 'location': 'location'}
                         arr_filters = {'past_titles': 'all_titles', 'past_companies': 'all_employers',
                                        'skills': 'skills', 'schools': 'all_schools'}
@@ -10590,6 +10593,21 @@ with tab_database:
                         for fkey, col in str_filters.items():
                             if af.get(fkey) and col in df.columns:
                                 mask &= _boolean_filter(df[col], af[fkey])
+
+                        # Title filter: OR across current_title and headline.
+                        # Many enriched profiles have an empty current_title but a
+                        # populated headline (e.g. "Senior Python Engineer @ Wiz");
+                        # matching only current_title silently drops them from the
+                        # funnel even though the FT phase already returned them.
+                        # Migration 019 added headline to the RPC return shape;
+                        # if it's missing (older deploy) fall back to current_title.
+                        if af.get('current_title') and 'current_title' in df.columns:
+                            title_q = af['current_title']
+                            title_mask = _boolean_filter(df['current_title'], title_q)
+                            if 'headline' in df.columns:
+                                title_mask = title_mask | _boolean_filter(df['headline'], title_q)
+                            mask &= title_mask
+
                         for fkey, col in arr_filters.items():
                             if af.get(fkey) and col in df.columns:
                                 mask &= _boolean_array_filter(df[col], af[fkey])

@@ -1280,10 +1280,13 @@ def search_profiles_fulltext(client: SupabaseClient, query: str, limit: int = 50
     Returns:
         List of matching profile dicts, ranked by relevance (without raw_data to save memory)
     """
-    # Fields to keep (exclude raw_data and search_text to save memory)
+    # Fields to keep (exclude raw_data and search_text to save memory).
+    # headline is returned by the RPC (migration 019) so the DB-tab column
+    # filter can OR title matches across current_title and headline.
     KEEP_FIELDS = {'linkedin_url', 'name', 'current_title', 'current_company', 'location',
                    'all_employers', 'all_titles', 'all_schools', 'skills', 'email',
-                   'enriched_at', 'screening_score', 'screening_fit_level', 'enrichment_status'}
+                   'enriched_at', 'screening_score', 'screening_fit_level', 'enrichment_status',
+                   'headline'}
 
     try:
         all_results = []

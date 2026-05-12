@@ -10298,10 +10298,20 @@ with tab_database:
                     )
                 )
 
-                # Row 1: Name, Location (Location has AI refine)
-                fcol1, fcol2 = st.columns(2)
+                # Row 1: Name, LinkedIn URL, Location (Location has AI refine)
+                # The Name + LinkedIn URL pair is the "I know exactly who I'm
+                # looking for" lookup path — no Crustdata credits required.
+                fcol1, fcol1b, fcol2 = st.columns(3)
                 with fcol1:
-                    st.text_input("Name", key="db_f_name", placeholder="john doe")
+                    st.text_input("Name", key="db_f_name", placeholder="john doe",
+                                  help="Exact-ish lookup. Case-insensitive substring match on the name column (e.g., 'Gil Gitlin').")
+                with fcol1b:
+                    st.text_input(
+                        "LinkedIn URL",
+                        key="db_f_linkedin_url",
+                        placeholder="https://www.linkedin.com/in/some-slug",
+                        help="Paste a full LinkedIn URL or any slug fragment — matches exactly or by substring.",
+                    )
                 _ai_render_field(
                     fcol2, "Location", "db_f_location", "db_expanded_location",
                     "location", "israel, nyc",
@@ -10368,6 +10378,17 @@ with tab_database:
                 f_name = st.session_state.get("db_f_name", "")
                 f_past_titles = st.session_state.get("db_f_past_titles", "")
 
+                # LinkedIn URL lookup — direct profile match by URL or slug.
+                # Normalize first (strips trailing /, query params, lowercases
+                # domain) so paste-from-browser works without surprises. If
+                # normalization fails (e.g., bare slug like
+                # ``gil-gitlin-87b720200``), fall back to the raw stripped
+                # input so we can still do an ``ilike`` substring match.
+                _raw_linkedin = st.session_state.get("db_f_linkedin_url", "")
+                _raw_linkedin = (_raw_linkedin or "").strip()
+                _normalized_linkedin = normalize_linkedin_url(_raw_linkedin) if _raw_linkedin else None
+                f_linkedin_url = _normalized_linkedin or _raw_linkedin
+
                 # Merge AI-refined fields (manual input + multiselect selections)
                 f_location = _ai_effective_value("db_f_location", "db_expanded_location")
                 f_current_title = _ai_effective_value("db_f_current_title", "db_expanded_current_title")
@@ -10381,12 +10402,13 @@ with tab_database:
                     'name': f_name, 'current_title': f_current_title, 'past_titles': f_past_titles,
                     'current_company': f_current_company, 'past_companies': f_past_companies,
                     'location': f_location, 'skills': f_skills, 'schools': f_schools,
+                    'linkedin_url': f_linkedin_url,
                     'date_after': str(f_date_after) if f_date_after else None,
                     'freshness': f_freshness,
                     'has_email': f_has_email
                 }
                 has_column_filters = any([f_name, f_current_title, f_past_titles, f_current_company, f_past_companies,
-                                          f_location, f_skills, f_schools, f_date_after, f_freshness != "All", f_has_email])
+                                          f_location, f_skills, f_schools, f_linkedin_url, f_date_after, f_freshness != "All", f_has_email])
 
                 # Store search state
                 if search_clicked:
@@ -10403,7 +10425,7 @@ with tab_database:
                     ft = st.session_state.get('db_fulltext', '')
 
                     has_column_filters = any(af.get(k) for k in ['name', 'current_title', 'past_titles', 'current_company', 'past_companies',
-                                                   'location', 'skills', 'schools', 'date_after', 'has_email']) or af.get('freshness', 'All') != 'All'
+                                                   'location', 'skills', 'schools', 'linkedin_url', 'date_after', 'has_email']) or af.get('freshness', 'All') != 'All'
 
                     # For past_titles and past_companies, we need full-text search for partial matching
                     # Build a combined fulltext query if these filters are used

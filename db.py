@@ -1640,6 +1640,20 @@ def search_profiles_boolean(client: SupabaseClient, filters: dict, limit: int = 
             if postgrest_filter:
                 and_conditions.append(postgrest_filter)
 
+    # LinkedIn URL lookup — exact match for full URLs, substring otherwise.
+    # We pre-normalize in the caller (Tab 7) so a paste with trailing slash /
+    # query params still hits ``eq.``. A bare slug like
+    # ``gil-gitlin-87b720200`` (no ``linkedin.com``) falls through to ilike.
+    linkedin_url_q = filters.get('linkedin_url')
+    if linkedin_url_q:
+        linkedin_url_q = str(linkedin_url_q).strip()
+        if linkedin_url_q:
+            if '/in/' in linkedin_url_q.lower() and 'linkedin.com' in linkedin_url_q.lower():
+                and_conditions.append(f"linkedin_url.eq.{linkedin_url_q}")
+            else:
+                # Substring match (PostgREST ilike wildcards use *)
+                and_conditions.append(f"linkedin_url.ilike.*{linkedin_url_q}*")
+
     # NOTE: Array columns (past_titles, past_companies, skills, schools) are NOT
     # filtered server-side because PostgREST doesn't support ::text casting inside
     # or()/and() groups, and the 'ov' operator only does exact element matching.

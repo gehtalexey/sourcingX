@@ -52,17 +52,20 @@ class TestOpenAIMocking:
         assert len(system_prompt) > 0, "System prompt should not be empty"
         assert 'score' in system_prompt.lower() or 'recruiter' in system_prompt.lower()
 
-    def test_custom_system_prompt_is_used(self, mock_openai_client,
-                                           strong_backend_profile,
-                                           backend_job_description):
+    def test_unified_policy_system_prompt_is_used(self, mock_openai_client,
+                                                   strong_backend_profile,
+                                                   backend_job_description):
+        """The dashboard now routes every screening call through the unified
+        screening_policy rubric. The legacy ``role_prompt`` override no longer
+        exists — every system prompt must contain the policy signature."""
         import dashboard
-        custom_prompt = "You are a specialized DevOps recruiter. Focus on Kubernetes."
-
         dashboard.screen_profile(strong_backend_profile, backend_job_description,
-                                  mock_openai_client, role_prompt=custom_prompt)
+                                  mock_openai_client)
 
         system_prompt = mock_openai_client.get_system_prompt()
-        assert custom_prompt in system_prompt
+        assert "senior technical recruiter" in system_prompt.lower()
+        # Policy-specific section that does not appear in any legacy prompt
+        assert "User-Stated Hard Constraints" in system_prompt
 
 
 class TestErrorHandling:
@@ -89,9 +92,14 @@ class TestErrorHandling:
 
         result = dashboard.screen_profile(profile, backend_job_description, mock_openai_client)
 
-        # Profile has current_title/company so it constructs minimal profile and screens it
+        # Profile has current_title/company so it constructs minimal profile and screens it.
+        # Unified policy returns {Good Fit, Maybe, Not a Fit}; legacy buckets
+        # remain in the assertion list for backward compat with older fixtures.
         assert result['score'] >= 0
-        assert result['fit'] in ['Strong Fit', 'Good Fit', 'Partial Fit', 'Not a Fit', 'Skipped', 'Error']
+        assert result['fit'] in [
+            'Strong Fit', 'Good Fit', 'Partial Fit', 'Not a Fit',
+            'Maybe', 'Skipped', 'Error'
+        ]
 
     def test_malformed_json_response_handling(self, backend_job_description,
                                                strong_backend_profile):
@@ -283,9 +291,11 @@ class TestAPIResponseVariations:
     def test_handles_response_with_extra_fields(self, mock_openai_client_factory,
                                                   strong_backend_profile,
                                                   backend_job_description):
+        # Unified policy contract is {decision, score, reasoning}. The mock
+        # returns a GO decision so the fit maps to 'Good Fit' regardless of
+        # the legacy 'fit' key the mock also includes.
         mock_client = mock_openai_client_factory({
-            "score": 8, "fit": "Strong Fit", "summary": "Excellent candidate",
-            "why": "Great background", "strengths": ["Top company"], "concerns": [],
+            "decision": "GO", "score": 8, "reasoning": "Great background",
             "extra_field": "unexpected value", "another_field": 123
         })
 
@@ -294,4 +304,4 @@ class TestAPIResponseVariations:
                                            mock_client)
 
         assert result['score'] == 8
-        assert result['fit'] == 'Strong Fit'
+        assert result['fit'] == 'Good Fit'

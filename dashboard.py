@@ -52,6 +52,10 @@ from company_matching import (
     normalize_company_name as _normalize_company_name,
     company_matches_filter_list as _company_matches_filter_list,
 )
+from screening_policy import (
+    get_system_prompt as _policy_system_prompt,
+    build_user_prompt as _policy_user_prompt,
+)
 
 
 # Email generator module
@@ -84,7 +88,6 @@ try:
         update_profile_email, update_profile_emails_batch, get_profile,
         ENRICHMENT_REFRESH_MONTHS,
     )
-    from screening_policy import get_system_prompt as _policy_system_prompt, build_user_prompt as _policy_user_prompt
     from pb_dedup import filter_results_against_database, update_phantombuster_with_skip_list, get_skip_list_from_database
     HAS_DATABASE = True
 except ImportError:

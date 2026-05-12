@@ -301,3 +301,59 @@ Run tests with: `pytest`
 - API calls to external services should use `api_helpers.py` wrappers for rate limiting
 - Filter CSVs live in `filters/` directory
 - Streamlit theme: dark mode with purple primary (`#615fff`)
+
+## Scheduled Jobs / DB Refresh
+
+### What runs daily
+
+`.github/workflows/db-refresh.yml` runs at **03:00 UTC every day** (and can be triggered manually with `gh workflow run db-refresh.yml`). It re-enriches stale, sparse profiles via `scripts/reenrich_sparse_profiles.py` so the dashboard always reads up-to-date current-employer data.
+
+### Guardrails
+
+1. **Daily cap:** the workflow passes `--limit 250` to the refresh script. To change, edit `DAILY_LIMIT` in the workflow's `env:` block.
+2. **Monthly cap:** the workflow runs `scripts/check_monthly_credit_budget.py` first. That script reads `api_usage_logs` from Supabase, sums `credits_used` for `provider='crustdata'` since the first instant of the current calendar month (UTC), and refuses to proceed if `mtd_spend + projected_spend > MONTHLY_CAP`. Today `MONTHLY_CAP=22000`. The preflight exits **75 (`EX_TEMPFAIL`)** to signal "skip this run, don't fail the workflow"; the workflow catches that and exits cleanly.
+
+The monthly cap is a **shared budget** — it counts every Crustdata credit, not only auto-refresh credits. That's intentional: if humans burn the budget on manual searches, the auto-refresh yields rather than racing. See the docstring in `scripts/check_monthly_credit_budget.py` for the full rationale.
+
+### Cost model: search, not enrich
+
+The refresh script uses Crustdata's **`people_search_db`** endpoint, not the per-profile `enrich` endpoint. Search is billed **3 credits per 100 results** (one billing unit per request), so refreshing 250 profiles costs ~9 credits instead of ~750. We filter by `flagship_profile_url in [...]` — the public LinkedIn URL form our DB stores — and read back the same `current_employers` / `past_employers` / `skills` shape `normalize_crustdata_profile` already understands.
+
+Trade-off: search returns no personal email. The daily refresh therefore **leaves the `email` column untouched** — emails are populated by the separate CSV/`people_enrich` flow and must not be clobbered by a refresh. `save_enriched_profile` only writes the columns we pass, so omitting `email` from the upsert payload preserves whatever is already there.
+
+### One-time setup
+
+1. **Create the tracking issue (once):**
+   ```bash
+   gh issue create --title "DB refresh log" \
+     --body "Daily auto-refresh runs append a comment here." \
+     --label "automation"
+   ```
+   Note the issue number it prints.
+2. **Set the repo variable so the workflow knows where to comment:**
+   ```bash
+   gh variable set DB_REFRESH_ISSUE_NUMBER --body "<issue-number>"
+   ```
+3. **Add four GitHub Actions secrets** (Settings → Secrets and variables → Actions):
+   - `CRUSTDATA_API_KEY` — Crustdata API token.
+   - `SUPABASE_URL` — Supabase project URL.
+   - `SUPABASE_KEY` — Supabase service-role key (needs read on `api_usage_logs` and read/write on `profiles`).
+   - `OPENAI_API_KEY` — needed only because some transitive imports may touch it; can be a placeholder until you decide otherwise.
+
+The workflow's `permissions:` block grants `issues: write` only — the narrow escape hatch to the repo's default `contents: read` posture. It does this so the daily summary can be posted to the tracking issue. No other write scopes are granted.
+
+### Adjusting caps
+
+All knobs live in `.github/workflows/db-refresh.yml`'s `env:` block:
+- `DAILY_LIMIT` — max profiles processed per run.
+- `PROJECTED_DAILY_SPEND` — credits estimate fed to the monthly-budget preflight. With search-based pricing this is `ceil(DAILY_LIMIT / 100) * 3` plus headroom.
+- `MONTHLY_CAP` — the hard ceiling the preflight enforces.
+- `MAX_AGE_DAYS`, `MIN_CURRENT_EMPLOYERS`, `BATCH_SIZE` — staleness filter and search batch size, forwarded to the refresh script. Keep `BATCH_SIZE=100` so each batch maps to one 3-credit Crustdata billing unit.
+
+### Triggering manually
+
+```bash
+gh workflow run db-refresh.yml
+```
+Watch the tracking issue for the new comment, or open the run in the Actions tab for full logs.
+

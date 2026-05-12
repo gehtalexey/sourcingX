@@ -26,9 +26,13 @@ permissions:
 
 # Configurable caps. To adjust, edit these AND the --limit flag below.
 env:
-  DAILY_LIMIT: '250'
-  # Search-based pricing: 3 credits per 100 results. 250 profiles needs
-  # ceil(250/100) = 3 search requests = 9 credits. We project 30 (3x
+  # Pick a multiple of 100 to maximize coverage per billing unit.
+  # Crustdata bills 3 credits per 100 results (with ceil), so 250 and 300
+  # cost the same (9 credits = 3 batches). 300 gets us 50 extra refreshes
+  # per day for free.
+  DAILY_LIMIT: '300'
+  # Search-based pricing: 3 credits per 100 results. 300 profiles needs
+  # ceil(300/100) = 3 search requests = 9 credits. We project 30 (3x
   # headroom) so the monthly-budget preflight has a defensive margin and
   # we still skip a run if MTD spend is genuinely close to the cap.
   PROJECTED_DAILY_SPEND: '30'

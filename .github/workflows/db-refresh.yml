@@ -1,0 +1,213 @@
+name: DB Refresh (sparse profiles)
+
+# Daily auto-refresh of stale, sparse profiles.
+#
+# Guardrails (enforced in code, not just here):
+#   1) Daily cap: --limit 250 profiles per run (~750 Crustdata credits).
+#   2) Monthly hard cap: 22,000 Crustdata credits across all consumers.
+#      Enforced by scripts/check_monthly_credit_budget.py before the refresh
+#      script runs. If proceeding would breach the cap, the workflow logs
+#      and exits 0 (no failure email, just a clean skip).
+
+on:
+  schedule:
+    # 03:00 UTC daily — quiet hours in IL/EU; recruiters arrive to fresh data.
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+# Least-privilege: read the repo, and write *only* issues — needed to post
+# the daily run summary as a comment on the tracking issue.
+permissions:
+  contents: read
+  issues: write
+
+# Configurable caps. To adjust, edit these AND the --limit flag below.
+env:
+  DAILY_LIMIT: '250'
+  PROJECTED_DAILY_SPEND: '750'      # 250 profiles * 3 credits/profile
+  MONTHLY_CAP: '22000'
+  MAX_AGE_DAYS: '30'
+  MIN_CURRENT_EMPLOYERS: '1'
+  BATCH_SIZE: '5'
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Preflight — monthly credit budget check
+        id: preflight
+        # Exit code 0 = proceed, 75 = skip (must-skip but not a failure),
+        # 2 = misconfiguration (treated as failure).
+        # We capture the JSON to a file so later steps can read it without
+        # echoing secrets via env.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          set +e
+          python scripts/check_monthly_credit_budget.py \
+            --cap "${MONTHLY_CAP}" \
+            --projected-spend "${PROJECTED_DAILY_SPEND}" \
+            --provider crustdata > preflight.json
+          status=$?
+          set -e
+          echo "preflight_exit=${status}" >> "$GITHUB_OUTPUT"
+          echo "----- preflight output -----"
+          cat preflight.json || true
+          echo "----- end preflight --------"
+          if [ "${status}" = "75" ]; then
+            echo "Monthly credit cap would be breached. Skipping refresh."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "${status}" = "0" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Preflight failed with exit code ${status}."
+            exit "${status}"
+          fi
+
+      - name: Run re-enrichment
+        id: refresh
+        if: steps.preflight.outputs.skip != 'true'
+        env:
+          CRUSTDATA_API_KEY: ${{ secrets.CRUSTDATA_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # OpenAI key may be touched at import time by transitive imports
+          # (db.py / dashboard helpers). The refresh script itself does not
+          # call OpenAI — passing a placeholder is safe and explicit.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -o pipefail
+          python scripts/reenrich_sparse_profiles.py \
+            --execute \
+            --limit "${DAILY_LIMIT}" \
+            --max-age-days "${MAX_AGE_DAYS}" \
+            --min-current-employers "${MIN_CURRENT_EMPLOYERS}" \
+            --batch-size "${BATCH_SIZE}" 2>&1 | tee refresh.log
+
+      - name: Parse summary
+        id: summary
+        if: always() && steps.preflight.outputs.skip != 'true'
+        # Pulls Processed/Updated/Unchanged/Failed out of the [SUMMARY] block
+        # printed by reenrich_sparse_profiles._print_summary().
+        run: |
+          python - <<'PY'
+          import json, os, re, pathlib
+
+          log_path = pathlib.Path("refresh.log")
+          text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+
+          def grab(label):
+              m = re.search(rf"^\s*{re.escape(label)}\s*:\s*(\d+)", text, re.MULTILINE)
+              return int(m.group(1)) if m else None
+
+          processed = grab("Processed")
+          updated = grab("Updated (current_company changed)")
+          if updated is None:
+              updated = grab("Updated")
+          unchanged = grab("Unchanged")
+          failed = grab("Failed")
+
+          out = {
+              "processed": processed if processed is not None else 0,
+              "updated": updated if updated is not None else 0,
+              "unchanged": unchanged if unchanged is not None else 0,
+              "failed": failed if failed is not None else 0,
+          }
+
+          out_path = os.environ["GITHUB_OUTPUT"]
+          with open(out_path, "a", encoding="utf-8") as fh:
+              for k, v in out.items():
+                  fh.write(f"{k}={v}\n")
+          print(json.dumps(out))
+          PY
+
+      - name: Post summary comment to tracking issue
+        if: always() && steps.preflight.outputs.skip != 'true' && vars.DB_REFRESH_ISSUE_NUMBER != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ vars.DB_REFRESH_ISSUE_NUMBER }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PROCESSED: ${{ steps.summary.outputs.processed }}
+          UPDATED: ${{ steps.summary.outputs.updated }}
+          UNCHANGED: ${{ steps.summary.outputs.unchanged }}
+          FAILED: ${{ steps.summary.outputs.failed }}
+        run: |
+          # Build the comment body from preflight + summary data.
+          python - <<'PY' > comment.md
+          import json, os, datetime, pathlib
+
+          preflight = {}
+          p = pathlib.Path("preflight.json")
+          if p.exists():
+              try:
+                  preflight = json.loads(p.read_text(encoding="utf-8"))
+              except Exception:
+                  preflight = {}
+
+          processed = os.environ.get("PROCESSED", "0")
+          updated = os.environ.get("UPDATED", "0")
+          unchanged = os.environ.get("UNCHANGED", "0")
+          failed = os.environ.get("FAILED", "0")
+          run_url = os.environ.get("RUN_URL", "")
+
+          mtd = preflight.get("mtd_spend", "?")
+          cap = preflight.get("cap", "?")
+          projected = preflight.get("projected_spend", "?")
+          projected_total = preflight.get("projected_total", "?")
+
+          # Estimate today's spend from the actual processed count.
+          # 3 credits/profile is the Crustdata enrich rate (see usage_tracker.CRUSTDATA_PRICING).
+          try:
+              today_spend = int(processed) * 3
+          except Exception:
+              today_spend = "?"
+
+          today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+
+          body = f"""### DB refresh run — {today} UTC
+
+          | Metric | Value |
+          | --- | --- |
+          | Processed | {processed} |
+          | Updated | {updated} |
+          | Unchanged | {unchanged} |
+          | Failed | {failed} |
+          | Credits used today (est.) | {today_spend} |
+          | MTD credits used (before run) | {mtd} |
+          | MTD projected after run | {projected_total} |
+          | Monthly cap | {cap} |
+
+          [Run details]({run_url})
+          """
+          print(body)
+          PY
+
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body-file comment.md
+
+      - name: Note when tracking issue is not configured
+        if: always() && steps.preflight.outputs.skip != 'true' && vars.DB_REFRESH_ISSUE_NUMBER == ''
+        run: |
+          echo "::notice::DB_REFRESH_ISSUE_NUMBER repo variable not set — skipping issue comment."
+          echo "To enable run logging:"
+          echo "  1) gh issue create --title 'DB refresh log' \\"
+          echo "       --body 'Daily auto-refresh runs append a comment here.' \\"
+          echo "       --label automation"
+          echo "  2) gh variable set DB_REFRESH_ISSUE_NUMBER --body '<issue-number>'"

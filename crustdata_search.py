@@ -945,7 +945,7 @@ _EXPANSION_PROMPTS = {
         'Example for "kubernetes": ["k8s", "docker", "helm", "container orchestration", "openshift"]'
     ),
     'company': (
-        'Given the description "{term}", list 5-10 specific company names that match. '
+        'Given the description "{term}"{geo_clause}, list 5-10 specific company names that match. '
         'The input may be a category (e.g., "SaaS startups in Tel Aviv"), a single company '
         '(e.g., "Wiz" → suggest similar companies), or a concept (e.g., "big tech"). '
         'Return ONLY a valid JSON array of strings with proper company name capitalization. '
@@ -963,7 +963,7 @@ _EXPANSION_PROMPTS = {
         'Example for "west coast usa": ["San Francisco", "Los Angeles", "Seattle", "San Diego", "Portland"]'
     ),
     'school': (
-        'Given the description "{term}", list 5-10 specific university or school names '
+        'Given the description "{term}"{geo_clause}, list 5-10 specific university or school names '
         'that match. The input may be a category (e.g., "top tech universities in London"), '
         'a country, or a single school (suggest similar ones). '
         'Return ONLY a valid JSON array of strings with proper capitalization. '
@@ -983,6 +983,7 @@ def expand_variations(
     field_type: str = 'title',
     openai_api_key: str = None,
     exclude: List[str] = None,
+    geo_context: str = None,
 ) -> List[str]:
     """
     Use OpenAI gpt-4o-mini to expand a term into common variations.
@@ -992,6 +993,11 @@ def expand_variations(
         field_type: 'title', 'skill', 'company', 'location', 'school', or 'keywords'
         openai_api_key: OpenAI API key
         exclude: List of already-suggested values to exclude from results
+        geo_context: Optional geographic scope (e.g. "Israel", "Tel Aviv") read
+            from the user's Location filter. Only injected into prompts for
+            field types where region matters in practice — currently 'company'
+            and 'school'. Has no effect for 'location' (would be circular) or
+            for skill/keyword expansions (region-neutral).
 
     Returns:
         List of 5-10 variations (always includes the original term for title/skill types).
@@ -1005,8 +1011,23 @@ def expand_variations(
     if not openai_api_key:
         return [term]
 
+    # Only field types whose prompt template references {geo_clause} get the
+    # geographic scope. Other prompts ignore the parameter.
+    if geo_context and field_type in ('company', 'school'):
+        geo_clause = (
+            f' (only suggest options with significant presence in {geo_context.strip()} — '
+            f'companies/schools with offices, engineering teams, or hiring in that region)'
+        )
+    else:
+        geo_clause = ''
+
     prompt_template = _EXPANSION_PROMPTS.get(field_type, _EXPANSION_PROMPTS['title'])
-    prompt = prompt_template.format(term=term)
+    # Templates that don't reference {geo_clause} ignore it via .format kwargs.
+    try:
+        prompt = prompt_template.format(term=term, geo_clause=geo_clause)
+    except KeyError:
+        # Defensive fallback for any template that doesn't accept geo_clause.
+        prompt = prompt_template.format(term=term)
 
     if exclude:
         prompt += f'\nDo NOT include any of these (already suggested): {json.dumps(exclude)}'

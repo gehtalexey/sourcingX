@@ -226,7 +226,16 @@ There is no API syntax that unlocks cross-element AND, but there are several beh
 
 3. **Move the seniority and function_category filters into the same per-element group as title and company** so they continue to compose correctly. Today seniority is already on `current_employers.seniority_level`, which inherits the same-element semantics — that's the right behavior because seniority is *meant* to apply to the matched employment, not to "any element."
 
-Estimated impact on the PR #28 repro: per Probe 7, replacing the title constraint with `headline (.) software` would lift the floor of Tab 0 results from 5 toward the 173 - 300 band for that query, depending on how `headline` is populated for the matched profiles. For the broader `software developer / fullstack / engineer` ORs the recruiter actually types, expect 5-15x recall improvements.
+**Measured impact on the PR #28 repro** — three follow-up probes against the exact recruiter query (`software developer` + companies `[wiz, monday, wix, forter]` + `region [.] Israel`), substituting `headline` for `current_employers.title`:
+
+| Probe | Filter substitution | `total_count` | Lift vs baseline |
+|---|---|---:|---:|
+| Baseline | `current_employers.title [.] software developer` | **5** | 1.0× |
+| Reroute (exact term) | `headline [.] software developer` | **12** | 2.4× |
+| Broaden head-noun | `headline [.] developer` | **37** | 7.4× |
+| Multi-variant OR | `headline [.]` any of `software developer / software engineer / full stack / fullstack` | **149** | **29.8×** |
+
+The reroute alone (`software developer` → `headline`) buys ~2.4×. The bigger lever is combining the reroute with the title-variant OR pattern the recruiter likely intends; that compounds to ~30× on this query. Below the recruiter's expectation of "hundreds" by ~25%, but the right order of magnitude for the use case.
 
 ### (c) Switch to a different endpoint (`/screener/person/search` realtime)
 

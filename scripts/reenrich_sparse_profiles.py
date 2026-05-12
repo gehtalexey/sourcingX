@@ -14,7 +14,13 @@ employer was captured. Real examples:
 
 For those rows we have to re-pull from Crustdata. This script:
 
-  1) Selects candidates from Supabase (filter on enriched_at + array length).
+  1) Selects candidates from Supabase in two phases:
+       Phase A — profiles screened within --prefer-screened-days
+                 (the rows that matter to the recruiting pipeline).
+       Phase B — fills the remainder from the oldest-sparse pool.
+     Both phases share the staleness filter (enriched_at + array length).
+     We deliberately do NOT filter on contacted_at; that column is
+     vestigial in this codebase and is never populated by the app.
   2) DRY-RUN by default — prints the count, the first 10, and the credit cost.
   3) On --execute, re-pulls each candidate from Crustdata in small batches,
      writes the new raw_data + indexed columns back via db.save_enriched_profile.
@@ -146,27 +152,70 @@ def _current_employers_count(raw_data: Any) -> int:
     return sum(1 for e in employers if isinstance(e, dict))
 
 
+def _apply_sparsity_filter(
+    rows: Optional[List[Dict[str, Any]]],
+    min_current_employers: int,
+    limit: int,
+    exclude_urls: Optional[set] = None,
+) -> List[Dict[str, Any]]:
+    """Apply the client-side sparsity filter + dedupe to a list of rows.
+
+    We do the array-length filter here because the Supabase REST API doesn't
+    expose ``jsonb_array_length`` as a filter operator.
+    """
+    excluded = exclude_urls or set()
+    out: List[Dict[str, Any]] = []
+    for row in rows or []:
+        url = row.get("linkedin_url")
+        if url in excluded:
+            continue
+        count = _current_employers_count(row.get("raw_data"))
+        if count <= min_current_employers:
+            out.append({
+                "linkedin_url": url,
+                "name": row.get("name"),
+                "enriched_at": row.get("enriched_at"),
+                "current_employers_count": count,
+            })
+        if len(out) >= limit:
+            break
+    return out
+
+
 def fetch_sparse_candidates(
     client,
     max_age_days: int,
     limit: int,
     min_current_employers: int,
+    prefer_screened_days: Optional[int] = None,
     now: Optional[datetime] = None,
-) -> List[Dict[str, Any]]:
-    """Return profiles eligible for re-enrichment.
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Return profiles eligible for re-enrichment, in priority order.
 
-    Filters applied:
+    The selection is split into two phases:
+
+      Phase A — recently-screened candidates. Same staleness filter as
+        Phase B, plus ``screened_at >= now() - prefer_screened_days``. These
+        are profiles the recruiting pipeline actually touches, so we refresh
+        them first. We deliberately do NOT filter on ``contacted_at`` — that
+        column is vestigial in this codebase and is never populated, so any
+        predicate on it would match zero rows.
+
+      Phase B — fill the remainder from the original "oldest sparse" pool
+        (same staleness filter), excluding any URLs already picked in
+        Phase A. Ordered by ``enriched_at.asc`` so the oldest rows come
+        first.
+
+    Common filters applied to BOTH phases:
       - ``enriched_at < now() - max_age_days``
       - ``raw_data.current_employers`` length <= ``min_current_employers``
         (including missing/null, which count as 0).
 
-    We do the array-length filter client-side because the Supabase REST API
-    doesn't expose ``jsonb_array_length`` as a filter operator. We
-    over-fetch by a small multiplier so we usually still hit the requested
-    limit after filtering.
+    Returns a tuple ``(candidates, breakdown)`` where ``breakdown`` is a
+    dict ``{"phase_a": N, "phase_b": M, "total": T}`` for observability.
     """
     if limit <= 0:
-        return []
+        return [], {"phase_a": 0, "phase_b": 0, "total": 0}
 
     cutoff = _cutoff_iso(max_age_days, now=now)
 
@@ -174,28 +223,62 @@ def fetch_sparse_candidates(
     # ceiling so we don't accidentally pull the whole table.
     fetch_limit = min(max(limit * 5, 50), 5000)
 
-    rows = client.select(
-        "profiles",
-        columns="linkedin_url,name,enriched_at,raw_data",
-        filters={"enriched_at": f"lt.{cutoff}"},
-        limit=fetch_limit,
-        order_by="enriched_at.asc",
-    )
-
     candidates: List[Dict[str, Any]] = []
-    for row in rows or []:
-        count = _current_employers_count(row.get("raw_data"))
-        if count <= min_current_employers:
-            candidates.append({
-                "linkedin_url": row.get("linkedin_url"),
-                "name": row.get("name"),
-                "enriched_at": row.get("enriched_at"),
-                "current_employers_count": count,
-            })
-        if len(candidates) >= limit:
-            break
 
-    return candidates
+    # ---- Phase A: recently-screened candidates ----
+    if prefer_screened_days and prefer_screened_days > 0:
+        screened_cutoff = _cutoff_iso(prefer_screened_days, now=now)
+        phase_a_rows = client.select(
+            "profiles",
+            columns="linkedin_url,name,enriched_at,screened_at,raw_data",
+            filters={
+                "enriched_at": f"lt.{cutoff}",
+                "screened_at": f"gte.{screened_cutoff}",
+            },
+            limit=fetch_limit,
+            order_by="enriched_at.asc",
+        )
+        candidates.extend(
+            _apply_sparsity_filter(phase_a_rows, min_current_employers, limit)
+        )
+
+    phase_a_count = len(candidates)
+
+    # ---- Phase B: oldest-sparse fill ----
+    remaining = limit - len(candidates)
+    if remaining > 0:
+        already_picked = {c["linkedin_url"] for c in candidates if c.get("linkedin_url")}
+        phase_b_filters: Dict[str, str] = {"enriched_at": f"lt.{cutoff}"}
+        if already_picked:
+            # PostgREST not-in syntax. We pass commas literally — Supabase
+            # accepts them without URL-encoding for the in/not.in operator.
+            url_list = ",".join(sorted(already_picked))
+            phase_b_filters["linkedin_url"] = f"not.in.({url_list})"
+
+        phase_b_rows = client.select(
+            "profiles",
+            columns="linkedin_url,name,enriched_at,raw_data",
+            filters=phase_b_filters,
+            limit=fetch_limit,
+            order_by="enriched_at.asc",
+        )
+        candidates.extend(
+            _apply_sparsity_filter(
+                phase_b_rows,
+                min_current_employers,
+                remaining,
+                # Defensive client-side dedupe in case the server-side
+                # not.in.(...) predicate is malformed for any URL.
+                exclude_urls=already_picked,
+            )
+        )
+
+    breakdown = {
+        "phase_a": phase_a_count,
+        "phase_b": len(candidates) - phase_a_count,
+        "total": len(candidates),
+    }
+    return candidates, breakdown
 
 
 # =============================================================================
@@ -457,6 +540,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "most this many entries (default: 1 catches the Gil/Barak class).",
     )
     parser.add_argument(
+        "--prefer-screened-days",
+        type=int,
+        default=90,
+        help="Phase A prioritises profiles whose screened_at is within this "
+             "many days; Phase B fills the remainder from the oldest-sparse "
+             "pool (default: 90). Pass 0 to disable Phase A entirely. "
+             "Note: contacted_at is intentionally NOT used — that column is "
+             "vestigial and never written by the app.",
+    )
+    parser.add_argument(
         "--execute",
         action="store_true",
         help="Actually call Crustdata and write to Supabase. Without this "
@@ -478,12 +571,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _print_dry_run(candidates: List[Dict[str, Any]], args: argparse.Namespace) -> None:
+def _print_phase_breakdown(breakdown: Dict[str, int], prefer_screened_days: int) -> None:
+    """Print the Phase A / Phase B split so the daily run is observable."""
+    print(
+        f"Phase A (screened within {prefer_screened_days}d): "
+        f"{breakdown.get('phase_a', 0)} candidates"
+    )
+    print(
+        f"Phase B (oldest sparse fill):  "
+        f"{breakdown.get('phase_b', 0)} candidates"
+    )
+    print(f"Total: {breakdown.get('total', 0)}")
+
+
+def _print_dry_run(
+    candidates: List[Dict[str, Any]],
+    args: argparse.Namespace,
+    breakdown: Optional[Dict[str, int]] = None,
+) -> None:
     print(f"\n[DRY-RUN] Candidates matching filters:")
-    print(f"  --max-age-days        = {args.max_age_days}")
+    print(f"  --max-age-days          = {args.max_age_days}")
     print(f"  --min-current-employers = {args.min_current_employers}")
-    print(f"  --limit               = {args.limit}")
-    print(f"  matched               = {len(candidates)} profile(s)")
+    print(f"  --prefer-screened-days  = {args.prefer_screened_days}")
+    print(f"  --limit                 = {args.limit}")
+    print(f"  matched                 = {len(candidates)} profile(s)")
+    if breakdown is not None:
+        print()
+        _print_phase_breakdown(breakdown, args.prefer_screened_days)
 
     estimated_credits = len(candidates) * CREDITS_PER_ENRICH_PROFILE
     print(
@@ -551,16 +665,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Fetching candidates older than {args.max_age_days} days "
               f"with current_employers <= {args.min_current_employers}...")
 
-    candidates = fetch_sparse_candidates(
+    candidates, breakdown = fetch_sparse_candidates(
         client,
         max_age_days=args.max_age_days,
         limit=args.limit,
         min_current_employers=args.min_current_employers,
+        prefer_screened_days=args.prefer_screened_days,
     )
 
     if not args.execute:
-        _print_dry_run(candidates, args)
+        _print_dry_run(candidates, args, breakdown=breakdown)
         return 0
+
+    # Show the Phase A/B split on execute runs too — the workflow logs this
+    # to refresh.log and the daily issue comment refers back to it.
+    _print_phase_breakdown(breakdown, args.prefer_screened_days)
 
     if not candidates:
         print("No candidates matched the filters; nothing to do.")

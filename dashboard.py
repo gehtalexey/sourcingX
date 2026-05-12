@@ -176,18 +176,56 @@ import hashlib  # For performance caching
 #   ``_ai_effective_value`` can read the user's selection.
 
 
-def _ai_expand_callback(input_key, expanded_key, field_type, openai_api_key):
+def _read_geo_context(geo_key):
+    """Read the user's Location filter from session state.
+
+    Used to scope company / school AI expansions to a region. Returns the
+    Location field's current text (and any AI-multiselect picks merged in via
+    _ai_effective_value if those keys exist) or None if no geo context is set
+    or no key was supplied.
+    """
+    if not geo_key:
+        return None
+    # If the geo_key has a matching expanded_<field>, use the effective value
+    # (merge of typed text + multiselect selections) so an AI-expanded
+    # location like "Tel Aviv, Ramat Gan, Herzliya" all participates.
+    # Tab 0 uses crust_search_location + expanded_locations.
+    # Tab 7 uses db_f_location + db_expanded_location.
+    expanded_candidates = []
+    if geo_key.startswith('crust_search_'):
+        expanded_candidates.append(geo_key.replace('crust_search_', 'expanded_') + 's')
+        expanded_candidates.append(geo_key.replace('crust_search_', 'expanded_'))
+    elif geo_key.startswith('db_f_'):
+        expanded_candidates.append(geo_key.replace('db_f_', 'db_expanded_'))
+    for cand in expanded_candidates:
+        if cand in st.session_state:
+            eff = _ai_effective_value(geo_key, cand)
+            if eff:
+                return eff
+    val = st.session_state.get(geo_key, '')
+    val = (val or '').strip()
+    return val or None
+
+
+def _ai_expand_callback(input_key, expanded_key, field_type, openai_api_key, geo_key=None):
     """on_click: read input_key, AI-expand each manual term, merge with existing.
 
     Stores the merged list at ``st.session_state[expanded_key]`` and sets
     ``st.session_state[f'sel_{expanded_key}']`` to the same list so the
     multiselect defaults to "everything selected".
+
+    If ``geo_key`` is supplied, the corresponding Location field's value is
+    read and passed to ``expand_variations`` so company/school suggestions
+    are scoped to the recruiter's geographic search (e.g. typing
+    "monday.com" with Location "Israel" returns Israeli SaaS peers, not
+    global ones).
     """
     if not openai_api_key or not HAS_CRUSTDATA_SEARCH:
         return
     val = st.session_state.get(input_key, '').strip()
     if not val:
         return
+    geo_context = _read_geo_context(geo_key)
     # Parse comma-separated manual values
     manual_terms = [t.strip() for t in val.split(',') if t.strip()]
     # Start with existing suggestions + manual terms
@@ -195,7 +233,9 @@ def _ai_expand_callback(input_key, expanded_key, field_type, openai_api_key):
     all_items.extend(manual_terms)
     # AI-expand each manual term
     for term in manual_terms:
-        sug = expand_variations(term, field_type=field_type, openai_api_key=openai_api_key)
+        sug = expand_variations(term, field_type=field_type,
+                                openai_api_key=openai_api_key,
+                                geo_context=geo_context)
         all_items.extend(sug)
     # Dedupe preserving order (case-insensitive)
     seen = set()
@@ -209,19 +249,21 @@ def _ai_expand_callback(input_key, expanded_key, field_type, openai_api_key):
     st.session_state[f"sel_{expanded_key}"] = merged
 
 
-def _ai_generate_more_callback(input_key, expanded_key, field_type, openai_api_key):
+def _ai_generate_more_callback(input_key, expanded_key, field_type, openai_api_key, geo_key=None):
     """on_click: generate additional suggestions, excluding the ones already shown."""
     if not openai_api_key or not HAS_CRUSTDATA_SEARCH:
         return
     val = st.session_state.get(input_key, '').strip()
     if not val:
         return
+    geo_context = _read_geo_context(geo_key)
     existing = st.session_state.get(expanded_key, [])
     manual_terms = [t.strip() for t in val.split(',') if t.strip()]
     new_items = list(existing)
     for term in manual_terms:
         sug = expand_variations(term, field_type=field_type,
-                                openai_api_key=openai_api_key, exclude=existing)
+                                openai_api_key=openai_api_key, exclude=existing,
+                                geo_context=geo_context)
         new_items.extend(sug)
     seen = set()
     merged = []
@@ -259,11 +301,18 @@ def _ai_add_custom_value_callback(custom_key, expanded_key):
 
 
 def _ai_render_field(container, label, input_key, expanded_key, field_type,
-                     placeholder, openai_api_key, has_ai):
+                     placeholder, openai_api_key, has_ai, geo_key=None):
     """Render text input + "AI Refine" button + (if expanded) a multiselect.
 
     Uses the provided container so callers can place the field inside their
     own column layout without running into Streamlit's nested-columns rule.
+
+    ``geo_key`` (optional) is the session-state key holding the user's
+    Location filter. When supplied AND ``field_type`` is one where geography
+    matters (company / school), the expansion call passes that location as
+    context so suggestions are scoped to the recruiter's geographic search.
+    Callers SHOULD NOT pass ``geo_key`` when rendering the Location field
+    itself — it would be circular.
     """
     with container:
         st.text_input(label, key=input_key, placeholder=placeholder)
@@ -272,7 +321,7 @@ def _ai_render_field(container, label, input_key, expanded_key, field_type,
                 "✨",
                 key=f"btn_ai_{input_key}",
                 on_click=_ai_expand_callback,
-                args=(input_key, expanded_key, field_type, openai_api_key),
+                args=(input_key, expanded_key, field_type, openai_api_key, geo_key),
                 help="AI suggest variations",
                 use_container_width=True,
             )
@@ -300,7 +349,7 @@ def _ai_render_field(container, label, input_key, expanded_key, field_type,
                     "✨ More",
                     key=f"btn_more_{expanded_key}",
                     on_click=_ai_generate_more_callback,
-                    args=(input_key, expanded_key, field_type, openai_api_key),
+                    args=(input_key, expanded_key, field_type, openai_api_key, geo_key),
                     help="Generate more suggestions",
                     use_container_width=True,
                 )
@@ -4760,11 +4809,18 @@ with tab_search:
         _has_ai = bool(openai_key and HAS_CRUSTDATA_SEARCH)
 
         # --- AI expansion helper ---
-        def _do_ai_expand(input_key, expanded_key, field_type):
-            """on_click callback: parses manual values, calls AI for each, merges all."""
+        def _do_ai_expand(input_key, expanded_key, field_type, geo_key=None):
+            """on_click callback: parses manual values, calls AI for each, merges all.
+
+            When ``geo_key`` is supplied (the session-state key holding the
+            user's Location filter), company/school expansions are scoped to
+            that region so suggestions stay relevant to the recruiter's
+            geographic search.
+            """
             val = st.session_state.get(input_key, '').strip()
             if not val or not _has_ai:
                 return
+            geo_context = _read_geo_context(geo_key)
             # Parse comma-separated manual values
             manual_terms = [t.strip() for t in val.split(',') if t.strip()]
             # Start with existing suggestions + manual terms
@@ -4772,7 +4828,9 @@ with tab_search:
             all_items.extend(manual_terms)
             # AI-expand each manual term
             for term in manual_terms:
-                sug = expand_variations(term, field_type=field_type, openai_api_key=openai_key)
+                sug = expand_variations(term, field_type=field_type,
+                                        openai_api_key=openai_key,
+                                        geo_context=geo_context)
                 all_items.extend(sug)
             # Dedupe preserving order
             seen = set()
@@ -4786,17 +4844,19 @@ with tab_search:
             # Also update the multiselect selection to include all new items
             st.session_state[f"sel_{expanded_key}"] = merged
 
-        def _generate_more(input_key, expanded_key, field_type):
+        def _generate_more(input_key, expanded_key, field_type, geo_key=None):
             """on_click callback: generate more suggestions excluding existing ones."""
             val = st.session_state.get(input_key, '').strip()
             if not val or not _has_ai:
                 return
+            geo_context = _read_geo_context(geo_key)
             existing = st.session_state.get(expanded_key, [])
             manual_terms = [t.strip() for t in val.split(',') if t.strip()]
             new_items = list(existing)
             for term in manual_terms:
                 sug = expand_variations(term, field_type=field_type,
-                                        openai_api_key=openai_key, exclude=existing)
+                                        openai_api_key=openai_key, exclude=existing,
+                                        geo_context=geo_context)
                 new_items.extend(sug)
             # Dedupe
             seen = set()
@@ -4831,14 +4891,22 @@ with tab_search:
                 st.session_state[sel_key] = current_sel
                 st.session_state[custom_key] = ''
 
-        def _render_ai_field(container, label, input_key, expanded_key, field_type, placeholder):
+        def _render_ai_field(container, label, input_key, expanded_key, field_type,
+                             placeholder, geo_key=None):
             """Render a text input with optional AI suggest button and multiselect.
-            Uses the provided container to avoid nested columns issues."""
+            Uses the provided container to avoid nested columns issues.
+
+            ``geo_key`` is the session-state key holding the user's Location
+            filter. When set AND field_type is company/school, AI suggestions
+            are scoped to that region. Do NOT pass geo_key for the Location
+            field itself (circular).
+            """
             with container:
                 st.text_input(label, key=input_key, placeholder=placeholder)
                 if _has_ai:
                     st.button("✨", key=f"btn_ai_{input_key}",
-                              on_click=_do_ai_expand, args=(input_key, expanded_key, field_type),
+                              on_click=_do_ai_expand,
+                              args=(input_key, expanded_key, field_type, geo_key),
                               help="AI suggest variations", use_container_width=True)
 
                 # Show multiselect if AI suggestions exist
@@ -4858,7 +4926,8 @@ with tab_search:
                     more_col, clear_col = st.columns(2)
                     with more_col:
                         st.button("✨ More", key=f"btn_more_{expanded_key}",
-                                  on_click=_generate_more, args=(input_key, expanded_key, field_type),
+                                  on_click=_generate_more,
+                                  args=(input_key, expanded_key, field_type, geo_key),
                                   help="Generate more suggestions", use_container_width=True)
                     with clear_col:
                         st.button("✕ Clear", key=f"btn_clear_{expanded_key}",
@@ -4872,7 +4941,8 @@ with tab_search:
         _render_ai_field(col1, "Title/Role", "crust_search_title", "expanded_titles", "title",
                          "e.g., team leader")
         _render_ai_field(col2, "Company", "crust_search_company", "expanded_companies", "company",
-                         "e.g., SaaS startups in Tel Aviv")
+                         "e.g., SaaS startups in Tel Aviv",
+                         geo_key="crust_search_location")
         _render_ai_field(col3, "Location", "crust_search_location", "expanded_locations", "location",
                          "e.g., west coast usa")
 
@@ -4951,11 +5021,13 @@ with tab_search:
             _render_ai_field(adv_col1, "Past Titles (comma = OR)", "crust_search_past_titles", "expanded_past_titles", "title",
                              "e.g., devops, backend engineer")
             _render_ai_field(adv_col2, "Past Companies (comma = OR)", "crust_search_past_companies", "expanded_past_companies", "company",
-                             "e.g., big tech, Microsoft")
+                             "e.g., big tech, Microsoft",
+                             geo_key="crust_search_location")
 
             adv_col3, adv_col4 = st.columns(2)
             _render_ai_field(adv_col3, "School/University", "crust_search_school", "expanded_schools", "school",
-                             "e.g., top tech universities in London")
+                             "e.g., top tech universities in London",
+                             geo_key="crust_search_location")
             with adv_col4:
                 pass  # Spacer
 
@@ -10230,12 +10302,13 @@ with tab_database:
                     st.text_input("Past Titles", key="db_f_past_titles", placeholder="backend, team lead",
                                   help="Partial match on past titles (uses full-text search)")
 
-                # Row 3: Current Company (AI), Past Companies
+                # Row 3: Current Company (AI, geo-aware), Past Companies
                 fcol5, fcol6 = st.columns(2)
                 _ai_render_field(
                     fcol5, "Current Company", "db_f_current_company", "db_expanded_current_company",
                     "company", "wiz, monday",
                     _db_openai_key, _db_has_ai,
+                    geo_key="db_f_location",
                 )
                 with fcol6:
                     st.text_input("Past Companies", key="db_f_past_companies", placeholder="google, meta")

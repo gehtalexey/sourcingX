@@ -236,26 +236,35 @@ def build_filters(
     """
     conditions = []
 
-    # Title filter (substring match on current job title)
-    # Supports comma-separated values for OR logic
+    # Title filter (substring match on current job title OR headline)
+    # Supports comma-separated values for OR logic.
+    #
+    # Why OR across two columns:
+    # Crustdata persondb evaluates AND across nested-array columns
+    # (current_employers.*) per-array-element. That makes
+    # title=X AND company=Y collapse to "must be in the SAME current
+    # employment entry" — see PR #39 / docs/research/crustdata-filter-semantics.md
+    # for the per-element AND collapse and live probe transcript.
+    #
+    # Mirroring each title onto `headline` (a top-level profile field
+    # evaluated per-profile, not per-array-element) keeps everything the
+    # previous shape already matched and adds all profiles whose headline
+    # mentions the title — measured lift on the PR #28 repro:
+    # title="software developer" + 4 companies + region=Israel: 5 -> 12-149.
     if title and title.strip():
         title_values = [t.strip() for t in title.split(",") if t.strip()]
-        if len(title_values) == 1:
-            # Single title - simple condition
-            conditions.append({
-                "column": "current_employers.title",
-                "type": "[.]",
-                "value": title_values[0]
-            })
-        elif len(title_values) > 1:
-            # Multiple titles - OR condition
-            title_conditions = [
-                {"column": "current_employers.title", "type": "[.]", "value": t}
-                for t in title_values
-            ]
+        if title_values:
+            title_conditions = []
+            for t in title_values:
+                title_conditions.append(
+                    {"column": "current_employers.title", "type": "[.]", "value": t}
+                )
+                title_conditions.append(
+                    {"column": "headline", "type": "[.]", "value": t}
+                )
             conditions.append({
                 "op": "or",
-                "conditions": title_conditions
+                "conditions": title_conditions,
             })
 
     # Current company filter (comma-separated for OR logic)

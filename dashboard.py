@@ -522,15 +522,16 @@ def _fetch_enriched_for_tab(limit: int = ENRICH_TAB_AUTOLOAD_LIMIT) -> list:
     Cached for 5 minutes so reopening the tab in the same session is instant.
     The DB client is resolved inside the function (not passed in) so Streamlit's
     cache key stays stable across reruns. Call `.clear()` to force a refresh.
+
+    Exceptions are NOT swallowed here — the caller (Enrich tab auto-load)
+    wraps this in try/except and renders a Retry UI on failure. Returning
+    `[]` on error would mask real DB outages as "no profiles".
     """
-    try:
-        from db import get_profiles_by_enrichment_status
-        c = _get_db_client()
-        if c:
-            return get_profiles_by_enrichment_status(c, "enriched", limit=limit)
-    except Exception:
-        pass
-    return []
+    from db import get_profiles_by_enrichment_status
+    c = _get_db_client()
+    if not c:
+        return []
+    return get_profiles_by_enrichment_status(c, "enriched", limit=limit)
 
 
 def _start_keep_alive():
@@ -916,8 +917,14 @@ if _IS_STREAMLIT_CLOUD:
         gc.collect()
 
 
-def cleanup_memory():
-    """Aggressive memory cleanup - call after major operations."""
+def cleanup_memory(preserve_enriched_raw: bool = False):
+    """Aggressive memory cleanup - call after major operations.
+
+    Args:
+        preserve_enriched_raw: If True, do not pop `enriched_profiles_raw`
+            from session state. Used by callers that just populated this
+            cache (e.g. Enrich tab auto-load) and need it to survive cleanup.
+    """
     import gc
 
     # Remove heavy columns from DataFrames
@@ -952,8 +959,10 @@ def cleanup_memory():
     if 'screening_batch_state' in st.session_state and not st.session_state.get('screening_batch_mode'):
         del st.session_state['screening_batch_state']
 
-    # Clear orphaned raw data caches (enriched_profiles_raw can accumulate)
-    st.session_state.pop('enriched_profiles_raw', None)
+    # Clear orphaned raw data caches (enriched_profiles_raw can accumulate).
+    # Skip when a caller has just populated it on purpose (Enrich auto-load).
+    if not preserve_enriched_raw:
+        st.session_state.pop('enriched_profiles_raw', None)
 
     gc.collect()
 
@@ -3071,6 +3080,31 @@ def render_filter_sheet_status(filter_sheets: dict, gspread_client) -> bool:
         "- The sheet was deleted or moved."
     )
     return False
+
+
+def render_filter_funnel_breakdown(counts: dict) -> None:
+    """Render the per-filter "X candidates dropped by Y filter" funnel summary.
+
+    Used by both the Filter and Filter+ tabs so users see the same shape of
+    drop-off breakdown after applying filters. Reads a {filter_name: count}
+    dict and renders one bullet per non-zero filter, plus a hint if anything
+    was filtered out (or an info message if nothing was).
+
+    Args:
+        counts: Mapping of human-readable filter name -> number removed.
+                Values <= 0 are skipped.
+    """
+    st.divider()
+    st.markdown("### Filtered Candidates Summary")
+    st.caption("Counts of candidates removed by each filter (data not stored to save memory)")
+
+    filter_names = [k for k, v in (counts or {}).items() if v and int(v) > 0]
+    if filter_names:
+        for filter_name in filter_names:
+            st.markdown(f"- **{filter_name}**: {int(counts[filter_name])} removed")
+        st.info("💡 To restore candidates, reload original data and re-apply filters with different settings")
+    else:
+        st.info("No candidates were filtered out")
 
 
 @st.cache_data(ttl=600, max_entries=10, show_spinner="Loading sheet...")
@@ -6900,19 +6934,7 @@ with tab_filter:
 
     # Review filtered candidates section - MEMORY OPTIMIZED: only show counts
     if 'filtered_out_counts' in st.session_state and st.session_state['filtered_out_counts']:
-        st.divider()
-        st.markdown("### Filtered Candidates Summary")
-        st.caption("Counts of candidates removed by each filter (data not stored to save memory)")
-
-        counts = st.session_state['filtered_out_counts']
-        filter_names = [k for k, v in counts.items() if v > 0]
-
-        if filter_names:
-            for filter_name in filter_names:
-                st.markdown(f"- **{filter_name}**: {counts[filter_name]} removed")
-            st.info("💡 To restore candidates, reload original data and re-apply filters with different settings")
-        else:
-            st.info("No candidates were filtered out")
+        render_filter_funnel_breakdown(st.session_state['filtered_out_counts'])
 
     # ===== SalesQL Email Enrichment =====
     st.divider()
@@ -7056,7 +7078,9 @@ with tab_enrich:
                         st.session_state['enriched_profiles_raw'] = {
                             p.get('linkedin_url', ''): p for p in profiles if p.get('raw_data')
                         }
-                    cleanup_memory()
+                    # preserve_enriched_raw=True so cleanup_memory() doesn't
+                    # immediately pop the cache we just populated above.
+                    cleanup_memory(preserve_enriched_raw=True)
 
             # Caption + refresh control. Total count comes from the existing
             # module-level cached counter so we don't double-query.
@@ -8631,6 +8655,11 @@ with tab_filter2:
                         st.caption("No individual filter breakdown available.")
                     else:
                         st.caption("No profiles were filtered out.")
+
+            # Persistent per-filter funnel breakdown (parity with Filter tab).
+            # Reuses the shared helper so wording/colors stay identical even if
+            # the Filter tab's summary evolves later.
+            render_filter_funnel_breakdown(removed_by)
 
         # Show passed candidates
         st.divider()

@@ -236,3 +236,81 @@ def test_empty_db_returns_empty_list():
     assert state["enriched_df_len"] == 0
     # enriched_profiles_raw is an empty dict (no profiles → no keys).
     assert state["enriched_profiles_raw"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Regression: cleanup_memory() must NOT delete enriched_profiles_raw when the
+# auto-load just populated it. Codex flagged this on PR #43 — the unguarded
+# pop at the end of cleanup_memory wiped the cache one line after we set it.
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_memory_preserves_enriched_profiles_raw_when_flagged():
+    """When auto-load passes preserve_enriched_raw=True, cleanup_memory must
+    leave the cache untouched. Without the flag it still pops, matching the
+    long-standing behavior on other code paths."""
+
+    try:
+        import streamlit as _st  # type: ignore
+        from dashboard import cleanup_memory  # type: ignore
+    except BaseException as _e:  # pragma: no cover — catches StopException too
+        pytest.skip(f"dashboard module cannot be imported: {type(_e).__name__}: {_e}")
+
+    def _reset_state():
+        try:
+            _st.session_state.clear()
+        except Exception:
+            _st.session_state = {}  # type: ignore[attr-defined]
+
+    # Case 1: cache survives when preserve flag is set.
+    _reset_state()
+    _st.session_state["enriched_profiles_raw"] = {
+        "https://linkedin.com/in/p0": _make_profile(0, with_raw=True)
+    }
+    cleanup_memory(preserve_enriched_raw=True)
+    assert "enriched_profiles_raw" in _st.session_state
+    assert (
+        _st.session_state["enriched_profiles_raw"][
+            "https://linkedin.com/in/p0"
+        ]["raw_data"]["id"]
+        == 0
+    )
+
+    # Case 2: default behavior still pops the cache (legacy callers rely on it).
+    _reset_state()
+    _st.session_state["enriched_profiles_raw"] = {"x": 1}
+    cleanup_memory()
+    assert "enriched_profiles_raw" not in _st.session_state
+
+
+def test_autoload_ordering_keeps_raw_cache_after_cleanup():
+    """End-to-end ordering check: populate enriched_profiles_raw exactly the
+    way the Enrich auto-load does, then run cleanup_memory(preserve_enriched_raw=True)
+    and assert the dict still holds the expected profiles."""
+
+    try:
+        import streamlit as _st  # type: ignore
+        from dashboard import cleanup_memory  # type: ignore
+    except BaseException as _e:  # pragma: no cover — catches StopException too
+        pytest.skip(f"dashboard module cannot be imported: {type(_e).__name__}: {_e}")
+    try:
+        _st.session_state.clear()
+    except Exception:
+        _st.session_state = {}  # type: ignore[attr-defined]
+
+    profiles = [_make_profile(i, with_raw=True) for i in range(5)]
+
+    # Mirror the auto-load population block.
+    _st.session_state["enriched_profiles_raw"] = {
+        p.get("linkedin_url", ""): p for p in profiles if p.get("raw_data")
+    }
+    expected = dict(_st.session_state["enriched_profiles_raw"])
+
+    # Cleanup runs immediately after the population (the order the dashboard
+    # uses today). With the preserve flag set, the dict must equal `expected`.
+    cleanup_memory(preserve_enriched_raw=True)
+
+    raw = _st.session_state.get("enriched_profiles_raw")
+    assert raw is not None, "enriched_profiles_raw was deleted by cleanup_memory"
+    assert set(raw.keys()) == set(expected.keys())
+    assert raw["https://linkedin.com/in/profile-0"]["raw_data"]["id"] == 0

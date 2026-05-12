@@ -10302,7 +10302,7 @@ with tab_database:
                     st.text_input("Past Titles", key="db_f_past_titles", placeholder="backend, team lead",
                                   help="Partial match on past titles (uses full-text search)")
 
-                # Row 3: Current Company (AI, geo-aware), Past Companies
+                # Row 3: Current Company (AI, geo-aware), Past Companies (AI, geo-aware)
                 fcol5, fcol6 = st.columns(2)
                 _ai_render_field(
                     fcol5, "Current Company", "db_f_current_company", "db_expanded_current_company",
@@ -10310,18 +10310,26 @@ with tab_database:
                     _db_openai_key, _db_has_ai,
                     geo_key="db_f_location",
                 )
-                with fcol6:
-                    st.text_input("Past Companies", key="db_f_past_companies", placeholder="google, meta")
+                _ai_render_field(
+                    fcol6, "Past Companies", "db_f_past_companies", "db_expanded_past_companies",
+                    "company", "google, meta",
+                    _db_openai_key, _db_has_ai,
+                    geo_key="db_f_location",
+                )
 
-                # Row 4: Skills (AI), Schools
+                # Row 4: Skills (AI), Schools (AI, geo-aware)
                 fcol7, fcol8 = st.columns(2)
                 _ai_render_field(
                     fcol7, "Skills (any of)", "db_f_skills", "db_expanded_skills",
                     "skill", "python, kubernetes, react",
                     _db_openai_key, _db_has_ai,
                 )
-                with fcol8:
-                    st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
+                _ai_render_field(
+                    fcol8, "Schools", "db_f_schools", "db_expanded_schools",
+                    "school", "technion, tel aviv",
+                    _db_openai_key, _db_has_ai,
+                    geo_key="db_f_location",
+                )
 
                 # Row 5: Freshness, Email, date_after, Search button
                 fcol9, fcol10, fcol11, fcol12 = st.columns([1, 1, 1, 1])
@@ -10342,14 +10350,14 @@ with tab_database:
                 # Read non-AI inputs from session state
                 f_name = st.session_state.get("db_f_name", "")
                 f_past_titles = st.session_state.get("db_f_past_titles", "")
-                f_past_companies = st.session_state.get("db_f_past_companies", "")
-                f_schools = st.session_state.get("db_f_schools", "")
 
                 # Merge AI-refined fields (manual input + multiselect selections)
                 f_location = _ai_effective_value("db_f_location", "db_expanded_location")
                 f_current_title = _ai_effective_value("db_f_current_title", "db_expanded_current_title")
                 f_current_company = _ai_effective_value("db_f_current_company", "db_expanded_current_company")
+                f_past_companies = _ai_effective_value("db_f_past_companies", "db_expanded_past_companies")
                 f_skills = _ai_effective_value("db_f_skills", "db_expanded_skills")
+                f_schools = _ai_effective_value("db_f_schools", "db_expanded_schools")
 
                 # Build filters dict (now uses the merged effective values)
                 current_filters = {

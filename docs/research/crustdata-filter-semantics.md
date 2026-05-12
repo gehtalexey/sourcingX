@@ -206,21 +206,20 @@ This is free and prevents the recruiter from chasing missing candidates. Should 
 
 There is no API syntax that unlocks cross-element AND, but there are several behavioural improvements that respect the constraint while delivering more candidates:
 
-1. **Drop the title from same-array-element AND when a company set is present.** Instead of pushing title into `current_employers.title`, push it into `headline` or `skills` (top-level fields, evaluated per-profile, not per-array-element). Pseudocode:
+1. **Drop the title from same-array-element AND when a company set is present.** Instead of pushing title into `current_employers.title`, push it into `headline` (a top-level field, evaluated per-profile, not per-array-element). Pseudocode:
 
    ```json
    {"op": "and", "conditions": [
      {"op": "or", "conditions": [
        {"column": "headline", "type": "(.)", "value": "software developer"},
-       {"column": "headline", "type": "(.)", "value": "software engineer"},
-       {"column": "skills",   "type": "(.)", "value": "software development"}
+       {"column": "headline", "type": "(.)", "value": "software engineer"}
      ]},
      {"op": "or", "conditions": [/* company list on current_employers.name */]},
      {"column": "region", "type": "[.]", "value": "Israel"}
    ]}
    ```
 
-   This decouples the title check (now profile-level) from the company check (still per-element on current_employers), trading some precision for a step-change in recall. `headline` typically holds the public-facing role, so it captures intent without requiring the role to literally appear in the LinkedIn-employer-entry title string.
+   This decouples the title check (now profile-level) from the company check (still per-element on current_employers), trading some precision for a step-change in recall. `headline` typically holds the public-facing role, so it captures intent without requiring the role to literally appear in the LinkedIn-employer-entry title string. `skills` is another top-level field that is, in principle, a candidate for the same trick — but no probe was run against it during this investigation, so its lift is unverified. Treat it as a follow-up spike if `headline` alone underperforms in production.
 
 2. **Add a "broaden title" toggle** that, when on, replaces the recruiter's title text with the inferred head-noun (`software developer` → `developer`, `frontend engineer` → `engineer`) for the `current_employers.title` predicate. Keep the narrow form for display/screening. This is a small, contained change to `build_filters` and `_effective_val`.
 
@@ -237,6 +236,8 @@ There is no API syntax that unlocks cross-element AND, but there are several beh
 
 The reroute alone (`software developer` → `headline`) buys ~2.4×. The bigger lever is combining the reroute with the title-variant OR pattern the recruiter likely intends; that compounds to ~30× on this query. Below the recruiter's expectation of "hundreds" by ~25%, but the right order of magnitude for the use case.
 
+Note: no probe in this investigation tested filtering on the `skills` field directly, so the lift from a `skills`-based reroute is unverified. The recommendation above is grounded in the three measured `headline` probes only.
+
 ### (c) Switch to a different endpoint (`/screener/person/search` realtime)
 
 The realtime endpoint accepts `CURRENT_COMPANY` + `CURRENT_TITLE` as separate `filter_type`s and supports a `strict_title_and_company_match` post-processing flag. It is unclear from the docs whether non-strict mode evaluates them per-element or per-profile, but its `fuzzy_match` mode is documented as mutually exclusive with strict mode, implying non-strict mode is more lenient. Worth a single follow-up probe, but it's a 1-credit-per-profile endpoint with 15 RPM, so it's a poor fit for the Tab 0 "skim hundreds of results quickly" use case. Reserve for spot-checks, not the main search.
@@ -248,7 +249,7 @@ Not pursuing. The combination of (a) + (b) lands the practical improvement witho
 **Recommended landing order:**
 
 1. Land (a) UI helper text in a small docs/UX PR — gives recruiters an immediate, accurate mental model.
-2. Land (b1) `headline`/`skills` rerouting for title — measurable recall jump on the same query Alexey reported.
+2. Land (b1) `headline` rerouting for title — measurable recall jump on the same query Alexey reported. (`skills` is a follow-up spike if `headline` alone underperforms; not validated here.)
 3. Defer (b2) "broaden title" toggle and (c) realtime probe until (b1) is in production and the recruiter team has 1-2 weeks of feedback.
 
 ## References

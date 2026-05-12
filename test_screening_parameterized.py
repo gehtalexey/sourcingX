@@ -183,11 +183,14 @@ class TestScreeningResultStructure:
     """Test that screening results have the required structure."""
 
     @pytest.mark.parametrize("response_data,expected_fields", [
-        ({"score": 8, "fit": "Strong Fit", "summary": "Great", "why": "Good match"},
-         ['score', 'fit', 'summary']),
-        ({"score": 5, "fit": "Partial Fit", "summary": "OK",
-          "strengths": ["A"], "concerns": ["B"]},
-         ['score', 'fit', 'summary', 'strengths', 'concerns']),
+        # Unified screening_policy contract is {decision, score, reasoning}.
+        # The dashboard maps it to legacy {score, fit, summary} and keeps
+        # decision/reasoning alongside. Extra fields the model emits are
+        # intentionally dropped — the response surface is fixed.
+        ({"decision": "GO", "score": 8, "reasoning": "Good match"},
+         ['score', 'fit', 'summary', 'decision', 'reasoning']),
+        ({"decision": "NO GO", "score": 5, "reasoning": "Borderline"},
+         ['score', 'fit', 'summary', 'decision', 'reasoning']),
     ])
     def test_result_has_required_fields(self, response_data, expected_fields,
                                          mock_openai_client_factory,

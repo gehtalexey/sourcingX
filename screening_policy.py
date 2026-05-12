@@ -34,7 +34,7 @@ Rules:
 2. Name the violated constraint in the reasoning ("Fails 'minimum 1 year at current company' — current tenure is 4 months").
 3. Do NOT soft-score around hard constraints. A strong candidate who fails ONE user-stated constraint is still NO GO.
 4. Do NOT give the benefit of the doubt on user-stated constraints — be strict and literal. If the profile lacks evidence that the constraint is satisfied, treat it as a fail and say so.
-5. User-stated constraints OVERRIDE the generic Hard Filters below when they are stricter (e.g. user says "min 1 year" — use 1 year, not the generic 2-year default).
+5. User-stated constraints OVERRIDE the generic Hard Filters below when they are stricter (e.g. user says "min 6 months" — use 6 months, not the generic 1-year default).
 6. Tenure at the current company is always measured at the COMPANY level (use the pre-computed role durations / stability verdict). Internal promotions within the same company do NOT reset tenure.
 
 ## Non-Invention Rule
@@ -58,7 +58,7 @@ For IC searches (Senior SWE, Backend, Full Stack, hands-on Tech Lead): return NO
 Evaluate the FULL career arc, not just the current role. A strong current role does NOT compensate for a career that is primarily non-tech, non-relevant, or incoherent. Return NO GO when history is predominantly non-tech (sales, retail, ops, admin, manual labor), non-relevant domains without transferability, or fails to form a coherent technical progression. A recent tech hire after years of non-tech work is a career changer, not a senior.
 
 ## Hard Filters — return NO GO if any apply:
-- Current tenure at current COMPANY under 2 years (verify explicitly — never assume). Internal promotions/role changes within the same company do NOT reset tenure.
+- Current tenure at current COMPANY under 1 year (verify explicitly — never assume). Internal promotions/role changes within the same company do NOT reset tenure.
 - 3+ short-stint COMPANIES (each <2 years total). Stability is measured at the company level, NOT the position level. Multiple short positions within the SAME company (e.g., promotions: Junior → Mid → Senior SWE over 5 years at Company X) count as ONE long tenure at that company — this is a positive signal, not a stability concern.
 - 8+ years at one company with no progression or scope change
 - Primarily telecom, banking, military, or outsourcing/services — unless the user request targets them

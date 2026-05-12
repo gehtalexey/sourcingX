@@ -84,12 +84,6 @@ try:
         update_profile_email, update_profile_emails_batch, get_profile,
         ENRICHMENT_REFRESH_MONTHS,
     )
-    import prompts
-    if 'prompts_loaded' not in st.session_state:
-        import importlib
-        importlib.reload(prompts)  # Force fresh load once per session
-        st.session_state['prompts_loaded'] = True
-    from prompts import DEFAULT_PROMPTS
     from screening_policy import get_system_prompt as _policy_system_prompt, build_user_prompt as _policy_user_prompt
     from pb_dedup import filter_results_against_database, update_phantombuster_with_skip_list, get_skip_list_from_database
     HAS_DATABASE = True
@@ -4075,75 +4069,6 @@ def trim_raw_profile(raw):
     return trimmed
 
 
-_DURATION_PROMPT_INSTRUCTIONS = """
-## Pre-calculated Data (use these numbers, do NOT recalculate)
-Role durations, stability, and experience summary are pre-calculated above the profile JSON.
-- Use the ROLE DURATIONS for experience calculation
-- The line marked ">>> CURRENT ROLE <<<" shows the current role
-- If multiple roles at the SAME company, they are promotions — count total time at that company ONCE
-
-## EXPERIENCE RULES (MANDATORY)
-Three experience metrics are pre-calculated above:
-- TOTAL CAREER SPAN: all jobs from first to today, INCLUDES military (general seniority context ONLY)
-- MILITARY SERVICE: Israeli military time (excluded from industry experience, counts as half for role-specific)
-- INDUSTRY EXPERIENCE: career span minus military (general non-military career)
-
-For any JD experience rule ("max N years", "min N years", "reject >N years", "between A and B years"), compare against INDUSTRY EXPERIENCE — NEVER TOTAL CAREER SPAN. Israeli military service (IDF, 8200, Mamram, Talpiot, C4I, etc.) is mandatory at age 18-21 and MUST NOT count toward years-of-experience caps. A candidate whose TOTAL CAREER SPAN is over the limit but whose INDUSTRY EXPERIENCE is under it (because the extra years are mandatory military) PASSES the experience check.
-
-YOU must determine ROLE-SPECIFIC EXPERIENCE from the role durations above:
-- Only count roles relevant to the JD (e.g. DevOps/Infrastructure/SRE roles for a DevOps JD)
-- Do NOT count unrelated early-career roles (tech support, QA, sysadmin) toward role-specific experience
-- The JD's year range (e.g. "5-15 years") and rejection threshold (e.g. "reject >15 years") apply to ROLE-SPECIFIC experience
-- Military service counts as HALF toward role-specific experience floors (e.g. "min 5 years tech") — but NEVER toward role-specific experience caps (e.g. "max 5 years")
-
-## Role Classification Edge Cases
-- "Software Engineer" / "Senior Software Engineer" is NOT automatically relevant or irrelevant.
-  Check the candidate's skills: if they have strong JD overlap (e.g. K8s, Terraform, AWS, CI/CD for a DevOps JD),
-  count the SWE role as HALF toward role-specific experience. If no skill overlap, do not count it.
-- IT Support, QA, Helpdesk, Storage Admin, Network Admin = NOT relevant, do not count
-- SysAdmin = only count if cloud-focused (AWS/GCP/Azure mentioned in role or skills)
-
-## STABILITY VERDICT (MANDATORY — do NOT override)
-A STABILITY VERDICT is pre-calculated above. You MUST obey it:
-- If "STABILITY VERDICT: FAIL → MAX SCORE 4" — your score CANNOT exceed 4, no matter how strong the candidate
-- If "STABILITY VERDICT: FAIL → MAX SCORE 5" — your score CANNOT exceed 5, no matter how strong the candidate
-- If "STABILITY VERDICT: PASS" — score normally
-- IMPORTANT: Stability is measured by time at current COMPANY, not current position title. Promotions within the same company do NOT reset tenure.
-This is a hard cap. Do NOT override it even if the candidate has top companies or perfect skills."""
-
-
-SCREENING_PROMPT = """You are a senior technical recruiter screening candidates for tech companies.
-
-Today's date: {today}
-
-## How to Screen:
-1. Read the Job Description carefully - identify must-have requirements and rejection criteria
-2. Read the candidate's profile JSON - check their experience, skills, and work history
-3. Score 1-10 based on how well they match the JD requirements
-
-## Scoring Guide:
-- 9-10: Exceeds all must-have requirements, top candidate
-- 7-8: Meets all must-have requirements
-- 5-6: Close but missing 1 requirement, worth reviewing
-- 3-4: Missing multiple requirements, poor fit
-- 1-2: Matches rejection criteria (overqualified, consulting company, etc.)
-
-## Key Rules:
-- Nice-to-Have = bonus only, NOT a penalty if missing
-- Israeli military service (IDF, 8200, Mamram, Talpiot, C4I, IAF, and Hebrew variants like צה"ל / צבא / ממר"ם / תלפיות) is mandatory in Israel (age 18-21) and a POSITIVE signal. It counts as HALF toward role-specific experience FLOORS, but NEVER toward years-of-experience CAPS — for any "max N years" / "reject >N years" rule, compare against INDUSTRY EXPERIENCE only.
-- Role durations and experience summary are pre-calculated above the profile JSON. Use those numbers, do NOT recalculate from dates
-- If multiple roles at the SAME company have overlapping dates, they are promotions. Count total time at the company once
-- The JD year range (e.g. "5-15 years") applies to ROLE-SPECIFIC experience — only count roles relevant to the JD
-- Do NOT count unrelated early-career roles (tech support, help desk, QA, basic sysadmin) toward role-specific experience
-- "Software Engineer" roles: check skills for JD overlap. If strong overlap (e.g. K8s, Terraform for DevOps JD), count as HALF. If no overlap, do not count
-- SysAdmin: only count if cloud-focused (AWS/GCP/Azure). On-prem only sysadmin does not count
-- Check the "skills" array for technical skills
-- Read "employer_description" to understand what each company does
-
-Return ONLY valid JSON in this format:
-{json_format}"""
-
-
 def _extract_json_from_text(text):
     """Extract JSON from text, stripping markdown code fences if present."""
     text = text.strip()
@@ -4177,9 +4102,12 @@ def _decision_to_fit_label(decision: str, score: int) -> str:
     return "Not a Fit"
 
 
+_DEFAULT_USER_REQUEST = "Senior software engineering candidate. Apply the standard policy."
+
+
 def screen_profile(profile: dict, job_description: str, client,
                    tracker: 'UsageTracker' = None, mode: str = "detailed",
-                   ai_model: str = "gpt-4o-mini", role_prompt: str = None,
+                   ai_model: str = "gpt-4o-mini",
                    ai_provider: str = "openai", user_request: str = None) -> dict:
     """Screen a profile against a job description using OpenAI or Anthropic.
 
@@ -4190,8 +4118,11 @@ def screen_profile(profile: dict, job_description: str, client,
         tracker: Optional usage tracker
         mode: "quick" for cheaper/faster or "detailed" for full analysis
         ai_model: Model to use (e.g. gpt-4o-mini, claude-haiku-4-5-20251001)
-        role_prompt: Optional role-specific system prompt
         ai_provider: "openai" or "anthropic"
+        user_request: Recruiter request text (role, must-haves, exclusions).
+            If empty/None, a sensible default is used. This always routes
+            through the unified ``screening_policy`` rubric — there is no
+            longer a role-specific or legacy SCREENING_PROMPT branch.
     """
     start_time = time.time()
 
@@ -4226,55 +4157,13 @@ def screen_profile(profile: dict, job_description: str, client,
     durations_text = compute_role_durations_cached(raw)
     trimmed_raw = trim_raw_profile(raw)
 
-    # JSON format based on mode (legacy path only — unified policy has its own format)
-    if mode == "quick":
-        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit"}'
-        max_tokens = 50
-    else:
-        json_format = '{"score": 1-10, "fit": "Strong Fit|Good Fit|Partial Fit|Not a Fit", "summary": "2-3 sentences: experience calc, key skills match, and score justification"}'
-        max_tokens = 300
-
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    # Three prompt-build paths:
-    #   1. user_request  → unified screening_policy.py (new default for regular users)
-    #   2. role_prompt   → legacy role-specific prompt from prompts.py (admin-only)
-    #   3. fallback      → old SCREENING_PROMPT constant
-    use_unified_policy = bool(user_request) and not role_prompt
-    if use_unified_policy:
-        system_prompt = _policy_system_prompt()
-        user_prompt = _policy_user_prompt(user_request, durations_text, trimmed_raw)
-        max_tokens = 400  # room for decision + score + reasoning
-    elif role_prompt:
-        system_prompt = f"""{role_prompt}
-{_DURATION_PROMPT_INSTRUCTIONS}
-
-Today's date: {today}
-
-Return ONLY valid JSON in this format:
-{json_format}"""
-        durations_header = f"{durations_text}\n\n" if durations_text else ""
-        user_prompt = f"""{durations_header}## Job Description:
-{job_description}
-
-## Candidate Profile:
-```json
-{json.dumps(trimmed_raw, indent=2, default=str)}
-```
-
-Evaluate this candidate against the job requirements and return JSON."""
-    else:
-        system_prompt = SCREENING_PROMPT.format(today=today, json_format=json_format)
-        durations_header = f"{durations_text}\n\n" if durations_text else ""
-        user_prompt = f"""{durations_header}## Job Description:
-{job_description}
-
-## Candidate Profile:
-```json
-{json.dumps(trimmed_raw, indent=2, default=str)}
-```
-
-Evaluate this candidate against the job requirements and return JSON."""
+    # Single prompt path: unified screening_policy.py rubric.
+    # When user_request is empty (legacy callers or admin Test Single button),
+    # fall back to a sensible default so the policy still applies.
+    effective_user_request = user_request or job_description or _DEFAULT_USER_REQUEST
+    system_prompt = _policy_system_prompt()
+    user_prompt = _policy_user_prompt(effective_user_request, durations_text, trimmed_raw)
+    max_tokens = 400  # room for decision + score + reasoning
 
     try:
         if ai_provider == "anthropic":
@@ -4351,20 +4240,19 @@ Evaluate this candidate against the job requirements and return JSON."""
 
             result = json.loads(response.choices[0].message.content)
 
-        # Unified-policy path returns {decision, score, reasoning}.
+        # Unified policy returns {decision, score, reasoning}.
         # Map to legacy {score, fit, summary} so downstream UI keeps working,
         # and keep the raw decision/reasoning fields for the new display.
-        if use_unified_policy:
-            decision = str(result.get("decision", "NO GO")).upper().strip()
-            score = int(result.get("score", 0) or 0)
-            reasoning = str(result.get("reasoning", "") or "")
-            result = {
-                "score": score,
-                "fit": _decision_to_fit_label(decision, score),
-                "summary": reasoning,
-                "decision": decision,
-                "reasoning": reasoning,
-            }
+        decision = str(result.get("decision", "NO GO")).upper().strip()
+        score = int(result.get("score", 0) or 0)
+        reasoning = str(result.get("reasoning", "") or "")
+        result = {
+            "score": score,
+            "fit": _decision_to_fit_label(decision, score),
+            "summary": reasoning,
+            "decision": decision,
+            "reasoning": reasoning,
+        }
 
         # Deterministic post-screening: tenure hard-constraint override.
         # Strengthening the prompt is not enough — the model can still trade
@@ -4373,7 +4261,7 @@ Evaluate this candidate against the job requirements and return JSON."""
         # See tenure_constraint_validator.py (Issue 7, Chen).
         try:
             from tenure_constraint_validator import enforce_tenure_constraint
-            constraint_text_parts = [t for t in (user_request, job_description, role_prompt) if t]
+            constraint_text_parts = [t for t in (user_request, job_description) if t]
             constraint_text = "\n".join(constraint_text_parts)
             result = enforce_tenure_constraint(result, constraint_text, raw)
         except Exception:
@@ -4510,7 +4398,7 @@ def fetch_raw_data_for_batch(profiles: list, raw_index: dict = None, db_client =
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
                           max_workers: int = 15,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
-                          ai_model: str = "gpt-4o-mini", role_prompt: str = None,
+                          ai_model: str = "gpt-4o-mini",
                           ai_provider: str = "openai", api_key: str = None,
                           user_request: str = None) -> list:
     """Screen multiple profiles in parallel using ThreadPoolExecutor.
@@ -4524,9 +4412,9 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         cancel_flag: Dict with 'cancelled' key to check for cancellation
         mode: "quick" for cheaper/faster or "detailed" for full analysis
         ai_model: Model to use
-        role_prompt: Optional role-specific system prompt
         ai_provider: "openai" or "anthropic"
         api_key: API key for the selected provider (overrides openai_api_key)
+        user_request: Recruiter request text routed to ``screen_profile``.
 
     Returns:
         List of screening results with profile info included
@@ -4564,7 +4452,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                     if cancel_flag and cancel_flag.get('cancelled'):
                         return None
 
-                    result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider, user_request=user_request)
+                    result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, ai_provider=ai_provider, user_request=user_request)
                     break  # Success, exit retry loop
 
                 except Exception as e:
@@ -8692,37 +8580,9 @@ with tab_screening:
             placeholder="Example: Senior Backend Engineer, Node.js + Postgres, 5+ years at a product startup. Must have: production API ownership, microservices. Exclude: team leads without recent hands-on, >8 years at a single non-progressing role..."
         )
 
-        # Admin-only: legacy role-specific prompts from prompts.py
-        _is_admin = is_admin_user()
-        role_prompt = None
-        selected_role = 'General (auto)'
-        if _is_admin:
-            with st.expander("🔧 Admin — Legacy role-specific prompts (overrides unified policy)", expanded=False):
-                role_options = ['General (auto)']
-                role_map = {'General (auto)': None}
-                try:
-                    for role_key, role_data in DEFAULT_PROMPTS.items():
-                        name = role_data.get('name', role_key.title())
-                        role_options.append(name)
-                        role_map[name] = role_data.get('prompt')
-                except Exception:
-                    pass
-
-                selected_role = st.selectbox(
-                    "Role type (legacy — admin only)",
-                    options=role_options,
-                    index=0,
-                    key="screening_role_select",
-                    help="Legacy behavior: picks a role-specific system prompt from prompts.py. Leave on 'General (auto)' to use the unified screening_policy.py."
-                )
-                role_prompt = role_map.get(selected_role)
-                if role_prompt:
-                    st.caption(f"⚠️ Legacy mode active — using '{selected_role}' prompt instead of unified policy")
-                    with st.expander(f"View {selected_role} system prompt ({len(role_prompt)} chars)"):
-                        st.code(role_prompt, language=None)
-
-        st.session_state['active_role_prompt'] = role_prompt
-        st.session_state['active_role_name'] = selected_role
+        # Single screening path: the unified screening_policy rubric is used
+        # for every run. The legacy admin role-prompt dropdown was removed
+        # — every recruiter, admin or not, now goes through one prompt path.
 
         # Screening Configuration
         screen_count = st.number_input(
@@ -8743,11 +8603,7 @@ with tab_screening:
         output_tokens = 150
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
-        if role_prompt:
-            role_display = f"Legacy: {selected_role}"
-        else:
-            role_display = "Unified policy"
-        st.info(f"Rubric: **{role_display}** | Model: **gpt-4o-mini** | Est. cost: **${est_cost:.3f}**")
+        st.info(f"Rubric: **Unified policy** | Model: **gpt-4o-mini** | Est. cost: **${est_cost:.3f}**")
 
         # Debug: Show available fields and test single profile (admin-only)
         if is_admin_user():
@@ -8764,15 +8620,14 @@ with tab_screening:
                             else:
                                 client = OpenAI(api_key=openai_key)
                             test_mode = 'detailed'
-                            role_name = st.session_state.get('active_role_name', 'General')
-                            st.write(f"Testing with first profile ({test_mode} mode, role: {role_name}, model: {ai_model})...")
+                            st.write(f"Testing with first profile ({test_mode} mode, unified policy, model: {ai_model})...")
                             test_profile = profiles_df.iloc[0].to_dict()
                             # Clean NaN
                             import math
                             for k, v in test_profile.items():
                                 if isinstance(v, float) and math.isnan(v):
                                     test_profile[k] = ''
-                            result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, role_prompt=role_prompt, ai_provider=ai_provider, user_request=(None if role_prompt else job_description))
+                            result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, ai_provider=ai_provider, user_request=job_description)
                             st.write("Result:", result)
                         except Exception as e:
                             import traceback
@@ -8951,7 +8806,6 @@ with tab_screening:
                     max_workers = min(max_workers, 5)
                 elif batch_ai_provider == "openai":
                     max_workers = min(max_workers, 10)  # Cap OpenAI at 10 concurrent
-                batch_role_prompt = batch_state.get('role_prompt')
                 batch_user_request = batch_state.get('user_request')
                 batch_size = 50  # Tier 3: 50 parallel requests, 50 × 15KB = ~750KB memory
                 current_batch = batch_state.get('current_batch', 0)
@@ -9015,10 +8869,9 @@ with tab_screening:
                                 else:
                                     batch_progress['partial'] += 1
 
-                        # Screen this batch - use dynamic workers (scales with concurrent users)
-                        # Both structured and classic mode use the same screening function
-                        # Structured mode: job_desc contains text box requirements, role_prompt is system prompt
-                        # Classic mode: job_desc is free-form JD text, role_prompt is system prompt
+                        # Screen this batch - use dynamic workers (scales with concurrent users).
+                        # Every batch goes through the unified screening_policy rubric;
+                        # ``user_request`` carries the recruiter's text.
                         batch_results = screen_profiles_batch(
                             batch_profiles,
                             job_desc,
@@ -9026,7 +8879,6 @@ with tab_screening:
                             max_workers=min(max_workers, len(batch_profiles)),
                             mode=screen_mode,
                             ai_model=batch_ai_model,
-                            role_prompt=batch_role_prompt,
                             progress_callback=_on_profile_screened,
                             ai_provider=batch_ai_provider,
                             api_key=batch_api_key,
@@ -9230,8 +9082,7 @@ with tab_screening:
                     'ai_model': ai_model,
                     'ai_provider': ai_provider,
                     'api_key': anthropic_key if ai_provider == "anthropic" else openai_key,
-                    'role_prompt': role_prompt,  # Admin-only legacy path
-                    'user_request': None if role_prompt else job_description,  # Unified policy path
+                    'user_request': job_description,  # Unified policy path (single source of truth)
                     'current_batch': 0,
                     'results': initial_results,  # Start with existing results if re-screening selected
                     'is_continue': False,  # Always fresh screening

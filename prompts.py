@@ -1,6 +1,13 @@
 """
 Screening prompts for different roles.
 
+DEPRECATED for the main dashboard AI-Screen flow.
+Superseded by ``screening_policy.SCREENING_POLICY`` in the dashboard. Kept for
+the structured-screening UI path (``structured_screening.py`` /
+``screening_prompt_builder.py``) and the ``/screen`` CLI skill, which still
+import role-specific prompts from this module. Do not wire new code through
+the role-specific prompts here — use ``screening_policy`` instead.
+
 Organized by category:
   - Israel Engineering (backend, frontend, fullstack, devops, team lead, product, mobile)
   - Netherlands (backend/software engineer, product manager)

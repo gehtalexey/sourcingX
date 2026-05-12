@@ -154,6 +154,191 @@ except ImportError:
 
 import hashlib  # For performance caching
 
+# =============================================================================
+# AI field-expansion helpers (shared across Tab 0 Search and Tab 7 Database)
+# =============================================================================
+# The Crustdata People DB tab (Tab 0) introduced an inline "AI refine" UX:
+# user types a value into a text input, clicks the "Refine with AI" button,
+# the LLM (via crustdata_search.expand_variations) returns 5-10 LinkedIn-style
+# variations, those land in a multiselect, and on Search the manual input +
+# the multiselect selections are merged into the value passed to the backend.
+#
+# These helpers are reusable across tabs as long as each tab uses its own
+# session-state key prefix (Tab 0 uses ``crust_search_<field>`` /
+# ``expanded_<field>``; Tab 7 uses ``db_search_<field>`` /
+# ``db_expanded_<field>``). The helpers don't hard-code any keys.
+#
+# Streamlit constraints:
+# - Button ``on_click`` callbacks can't fire inside ``st.form(...)``. Tabs that
+#   want AI refine must keep the inputs OUTSIDE the form (state still persists
+#   via ``key=`` on the text input).
+# - The multiselect's ``key`` is always ``f"sel_{expanded_key}"`` so
+#   ``_ai_effective_value`` can read the user's selection.
+
+
+def _ai_expand_callback(input_key, expanded_key, field_type, openai_api_key):
+    """on_click: read input_key, AI-expand each manual term, merge with existing.
+
+    Stores the merged list at ``st.session_state[expanded_key]`` and sets
+    ``st.session_state[f'sel_{expanded_key}']`` to the same list so the
+    multiselect defaults to "everything selected".
+    """
+    if not openai_api_key or not HAS_CRUSTDATA_SEARCH:
+        return
+    val = st.session_state.get(input_key, '').strip()
+    if not val:
+        return
+    # Parse comma-separated manual values
+    manual_terms = [t.strip() for t in val.split(',') if t.strip()]
+    # Start with existing suggestions + manual terms
+    all_items = list(st.session_state.get(expanded_key, []))
+    all_items.extend(manual_terms)
+    # AI-expand each manual term
+    for term in manual_terms:
+        sug = expand_variations(term, field_type=field_type, openai_api_key=openai_api_key)
+        all_items.extend(sug)
+    # Dedupe preserving order (case-insensitive)
+    seen = set()
+    merged = []
+    for item in all_items:
+        k = item.lower()
+        if k not in seen:
+            seen.add(k)
+            merged.append(item)
+    st.session_state[expanded_key] = merged
+    st.session_state[f"sel_{expanded_key}"] = merged
+
+
+def _ai_generate_more_callback(input_key, expanded_key, field_type, openai_api_key):
+    """on_click: generate additional suggestions, excluding the ones already shown."""
+    if not openai_api_key or not HAS_CRUSTDATA_SEARCH:
+        return
+    val = st.session_state.get(input_key, '').strip()
+    if not val:
+        return
+    existing = st.session_state.get(expanded_key, [])
+    manual_terms = [t.strip() for t in val.split(',') if t.strip()]
+    new_items = list(existing)
+    for term in manual_terms:
+        sug = expand_variations(term, field_type=field_type,
+                                openai_api_key=openai_api_key, exclude=existing)
+        new_items.extend(sug)
+    seen = set()
+    merged = []
+    for item in new_items:
+        k = item.lower()
+        if k not in seen:
+            seen.add(k)
+            merged.append(item)
+    st.session_state[expanded_key] = merged
+    st.session_state[f"sel_{expanded_key}"] = merged
+
+
+def _ai_clear_expanded_callback(expanded_key):
+    """on_click: drop the AI suggestions for a field."""
+    st.session_state.pop(expanded_key, None)
+
+
+def _ai_add_custom_value_callback(custom_key, expanded_key):
+    """on_change: add a free-text variant to the multiselect options + auto-select it."""
+    val = st.session_state.get(custom_key, '').strip()
+    if val and expanded_key in st.session_state:
+        new_items = [v.strip() for v in val.split(',') if v.strip()]
+        existing = st.session_state[expanded_key]
+        existing_lower = {e.lower() for e in existing}
+        sel_key = f"sel_{expanded_key}"
+        current_sel = list(st.session_state.get(sel_key, existing))
+        for item in new_items:
+            if item.lower() not in existing_lower:
+                existing.append(item)
+                existing_lower.add(item.lower())
+                current_sel.append(item)
+        st.session_state[expanded_key] = existing
+        st.session_state[sel_key] = current_sel
+        st.session_state[custom_key] = ''
+
+
+def _ai_render_field(container, label, input_key, expanded_key, field_type,
+                     placeholder, openai_api_key, has_ai):
+    """Render text input + "AI Refine" button + (if expanded) a multiselect.
+
+    Uses the provided container so callers can place the field inside their
+    own column layout without running into Streamlit's nested-columns rule.
+    """
+    with container:
+        st.text_input(label, key=input_key, placeholder=placeholder)
+        if has_ai:
+            st.button(
+                "✨",
+                key=f"btn_ai_{input_key}",
+                on_click=_ai_expand_callback,
+                args=(input_key, expanded_key, field_type, openai_api_key),
+                help="AI suggest variations",
+                use_container_width=True,
+            )
+
+        if st.session_state.get(expanded_key):
+            st.multiselect(
+                f"Select {label.split('(')[0].strip()}:",
+                options=st.session_state[expanded_key],
+                default=st.session_state[expanded_key],
+                key=f"sel_{expanded_key}",
+                label_visibility="collapsed",
+            )
+            custom_key = f"custom_{expanded_key}"
+            st.text_input(
+                "Add custom:",
+                key=custom_key,
+                placeholder="Type and press Enter",
+                on_change=_ai_add_custom_value_callback,
+                args=(custom_key, expanded_key),
+                label_visibility="collapsed",
+            )
+            more_col, clear_col = st.columns(2)
+            with more_col:
+                st.button(
+                    "✨ More",
+                    key=f"btn_more_{expanded_key}",
+                    on_click=_ai_generate_more_callback,
+                    args=(input_key, expanded_key, field_type, openai_api_key),
+                    help="Generate more suggestions",
+                    use_container_width=True,
+                )
+            with clear_col:
+                st.button(
+                    "✕ Clear",
+                    key=f"btn_clear_{expanded_key}",
+                    on_click=_ai_clear_expanded_callback,
+                    args=(expanded_key,),
+                    help="Clear suggestions",
+                    use_container_width=True,
+                )
+
+
+def _ai_effective_value(input_key, expanded_key):
+    """Merge manual text input + AI multiselect selections.
+
+    Returns a comma-separated string of unique values (case-insensitive
+    dedupe, original case preserved). Works with any key prefix — both Tab 0
+    (``crust_search_*`` / ``expanded_*``) and Tab 7 (``db_search_*`` /
+    ``db_expanded_*``) call this with their own keys.
+    """
+    parts = []
+    raw = st.session_state.get(input_key, '').strip()
+    if raw:
+        parts.extend([v.strip() for v in raw.split(',') if v.strip()])
+    sel = st.session_state.get(f"sel_{expanded_key}", [])
+    if sel:
+        parts.extend(sel)
+    seen = set()
+    unique = []
+    for p in parts:
+        if p.lower() not in seen:
+            seen.add(p.lower())
+            unique.append(p)
+    return ', '.join(unique)
+
+
 # ===== Performance: on_click callbacks to avoid st.rerun() =====
 # These callbacks update session state directly; Streamlit auto-reruns after callbacks
 
@@ -9997,69 +10182,103 @@ with tab_database:
                 # --- Search Filters (server-side) ---
                 st.markdown("##### Search Filters")
 
-                with st.form("db_search_form"):
-                    # Full-text search
-                    fulltext_query = st.text_input(
-                        "Full-text search",
-                        key="db_fulltext_search",
-                        placeholder="e.g., (react OR angular) AND node.js NOT director",
-                        help=(
-                            "**Boolean syntax** (LinkedIn-style):\n"
-                            "- `AND` (or just space) — both terms required\n"
-                            "- `OR` (or `,`) — either term matches\n"
-                            "- `NOT` (or `-` prefix) — exclude term\n"
-                            "- `( ... )` — group terms\n\n"
-                            "**Searches across:** name, titles, companies, skills, schools, "
-                            "summary, headline, job descriptions, education, languages."
-                        )
+                # AI refine config (mirrors Tab 0 Search). Buttons can't fire inside
+                # ``st.form`` callbacks, so this section is a regular block — the
+                # text inputs persist via ``key=`` and the Search button below
+                # triggers the search on click. Tab-7 specific key namespace:
+                # ``db_f_<field>`` for inputs, ``db_expanded_<field>`` for AI
+                # suggestions. The module-level helpers
+                # (_ai_render_field / _ai_effective_value) do the same work the
+                # Tab 0 closures do, just parameterised by key prefix.
+                _db_openai_key = load_openai_key()
+                _db_has_ai = bool(_db_openai_key and HAS_CRUSTDATA_SEARCH)
+
+                # Full-text search (no AI refine — it's already a boolean expression)
+                fulltext_query = st.text_input(
+                    "Full-text search",
+                    key="db_fulltext_search",
+                    placeholder="e.g., (react OR angular) AND node.js NOT director",
+                    help=(
+                        "**Boolean syntax** (LinkedIn-style):\n"
+                        "- `AND` (or just space) — both terms required\n"
+                        "- `OR` (or `,`) — either term matches\n"
+                        "- `NOT` (or `-` prefix) — exclude term\n"
+                        "- `( ... )` — group terms\n\n"
+                        "**Searches across:** name, titles, companies, skills, schools, "
+                        "summary, headline, job descriptions, education, languages."
                     )
+                )
 
-                    # Row 1: Name, Location
-                    fcol1, fcol2 = st.columns(2)
-                    with fcol1:
-                        f_name = st.text_input("Name", key="db_f_name", placeholder="john doe")
-                    with fcol2:
-                        f_location = st.text_input("Location", key="db_f_location", placeholder="israel, nyc")
+                # Row 1: Name, Location (Location has AI refine)
+                fcol1, fcol2 = st.columns(2)
+                with fcol1:
+                    st.text_input("Name", key="db_f_name", placeholder="john doe")
+                _ai_render_field(
+                    fcol2, "Location", "db_f_location", "db_expanded_location",
+                    "location", "israel, nyc",
+                    _db_openai_key, _db_has_ai,
+                )
 
-                    # Row 2: Current Title, Past Titles
-                    fcol3, fcol4 = st.columns(2)
-                    with fcol3:
-                        f_current_title = st.text_input("Current Title", key="db_f_current_title", placeholder="backend, devops",
-                                                        help="Partial match on current title only")
-                    with fcol4:
-                        f_past_titles = st.text_input("Past Titles", key="db_f_past_titles", placeholder="backend, team lead",
-                                                      help="Partial match on past titles (uses full-text search)")
+                # Row 2: Current Title (AI), Past Titles
+                fcol3, fcol4 = st.columns(2)
+                _ai_render_field(
+                    fcol3, "Current Title", "db_f_current_title", "db_expanded_current_title",
+                    "title", "backend, devops",
+                    _db_openai_key, _db_has_ai,
+                )
+                with fcol4:
+                    st.text_input("Past Titles", key="db_f_past_titles", placeholder="backend, team lead",
+                                  help="Partial match on past titles (uses full-text search)")
 
-                    # Row 3: Current Company, Past Companies
-                    fcol5, fcol6 = st.columns(2)
-                    with fcol5:
-                        f_current_company = st.text_input("Current Company", key="db_f_current_company", placeholder="wiz, monday")
-                    with fcol6:
-                        f_past_companies = st.text_input("Past Companies", key="db_f_past_companies", placeholder="google, meta")
+                # Row 3: Current Company (AI), Past Companies
+                fcol5, fcol6 = st.columns(2)
+                _ai_render_field(
+                    fcol5, "Current Company", "db_f_current_company", "db_expanded_current_company",
+                    "company", "wiz, monday",
+                    _db_openai_key, _db_has_ai,
+                )
+                with fcol6:
+                    st.text_input("Past Companies", key="db_f_past_companies", placeholder="google, meta")
 
-                    # Row 4: Skills & Schools
-                    fcol7, fcol8 = st.columns(2)
-                    with fcol7:
-                        f_skills = st.text_input("Skills (any of)", key="db_f_skills", placeholder="python, kubernetes, react")
-                    with fcol8:
-                        f_schools = st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
+                # Row 4: Skills (AI), Schools
+                fcol7, fcol8 = st.columns(2)
+                _ai_render_field(
+                    fcol7, "Skills (any of)", "db_f_skills", "db_expanded_skills",
+                    "skill", "python, kubernetes, react",
+                    _db_openai_key, _db_has_ai,
+                )
+                with fcol8:
+                    st.text_input("Schools", key="db_f_schools", placeholder="technion, tel aviv")
 
-                    # Row 5: Freshness, Email & Search button
-                    fcol9, fcol10, fcol11, fcol12 = st.columns([1, 1, 1, 1])
-                    with fcol9:
-                        f_freshness = st.selectbox(
-                            "Freshness",
-                            ["All", "Fresh (<6mo)", "Stale (>6mo)"],
-                            key="db_f_freshness"
-                        )
-                    with fcol10:
-                        f_has_email = st.checkbox("Has Email", key="db_f_has_email")
-                    with fcol11:
-                        f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
-                    with fcol12:
-                        search_clicked = st.form_submit_button("Search", type="primary", width="stretch")
+                # Row 5: Freshness, Email, date_after, Search button
+                fcol9, fcol10, fcol11, fcol12 = st.columns([1, 1, 1, 1])
+                with fcol9:
+                    f_freshness = st.selectbox(
+                        "Freshness",
+                        ["All", "Fresh (<6mo)", "Stale (>6mo)"],
+                        key="db_f_freshness"
+                    )
+                with fcol10:
+                    f_has_email = st.checkbox("Has Email", key="db_f_has_email")
+                with fcol11:
+                    f_date_after = st.date_input("Enriched After", value=None, key="db_f_date_after")
+                with fcol12:
+                    st.write("")  # vertical spacer to align button with selectbox
+                    search_clicked = st.button("Search", key="db_search_btn", type="primary", width="stretch")
 
-                # Build filters dict
+                # Read non-AI inputs from session state
+                f_name = st.session_state.get("db_f_name", "")
+                f_past_titles = st.session_state.get("db_f_past_titles", "")
+                f_past_companies = st.session_state.get("db_f_past_companies", "")
+                f_schools = st.session_state.get("db_f_schools", "")
+
+                # Merge AI-refined fields (manual input + multiselect selections)
+                f_location = _ai_effective_value("db_f_location", "db_expanded_location")
+                f_current_title = _ai_effective_value("db_f_current_title", "db_expanded_current_title")
+                f_current_company = _ai_effective_value("db_f_current_company", "db_expanded_current_company")
+                f_skills = _ai_effective_value("db_f_skills", "db_expanded_skills")
+
+                # Build filters dict (now uses the merged effective values)
                 current_filters = {
                     'name': f_name, 'current_title': f_current_title, 'past_titles': f_past_titles,
                     'current_company': f_current_company, 'past_companies': f_past_companies,

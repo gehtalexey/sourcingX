@@ -1585,6 +1585,94 @@ def _ast_to_postgrest(ast: dict, column: str) -> str:
     return ''
 
 
+# Characters that have special meaning in PostgreSQL POSIX regex and must be
+# escaped before being injected into a word-boundary pattern. We deliberately
+# treat hyphen as a literal too — company names like "log-on" come through with
+# a hyphen and POSIX considers it benign outside a char class, but escaping
+# keeps the regex predictable across PostgREST quirks.
+_POSIX_REGEX_SPECIALS = r'\^$.|?*+()[]{}'
+
+
+def _regex_escape_for_word_boundary(value: str) -> str:
+    """Escape a literal term for embedding inside a PostgREST `imatch` regex.
+
+    Doubles backslashes so the resulting filter string survives the trip
+    through the PostgREST URL encoding intact.
+    """
+    out = []
+    for ch in value:
+        if ch == '\\':
+            out.append('\\\\')
+        elif ch in _POSIX_REGEX_SPECIALS:
+            out.append('\\' + ch)
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
+def _ast_to_postgrest_word_boundary(ast: dict, column: str) -> str:
+    """Convert AST to PostgREST filter syntax using word-boundary regex.
+
+    Identical contract to ``_ast_to_postgrest`` but each TERM becomes a POSIX
+    regex anchored by ``\\y`` word boundaries via the ``imatch`` operator
+    (case-insensitive regex match). This prevents the substring false-positive
+    where the term ``elad`` matches inside ``Celadon Books``.
+
+    Used for the Tab 7 Current Company filter — see
+    ``test_db_search_company_substring.py`` for the regression contract.
+    """
+    node_type = ast.get('type')
+
+    if node_type == 'TERM':
+        value = ast.get('value', '').strip()
+        if not value:
+            return ''
+        escaped = _regex_escape_for_word_boundary(value)
+        # \y is PostgreSQL POSIX regex word-boundary; imatch is case-insensitive
+        return f"{column}.imatch.\\y{escaped}\\y"
+
+    if node_type == 'NOT':
+        child_filter = _ast_to_postgrest_word_boundary(ast['child'], column)
+        if not child_filter:
+            return ''
+        if '.imatch.' in child_filter:
+            return child_filter.replace('.imatch.', '.not.imatch.')
+        return f"not.{child_filter}"
+
+    if node_type == 'OR':
+        children = [_ast_to_postgrest_word_boundary(c, column) for c in ast['children']]
+        children = [c for c in children if c]
+        if not children:
+            return ''
+        if len(children) == 1:
+            return children[0]
+        return f"or({','.join(children)})"
+
+    if node_type == 'AND':
+        children = [_ast_to_postgrest_word_boundary(c, column) for c in ast['children']]
+        children = [c for c in children if c]
+        if not children:
+            return ''
+        if len(children) == 1:
+            return children[0]
+        return f"and({','.join(children)})"
+
+    return ''
+
+
+def parse_boolean_query_word_boundary(query: str, column: str) -> str:
+    """Parse a boolean query into a PostgREST filter using word-boundary regex.
+
+    Same grammar as :func:`parse_boolean_query`, but each term is matched as a
+    whole word (via POSIX ``\\y``) rather than as a free-floating substring.
+    This is required for the Current Company filter — the substring approach
+    matched ``Celadon Books`` when the user typed ``elad``.
+    """
+    tokens = _tokenize_boolean_query(query)
+    ast = _parse_boolean_tokens(tokens)
+    return _ast_to_postgrest_word_boundary(ast, column)
+
+
 def search_profiles_boolean(client: SupabaseClient, filters: dict, limit: int = 5000) -> list:
     """Search profiles with full boolean query support.
 
@@ -1625,11 +1713,13 @@ def search_profiles_boolean(client: SupabaseClient, filters: dict, limit: int = 
     params = {}
     and_conditions = []
 
-    # Process string columns with boolean parser
+    # Process string columns with boolean parser.
+    # current_company is intentionally NOT in this dict — it gets word-boundary
+    # regex matching below to avoid the "elad matches Celadon Books" false
+    # positive (see test_db_search_company_substring.py).
     string_columns = {
         'name': 'name',
         'current_title': 'current_title',
-        'current_company': 'current_company',
         'location': 'location'
     }
 
@@ -1653,6 +1743,16 @@ def search_profiles_boolean(client: SupabaseClient, filters: dict, limit: int = 
             else:
                 # Substring match (PostgREST ilike wildcards use *)
                 and_conditions.append(f"linkedin_url.ilike.*{linkedin_url_q}*")
+
+    # Current company gets word-boundary regex semantics so "elad" doesn't
+    # match "Celadon Books". Implemented server-side via PostgREST imatch
+    # with \y anchors so we don't fetch+discard thousands of false-positive
+    # rows over the network.
+    company_query = filters.get('current_company')
+    if company_query:
+        company_filter = parse_boolean_query_word_boundary(company_query, 'current_company')
+        if company_filter:
+            and_conditions.append(company_filter)
 
     # NOTE: Array columns (past_titles, past_companies, skills, schools) are NOT
     # filtered server-side because PostgREST doesn't support ::text casting inside

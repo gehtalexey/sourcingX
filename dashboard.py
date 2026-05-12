@@ -10654,6 +10654,25 @@ with tab_database:
                         if af.get('has_email') and 'email' in df.columns:
                             mask &= df['email'].fillna('').astype(bool)
 
+                        # LinkedIn URL constraint — match the DB-side semantics
+                        # from db.search_profiles_boolean: exact equality for a
+                        # full LinkedIn URL, case-insensitive substring for a
+                        # bare slug. Without this branch, mixing a Full-text
+                        # query with the LinkedIn URL field would silently
+                        # ignore the URL constraint (Codex review on PR #40).
+                        _url_q = af.get('linkedin_url')
+                        if _url_q and 'linkedin_url' in df.columns:
+                            _url_q_str = str(_url_q).strip()
+                            if _url_q_str:
+                                _url_l = _url_q_str.lower()
+                                if '/in/' in _url_l and 'linkedin.com' in _url_l:
+                                    mask &= df['linkedin_url'].fillna('').astype(str) == _url_q_str
+                                else:
+                                    _needle = _url_q_str.lower()
+                                    mask &= df['linkedin_url'].fillna('').astype(str).str.lower().str.contains(
+                                        _needle, regex=False
+                                    )
+
                         df = df[mask]
 
                     # Apply array column filters client-side (always, since server-side

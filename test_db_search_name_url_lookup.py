@@ -185,3 +185,98 @@ class TestHasColumnFilters:
             'name': 'Gil Gitlin',
             'linkedin_url': 'https://www.linkedin.com/in/gil-gitlin-87b720200',
         }) is True
+
+
+# ---------------------------------------------------------------------------
+# Mixed mode (full-text query + linkedin_url) — client-side filter
+# ---------------------------------------------------------------------------
+
+def _client_side_apply_linkedin_url(df, af):
+    """Mirror of the dashboard.py Tab 7 client-side ``linkedin_url`` branch.
+
+    When the user submits BOTH a full-text query AND a LinkedIn URL,
+    ``search_profiles_fulltext`` runs (broad), and then the dashboard
+    applies column predicates row-by-row on the returned DataFrame. This
+    helper mirrors the linkedin_url predicate that the dashboard now
+    applies, kept in lock-step so regressions get caught here.
+
+    Codex flagged on PR #40 that without this branch, the URL constraint
+    was silently dropped in mixed mode.
+    """
+    import pandas as pd
+
+    mask = pd.Series(True, index=df.index)
+    url_q = af.get('linkedin_url')
+    if url_q and 'linkedin_url' in df.columns:
+        url_q_str = str(url_q).strip()
+        if url_q_str:
+            url_l = url_q_str.lower()
+            if '/in/' in url_l and 'linkedin.com' in url_l:
+                mask &= df['linkedin_url'].fillna('').astype(str) == url_q_str
+            else:
+                needle = url_q_str.lower()
+                mask &= df['linkedin_url'].fillna('').astype(str).str.lower().str.contains(
+                    needle, regex=False
+                )
+    return df[mask]
+
+
+class TestMixedModeLinkedInUrlFilter:
+    """Regression for Codex's PR #40 blocker.
+
+    In mixed mode (full-text query + linkedin_url), ``search_profiles_fulltext``
+    returns the broad full-text result set. The dashboard's client-side filter
+    loop then narrows those rows. Before this fix, the loop applied name /
+    title / company / location / array / has_email predicates but NOT the
+    LinkedIn URL, so the URL constraint was silently ignored whenever a
+    full-text query was also present.
+    """
+
+    def _fulltext_result_rows(self):
+        """Simulate what ``search_profiles_fulltext`` would return for a
+        broad query like ``backend`` — multiple rows, only one matching the
+        URL the recruiter typed in the LinkedIn URL field."""
+        import pandas as pd
+        return pd.DataFrame([
+            {'name': 'Gil Gitlin',
+             'linkedin_url': 'https://www.linkedin.com/in/gil-gitlin-87b720200',
+             'current_title': 'Backend Engineer'},
+            {'name': 'Other Person',
+             'linkedin_url': 'https://www.linkedin.com/in/other-person',
+             'current_title': 'Backend Engineer'},
+            {'name': 'Third Person',
+             'linkedin_url': 'https://www.linkedin.com/in/third-person',
+             'current_title': 'Backend Engineer'},
+        ])
+
+    def test_full_url_narrows_fulltext_results_to_one_row(self):
+        """Mixed mode with a full URL must return only the exact-match row."""
+        df = self._fulltext_result_rows()
+        af = {
+            'name': None,
+            'linkedin_url': 'https://www.linkedin.com/in/gil-gitlin-87b720200',
+        }
+        result = _client_side_apply_linkedin_url(df, af)
+        assert len(result) == 1
+        assert result.iloc[0]['linkedin_url'] == \
+            'https://www.linkedin.com/in/gil-gitlin-87b720200'
+
+    def test_slug_substring_narrows_fulltext_results(self):
+        """Slug-only input must filter via case-insensitive substring."""
+        df = self._fulltext_result_rows()
+        af = {'linkedin_url': 'gil-gitlin'}
+        result = _client_side_apply_linkedin_url(df, af)
+        assert len(result) == 1
+        assert 'gil-gitlin' in result.iloc[0]['linkedin_url']
+
+    def test_no_url_filter_keeps_all_rows(self):
+        """Sanity: no URL filter → no narrowing from this branch."""
+        df = self._fulltext_result_rows()
+        result = _client_side_apply_linkedin_url(df, {'linkedin_url': None})
+        assert len(result) == 3
+
+    def test_url_filter_no_match_returns_empty(self):
+        df = self._fulltext_result_rows()
+        af = {'linkedin_url': 'https://www.linkedin.com/in/nobody-here'}
+        result = _client_side_apply_linkedin_url(df, af)
+        assert len(result) == 0

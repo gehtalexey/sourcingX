@@ -934,6 +934,37 @@ def cleanup_memory():
     gc.collect()
 
 
+# Session-state keys derived from the loaded results_df. When the user replaces
+# or appends the loaded set, these must be cleared so downstream tabs (Filter+,
+# Enrich, AI Screen) don't feed stale data forward — e.g. the Enrich tab prefers
+# passed_candidates_df when present, so leaving it would silently ignore a fresh
+# upload.
+_RESULTS_DERIVED_KEYS = (
+    'passed_candidates_df',
+    'enriched_df',
+    'enriched_profiles_raw',
+    'filter_stats',
+    'f2_filter_stats',
+    'filtered_out',
+    'f2_filtered_out',
+    'filtered_out_counts',
+    'filtered_out_light',
+    'screening_results',
+    'enriched_results',
+    'results',
+)
+
+
+def clear_results_derived_state(state) -> None:
+    """Drop every session-state value derived from the previously loaded results_df.
+
+    Used when a CSV/JSON upload replaces or appends to the loaded set. Operates
+    on any mapping with .pop(key, None) so it's unit-testable without Streamlit.
+    """
+    for key in _RESULTS_DERIVED_KEYS:
+        state.pop(key, None)
+
+
 def get_profiles_df() -> pd.DataFrame:
     """Get the current profiles DataFrame. Single source of truth."""
     # Priority: enriched_df > results_df > empty
@@ -5546,6 +5577,7 @@ with tab_upload:
                 def _commit_results(new_df):
                     st.session_state['results_df'] = new_df
                     st.session_state['original_results_df'] = new_df.copy()
+                    clear_results_derived_state(st.session_state)
                     save_session_state()
 
                 def _apply_replace_with_existing():

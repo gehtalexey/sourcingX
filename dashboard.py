@@ -7542,6 +7542,44 @@ with tab_enrich:
                                                 matched_profiles.append(profile)
 
                                     if matched_profiles:
+                                        # Fetch raw_data for these profiles before converting to a
+                                        # DataFrame. The bulk dedup query (line 7254) intentionally
+                                        # skips raw_data for memory reasons, but Filter+ now needs
+                                        # it to compute current_years_at_company on-the-fly inside
+                                        # profile_to_display_row. We batch-fetch in chunks (~500 URLs
+                                        # per request) so a single click can load thousands of
+                                        # profiles without blowing the request size.
+                                        try:
+                                            _db = _get_db_client()
+                                            if _db:
+                                                _urls_to_fetch = [
+                                                    p.get('linkedin_url') for p in matched_profiles
+                                                    if p.get('linkedin_url') and not p.get('raw_data')
+                                                ]
+                                                _raw_by_url = {}
+                                                _CHUNK = 500
+                                                for _i in range(0, len(_urls_to_fetch), _CHUNK):
+                                                    _chunk = _urls_to_fetch[_i:_i + _CHUNK]
+                                                    _quoted = ','.join(f'"{u}"' for u in _chunk)
+                                                    _rows = _db.select(
+                                                        'profiles', 'linkedin_url,raw_data',
+                                                        {'linkedin_url': f'in.({_quoted})'},
+                                                        limit=len(_chunk),
+                                                    )
+                                                    for _r in (_rows or []):
+                                                        _u = _r.get('linkedin_url')
+                                                        if _u:
+                                                            _raw_by_url[_u] = _r.get('raw_data')
+                                                for _p in matched_profiles:
+                                                    _u = _p.get('linkedin_url')
+                                                    if _u and _u in _raw_by_url:
+                                                        _p['raw_data'] = _raw_by_url[_u]
+                                        except Exception as _fetch_err:
+                                            # Non-fatal: profile_to_display_row will fall back to
+                                            # indexed columns; tenure filter just won't have data.
+                                            if is_admin_user():
+                                                st.warning(f"raw_data hydration failed: {_fetch_err}")
+
                                         db_loaded_df = profiles_to_dataframe(matched_profiles)
                                         st.session_state['enriched_df'] = db_loaded_df
                                         if 'enriched_results' in st.session_state:

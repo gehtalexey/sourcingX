@@ -7252,20 +7252,24 @@ with tab_enrich:
                         # Selecting a dropped column makes PostgREST 400 and the try/except
                         # silently drops ALL matches, making every URL look "new".
                         _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,enriched_at'
-                        # Use keyset pagination (matches db.py:get_recently_enriched_urls). Without
-                        # order_by, the underlying offset pagination through ~30k rows can silently
-                        # drop or duplicate rows between pages — Postgres does not guarantee row
-                        # order without an ORDER BY clause. That caused profiles enriched in the
-                        # last 3 months to be missing from `profile_by_username` and surface as
-                        # "to enrich" even though they were already in the DB. Verified
-                        # 2026-05-13 (Niv Hanin, Jason Elbaum, Constantin Paigin, Yair Nevet all
-                        # had EXACT MATCH FOUND but matched: False in the debug expander).
+                        # Without an explicit ORDER BY, paging through ~30k rows silently drops
+                        # rows between pages (Postgres does not guarantee row order across pages
+                        # without it). That caused profiles enriched in the last 3 months to be
+                        # missing from `profile_by_username` and surface as "to enrich" despite
+                        # already being in the DB. Verified 2026-05-13: Niv Hanin, Jason Elbaum,
+                        # Constantin Paigin, Yair Nevet all had EXACT MATCH FOUND but were
+                        # matched: False in the debug expander.
+                        #
+                        # Order by (enriched_at desc, linkedin_url desc): enriched_at gives us
+                        # an indexed primary sort; linkedin_url is a guaranteed-unique
+                        # tie-breaker. That makes the order fully deterministic across pages, so
+                        # rows that share the same enriched_at can't drift between pages and get
+                        # skipped — the failure mode flagged in Codex round-4 review on PR #57.
                         all_profiles = db_client.select(
                             'profiles', _MATCH_COLUMNS,
                             filters={'enriched_at': f'gte.{cutoff}'},
                             limit=50000,
-                            order_by='enriched_at.desc',
-                            cursor_column='enriched_at',
+                            order_by='enriched_at.desc,linkedin_url.desc',
                         )
 
                         # Build profile lookup by username variants (SAME logic as Load from DB)

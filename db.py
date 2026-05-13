@@ -1983,15 +1983,16 @@ def get_enriched_urls(client: SupabaseClient) -> set:
     """Get all LinkedIn URLs that have been enriched.
 
     Used to skip profiles that are already in the database when enriching.
-    Uses keyset pagination on enriched_at (matches get_recently_enriched_urls
-    and get_all_profiles). Offset pagination without ORDER BY silently drops
-    rows across pages when paging through 30k+ rows — see PR #57.
+    Orders by (enriched_at desc, linkedin_url desc) so pagination through
+    30k+ rows stays stable. Without ORDER BY, Postgres can return rows in
+    different orders across pages and silently drop some — see PR #57.
+    A single-column keyset cursor on enriched_at is also unsafe because
+    timestamp collisions across a page boundary skip rows (Codex round-4).
     """
     result = client.select(
-        'profiles', 'linkedin_url,enriched_at',
+        'profiles', 'linkedin_url',
         limit=50000,
-        order_by='enriched_at.desc',
-        cursor_column='enriched_at',
+        order_by='enriched_at.desc,linkedin_url.desc',
     )
     urls = set()
     for p in result:
@@ -2004,13 +2005,12 @@ def get_enriched_urls(client: SupabaseClient) -> set:
 def get_all_linkedin_urls(client: SupabaseClient) -> list:
     """Get all LinkedIn URLs from database.
 
-    Uses keyset pagination on enriched_at — see get_enriched_urls() for why.
+    See get_enriched_urls() for why the ORDER BY uses a unique tie-breaker.
     """
     result = client.select(
-        'profiles', 'linkedin_url,enriched_at',
+        'profiles', 'linkedin_url',
         limit=50000,
-        order_by='enriched_at.desc',
-        cursor_column='enriched_at',
+        order_by='enriched_at.desc,linkedin_url.desc',
     )
     return [p['linkedin_url'] for p in result if p.get('linkedin_url')]
 

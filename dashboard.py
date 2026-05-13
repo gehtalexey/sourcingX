@@ -7252,8 +7252,25 @@ with tab_enrich:
                         # Selecting a dropped column makes PostgREST 400 and the try/except
                         # silently drops ALL matches, making every URL look "new".
                         _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,enriched_at'
-                        all_profiles = db_client.select('profiles', _MATCH_COLUMNS,
-                            filters={'enriched_at': f'gte.{cutoff}'}, limit=50000)
+                        # Without an explicit ORDER BY, paging through ~30k rows silently drops
+                        # rows between pages (Postgres does not guarantee row order across pages
+                        # without it). That caused profiles enriched in the last 3 months to be
+                        # missing from `profile_by_username` and surface as "to enrich" despite
+                        # already being in the DB. Verified 2026-05-13: Niv Hanin, Jason Elbaum,
+                        # Constantin Paigin, Yair Nevet all had EXACT MATCH FOUND but were
+                        # matched: False in the debug expander.
+                        #
+                        # Order by (enriched_at desc, linkedin_url desc): enriched_at gives us
+                        # an indexed primary sort; linkedin_url is a guaranteed-unique
+                        # tie-breaker. That makes the order fully deterministic across pages, so
+                        # rows that share the same enriched_at can't drift between pages and get
+                        # skipped — the failure mode flagged in Codex round-4 review on PR #57.
+                        all_profiles = db_client.select(
+                            'profiles', _MATCH_COLUMNS,
+                            filters={'enriched_at': f'gte.{cutoff}'},
+                            limit=50000,
+                            order_by='enriched_at.desc,linkedin_url.desc',
+                        )
 
                         # Build profile lookup by username variants (SAME logic as Load from DB)
                         import re
@@ -7397,6 +7414,32 @@ with tab_enrich:
                                     del st.session_state[key]
                             st.cache_data.clear()
                             st.rerun()
+
+                # Admin-only: diagnostic readout from the last post-enrichment
+                # visibility-poll. Helps confirm whether the wait actually saw
+                # the just-written rows or timed out. Cleared after one render.
+                _vis_debug = st.session_state.get('_visibility_poll_debug')
+                if _vis_debug and is_admin_user():
+                    with st.expander("Debug: visibility-poll (last enrichment run)", expanded=True):
+                        st.write(f"- has_database: `{_vis_debug.get('has_database')}`")
+                        st.write(f"- successful (Crustdata returned): `{_vis_debug.get('successful_count')}`")
+                        st.write(f"- expected (after URL extraction + normalize): `{_vis_debug.get('expected_count')}`")
+                        st.write(f"- ran poll loop: `{_vis_debug.get('ran')}`")
+                        st.write(f"- attempts: `{_vis_debug.get('attempts')}` / 5")
+                        st.write(f"- matched in attempt: `{_vis_debug.get('matched_in_attempt')}` (None = timed out)")
+                        st.write(f"- last visible count: `{_vis_debug.get('last_visible_count')}`")
+                        st.write(f"- last intersection (expected ∩ visible): `{_vis_debug.get('last_intersection')}`")
+                        st.write(f"- last missing count: `{_vis_debug.get('last_missing_count')}`")
+                        st.write(f"- elapsed: `{_vis_debug.get('elapsed_seconds')}s`")
+                        if _vis_debug.get('error'):
+                            st.write(f"- error: `{_vis_debug.get('error')}`")
+                        if _vis_debug.get('last_missing_sample'):
+                            st.write("- missing URLs sample (still 'invisible' when loop ended):")
+                            for u in _vis_debug['last_missing_sample']:
+                                st.code(u, language=None)
+                        st.caption("This block clears after you click anything else.")
+                    # One-shot display: pop so it doesn't persist
+                    del st.session_state['_visibility_poll_debug']
 
                 # Debug: show why URLs are marked as "to enrich" (admin-only)
                 if new_urls and is_admin_user():
@@ -7844,6 +7887,89 @@ with tab_enrich:
                                 db_msg = f" | DB: {db_saved}/{len(successful)} saved"
                             else:
                                 db_msg = " | DB: not connected"
+
+                            # Wait for the just-written rows to become visible to subsequent
+                            # SELECT queries before triggering the rerun. Without this, the
+                            # immediate rerun queries the DB before Supabase's REST layer has
+                            # made the writes visible, so the "to enrich" / "already enriched"
+                            # counters re-render from a stale snapshot and the recruiter has to
+                            # manually F5. Verified 2026-05-13 (Shiri + Alexey field test).
+                            # Admin diagnostic: capture visibility-poll outcome so we can
+                            # see, after the rerun, whether the wait timed out and what was
+                            # missing. Stored in session_state so it survives st.rerun().
+                            _vis_debug = {
+                                'has_database': HAS_DATABASE,
+                                'successful_count': len(successful) if successful else 0,
+                                'ran': False,
+                                'expected_count': 0,
+                                'attempts': 0,
+                                'last_visible_count': 0,
+                                'last_intersection': 0,
+                                'last_missing_count': 0,
+                                'last_missing_sample': [],
+                                'matched_in_attempt': None,
+                                'error': None,
+                                'elapsed_seconds': 0.0,
+                            }
+                            _vis_start = time.time()
+                            if HAS_DATABASE and successful:
+                                try:
+                                    # Build expected_urls the same way save_enriched_profiles_bulk()
+                                    # does: prefer linkedin_flagship_url, fall back to linkedin_url,
+                                    # then normalize. Otherwise this set can be empty (Crustdata
+                                    # sometimes returns only linkedin_flagship_url) or contain a
+                                    # non-normalized form that never matches the stored value.
+                                    # (Codex review, PR #57.)
+                                    expected_urls = set()
+                                    for r in successful:
+                                        raw_url = r.get('linkedin_flagship_url') or r.get('linkedin_url')
+                                        if not raw_url:
+                                            continue
+                                        norm = normalize_linkedin_url(raw_url)
+                                        if norm:
+                                            expected_urls.add(norm)
+                                    _vis_debug['expected_count'] = len(expected_urls)
+                                    if expected_urls:
+                                        verify_client = _get_db_client()
+                                        if verify_client:
+                                            _vis_debug['ran'] = True
+                                            cutoff_iso = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
+                                            for _vis_attempt in range(5):
+                                                _vis_debug['attempts'] = _vis_attempt + 1
+                                                # Order newest-first so the just-written rows are
+                                                # at the head of the result set. Without an order,
+                                                # other recent enrichments (other users, prior
+                                                # batches in the same 10-min window) could fill the
+                                                # limited result set and hide our writes, making
+                                                # this loop always wait the full 5s. (Codex review,
+                                                # PR #57.)
+                                                visible = verify_client.select(
+                                                    'profiles', 'linkedin_url',
+                                                    filters={'enriched_at': f'gte.{cutoff_iso}'},
+                                                    limit=max(len(expected_urls) * 2, 200),
+                                                    order_by='enriched_at.desc',
+                                                )
+                                                visible_urls = set()
+                                                for p in (visible or []):
+                                                    raw_v = p.get('linkedin_url')
+                                                    if raw_v:
+                                                        norm_v = normalize_linkedin_url(raw_v)
+                                                        if norm_v:
+                                                            visible_urls.add(norm_v)
+                                                _vis_debug['last_visible_count'] = len(visible_urls)
+                                                intersection = expected_urls & visible_urls
+                                                _vis_debug['last_intersection'] = len(intersection)
+                                                missing = expected_urls - visible_urls
+                                                _vis_debug['last_missing_count'] = len(missing)
+                                                _vis_debug['last_missing_sample'] = list(missing)[:5]
+                                                if not missing:
+                                                    _vis_debug['matched_in_attempt'] = _vis_attempt + 1
+                                                    break
+                                                time.sleep(1)
+                                except Exception as _vis_err:
+                                    _vis_debug['error'] = str(_vis_err)[:200]
+                            _vis_debug['elapsed_seconds'] = round(time.time() - _vis_start, 2)
+                            st.session_state['_visibility_poll_debug'] = _vis_debug
 
                             # Clear all caches so the "already enriched" count refreshes from DB.
                             # Explicitly clear the two most-relevant caches in addition to cache_data.clear()

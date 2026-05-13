@@ -835,7 +835,15 @@ def prepare_df_for_export(df: pd.DataFrame) -> pd.DataFrame:
         if col not in final_cols and not col.startswith('_') and col != 'index':
             final_cols.append(col)
 
-    return df[final_cols]
+    out = df[final_cols]
+
+    # -1 is an internal sentinel for "tenure unknown" on current_years_at_company
+    # (legacy backfill marker). Don't leak it into user-facing CSVs — show blank.
+    if 'current_years_at_company' in out.columns:
+        out = out.copy()
+        out.loc[out['current_years_at_company'] == -1, 'current_years_at_company'] = None
+
+    return out
 
 
 # ===== Session Persistence =====

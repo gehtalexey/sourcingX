@@ -20,6 +20,18 @@ from normalizers import normalize_linkedin_url, pick_current_employer
 # Refresh threshold for re-enriching stale profiles
 ENRICHMENT_REFRESH_MONTHS = 3
 
+SCREENING_COLUMNS = (
+    'screening_score',
+    'screening_fit_level',
+    'screening_summary',
+    'screening_reasoning',
+    'screening_notes',
+    'screened_at',
+)
+
+DEFAULT_SCREENING_SOURCE_PROJECT = 'sourcingx'
+DEFAULT_SCREENING_JD_HASH = 'default'
+
 
 class SupabaseClient:
     """Simple Supabase REST API client."""
@@ -734,24 +746,22 @@ def get_not_found_urls(client: SupabaseClient, months: int = 3) -> list[str]:
 
 def update_profile_screening(client: SupabaseClient, linkedin_url: str, score: int, fit_level: str,
                               summary: str, reasoning: str) -> dict:
-    """Update profile with AI screening results."""
-    linkedin_url = normalize_linkedin_url(linkedin_url)
-
-    data = {
-        'linkedin_url': linkedin_url,
-        'screening_score': score,
-        'screening_fit_level': fit_level,
-        'screening_summary': summary,
-        'screening_reasoning': reasoning,
-        'screened_at': datetime.utcnow().isoformat(),
-    }
-
-    result = client.upsert('profiles', data, on_conflict='linkedin_url')
+    """Write AI screening results to screening_results, not profiles."""
+    result = insert_screening_result(
+        client,
+        linkedin_url=linkedin_url,
+        source_project=DEFAULT_SCREENING_SOURCE_PROJECT,
+        jd_hash=DEFAULT_SCREENING_JD_HASH,
+        score=score,
+        fit_level=fit_level,
+        summary=summary,
+        reasoning=reasoning,
+    )
     return result[0] if result else None
 
 
 def update_profile_screening_batch(client: SupabaseClient, results: list) -> dict:
-    """Batch update profiles with AI screening results (single DB call instead of N).
+    """Batch write AI screening results to screening_results.
 
     Args:
         client: SupabaseClient instance
@@ -759,33 +769,12 @@ def update_profile_screening_batch(client: SupabaseClient, results: list) -> dic
     Returns:
         Stats dict with 'saved' and 'errors' counts
     """
-    if not results:
-        return {'saved': 0, 'errors': 0}
-
-    now = datetime.utcnow().isoformat()
-    rows = []
-    for r in results:
-        url = normalize_linkedin_url(r.get('linkedin_url', ''))
-        if not url:
-            continue
-        rows.append({
-            'linkedin_url': url,
-            'screening_score': r.get('score'),
-            'screening_fit_level': r.get('fit_level'),
-            'screening_summary': r.get('summary'),
-            'screening_reasoning': r.get('reasoning'),
-            'screened_at': now,
-        })
-
-    if not rows:
-        return {'saved': 0, 'errors': 0}
-
-    try:
-        client.upsert_batch('profiles', rows, on_conflict='linkedin_url')
-        return {'saved': len(rows), 'errors': 0}
-    except Exception as e:
-        print(f"[DB] Batch screening save failed: {e}")
-        return {'saved': 0, 'errors': len(rows)}
+    return insert_screening_results_batch(
+        client,
+        results,
+        source_project=DEFAULT_SCREENING_SOURCE_PROJECT,
+        jd_hash=DEFAULT_SCREENING_JD_HASH,
+    )
 
 
 def compute_jd_hash(jd_text: str) -> str:
@@ -887,6 +876,46 @@ def get_latest_screenings(client: SupabaseClient, fit_level: str = None, limit: 
     return client.select('latest_screening', '*', filters, limit=limit)
 
 
+def _select_latest_screenings_for_urls(client: SupabaseClient, urls: list) -> dict:
+    """Return latest_screening rows keyed by normalized LinkedIn URL."""
+    normalized = [normalize_linkedin_url(u) for u in urls if u]
+    normalized = [u for u in normalized if u]
+    if not normalized:
+        return {}
+
+    rows = []
+    batch_size = 50
+    for i in range(0, len(normalized), batch_size):
+        batch = normalized[i:i + batch_size]
+        url_list = ','.join(batch)
+        rows.extend(client.select(
+            'latest_screening',
+            '*',
+            filters={'linkedin_url': f'in.({url_list})'},
+            limit=len(batch),
+        ))
+
+    out = {}
+    for row in rows:
+        url = normalize_linkedin_url(row.get('linkedin_url', ''))
+        if url:
+            out[url] = row
+    return out
+
+
+def _merge_latest_screenings(profiles: list, screenings_by_url: dict) -> list:
+    """Attach latest screening fields to profile rows for UI compatibility."""
+    merged = []
+    for profile in profiles or []:
+        row = dict(profile)
+        url = normalize_linkedin_url(row.get('linkedin_url', ''))
+        screening = screenings_by_url.get(url, {})
+        for key in SCREENING_COLUMNS:
+            row[key] = screening.get(key)
+        merged.append(row)
+    return merged
+
+
 def update_profile_email(client: SupabaseClient, linkedin_url: str, email: str, source: str = 'salesql') -> dict:
     """Update profile with email from SalesQL or other source."""
     linkedin_url = normalize_linkedin_url(linkedin_url)
@@ -943,7 +972,24 @@ def get_profile(client: SupabaseClient, linkedin_url: str) -> Optional[dict]:
 
 def get_profiles_needing_screening(client: SupabaseClient, limit: int = 100) -> list:
     """Get enriched profiles that haven't been screened yet."""
-    return client.select('profiles', '*', {'enrichment_status': 'eq.enriched', 'screening_score': 'is.null'}, limit=limit)
+    fetch_limit = min(max(limit * 5, 100), 5000)
+    profiles = client.select(
+        'profiles',
+        '*',
+        {'enrichment_status': 'eq.enriched'},
+        limit=fetch_limit,
+        order_by='enriched_at.desc',
+        cursor_column='enriched_at',
+    )
+    screenings = _select_latest_screenings_for_urls(
+        client,
+        [p.get('linkedin_url') for p in profiles],
+    )
+    unscreened = [
+        p for p in profiles
+        if normalize_linkedin_url(p.get('linkedin_url', '')) not in screenings
+    ]
+    return unscreened[:limit]
 
 
 def get_profiles_by_enrichment_status(client: SupabaseClient, enrichment_status: str, limit: int = 1000) -> list:
@@ -953,7 +999,17 @@ def get_profiles_by_enrichment_status(client: SupabaseClient, enrichment_status:
 
 def get_profiles_by_fit_level(client: SupabaseClient, fit_level: str, limit: int = 1000) -> list:
     """Get profiles by screening fit level."""
-    return client.select('profiles', '*', {'screening_fit_level': f'eq.{fit_level}'}, limit=limit)
+    screenings = get_latest_screenings(client, fit_level=fit_level, limit=limit)
+    urls = [s.get('linkedin_url') for s in screenings if s.get('linkedin_url')]
+    profiles = get_profiles_by_urls(client, urls, include_raw_data=False)
+    return _merge_latest_screenings(
+        profiles,
+        {
+            normalize_linkedin_url(s.get('linkedin_url', '')): s
+            for s in screenings
+            if s.get('linkedin_url')
+        },
+    )
 
 
 def get_all_profiles(client: SupabaseClient, limit: int = 10000, include_raw_data: bool = False, lightweight: bool = False) -> list:
@@ -969,18 +1025,24 @@ def get_all_profiles(client: SupabaseClient, limit: int = 10000, include_raw_dat
     Uses keyset pagination on enriched_at for faster loading of large datasets.
     """
     if include_raw_data:
-        return client.select('profiles', '*', limit=limit,
-                             order_by='enriched_at.desc', cursor_column='enriched_at')
+        profiles = client.select('profiles', '*', limit=limit,
+                                 order_by='enriched_at.desc', cursor_column='enriched_at')
     elif lightweight:
         # Minimal columns for fast post-enrichment reload (counting, basic display)
-        columns = 'linkedin_url,original_url,name,location,current_title,current_company,status,enriched_at,screening_score,screening_fit_level,screened_at,email'
-        return client.select('profiles', columns, limit=limit,
-                             order_by='enriched_at.desc', cursor_column='enriched_at')
+        columns = 'linkedin_url,original_url,name,location,current_title,current_company,enriched_at,email'
+        profiles = client.select('profiles', columns, limit=limit,
+                                 order_by='enriched_at.desc', cursor_column='enriched_at')
     else:
         # Standard columns for Database tab (includes arrays for filtering, screening summary)
-        columns = 'linkedin_url,original_url,name,location,current_title,current_company,all_employers,all_titles,all_schools,skills,status,enriched_at,screening_score,screening_fit_level,screening_summary,screening_reasoning,screened_at,email'
-        return client.select('profiles', columns, limit=limit,
-                             order_by='enriched_at.desc', cursor_column='enriched_at')
+        columns = 'linkedin_url,original_url,name,location,current_title,current_company,all_employers,all_titles,all_schools,skills,enriched_at,email'
+        profiles = client.select('profiles', columns, limit=limit,
+                                 order_by='enriched_at.desc', cursor_column='enriched_at')
+
+    screenings = _select_latest_screenings_for_urls(
+        client,
+        [p.get('linkedin_url') for p in profiles],
+    )
+    return _merge_latest_screenings(profiles, screenings)
 
 
 def get_profiles_by_urls(client: SupabaseClient, urls: list, include_raw_data: bool = True) -> list:

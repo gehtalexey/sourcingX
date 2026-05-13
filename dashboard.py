@@ -8835,11 +8835,14 @@ with tab_filter2:
             preview = display_df.head(100)
 
             def _col_is_empty(series):
-                if series.isna().all():
-                    return True
+                # Normalize each value to a stripped string, then check the FULL
+                # empty set in a single pass. Previous version split the check
+                # into "all blank" OR "all literal-empty-marker" which missed
+                # mixed columns like ['', None, '[]']. (Codex round-1 review on
+                # PR #58.)
                 try:
                     s = series.fillna('').astype(str).str.strip()
-                    return (s == '').all() or s.isin(['nan', 'None', '[]', '{}']).all()
+                    return s.isin(['', 'nan', 'None', '[]', '{}']).all()
                 except Exception:
                     return False
 

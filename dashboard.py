@@ -7853,11 +7853,20 @@ with tab_enrich:
                             # manually F5. Verified 2026-05-13 (Shiri + Alexey field test).
                             if HAS_DATABASE and successful:
                                 try:
-                                    expected_urls = {
-                                        r.get('linkedin_url')
-                                        for r in successful
-                                        if r.get('linkedin_url')
-                                    }
+                                    # Build expected_urls the same way save_enriched_profiles_bulk()
+                                    # does: prefer linkedin_flagship_url, fall back to linkedin_url,
+                                    # then normalize. Otherwise this set can be empty (Crustdata
+                                    # sometimes returns only linkedin_flagship_url) or contain a
+                                    # non-normalized form that never matches the stored value.
+                                    # (Codex review, PR #57.)
+                                    expected_urls = set()
+                                    for r in successful:
+                                        raw_url = r.get('linkedin_flagship_url') or r.get('linkedin_url')
+                                        if not raw_url:
+                                            continue
+                                        norm = normalize_linkedin_url(raw_url)
+                                        if norm:
+                                            expected_urls.add(norm)
                                     if expected_urls:
                                         verify_client = _get_db_client()
                                         if verify_client:
@@ -7876,9 +7885,13 @@ with tab_enrich:
                                                     limit=max(len(expected_urls) * 2, 200),
                                                     order_by='enriched_at.desc',
                                                 )
-                                                visible_urls = {
-                                                    p.get('linkedin_url') for p in (visible or [])
-                                                }
+                                                visible_urls = set()
+                                                for p in (visible or []):
+                                                    raw_v = p.get('linkedin_url')
+                                                    if raw_v:
+                                                        norm_v = normalize_linkedin_url(raw_v)
+                                                        if norm_v:
+                                                            visible_urls.add(norm_v)
                                                 if expected_urls.issubset(visible_urls):
                                                     break
                                                 time.sleep(1)

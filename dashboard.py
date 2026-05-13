@@ -8216,29 +8216,44 @@ with tab_filter2:
                 key="f2_exclude_title_presets"
             )
 
-        # Required skills/keywords. Default scope is "Full profile" because
-        # the Crustdata `skills` array is often shallow / empty post-enrichment
-        # — selecting "Skills only" + OR usually drops everyone and looks like
-        # an AND bug. See docs/feedback-may-2026/filter-overlap.md.
-        skill_col1, skill_col2, skill_col3 = st.columns([3, 1, 2])
-        with skill_col1:
-            required_skills = st.text_input("Required keywords (comma-separated)", key="f2_required_skills",
-                                           placeholder="e.g., Python, AWS, Kubernetes")
-        with skill_col2:
-            skills_logic = st.radio("Logic:", ["AND", "OR"], key="f2_skills_logic", horizontal=True,
-                                   help="AND = must have ALL keywords, OR = must have at least ONE")
-        with skill_col3:
-            search_scope = st.radio(
-                "Search in:",
-                ["Skills only", "Full profile"],
-                index=1,
-                key="f2_search_scope",
-                horizontal=True,
+        # Boolean keyword filters. Two separate inputs, each supporting LinkedIn
+        # Sales Navigator syntax — AND / OR / NOT, parens, quoted phrases. The
+        # two scopes are explicitly named so recruiters can't confuse them.
+        st.markdown("**Keyword Filters (boolean — search full profile / skills):**")
+        _bool_help = (
+            "Use LinkedIn Sales Navigator boolean syntax:\n"
+            '- `python AND aws` — must contain BOTH terms\n'
+            '- `python OR java` — must contain AT LEAST ONE term\n'
+            '- `senior NOT intern` — must contain `senior` but NOT `intern`\n'
+            '- `(python OR java) AND senior` — parentheses group operators\n'
+            '- `"machine learning"` — quoted phrases match as exact substring\n'
+            'Adjacent terms with no operator imply AND.\n'
+            'Leave blank to skip the filter. Case-insensitive.'
+        )
+        kw_col_full, kw_col_skills = st.columns(2)
+        with kw_col_full:
+            keywords_full_profile = st.text_input(
+                "Keywords — search FULL profile",
+                key="f2_keywords_full_profile",
+                placeholder='e.g., (python OR java) AND senior NOT intern',
                 help=(
-                    "Full profile = skills + job titles + employer names + summary + headline + raw Crustdata JSON. "
-                    "Skills only = the `skills` column ONLY — this column is often shallow after enrichment, "
-                    "so OR-of-shallow-skills can still drop most profiles. Prefer 'Full profile' unless you "
-                    "deliberately want a strict skills-tag match."
+                    "Searches across EVERYTHING about the candidate: skills, job titles, "
+                    "employer names, headline, summary, and the raw Crustdata JSON. "
+                    "Use this when you don't care exactly which LinkedIn field the keyword "
+                    "appears in.\n\n" + _bool_help
+                ),
+            )
+        with kw_col_skills:
+            keywords_skills_only = st.text_input(
+                "Keywords — search SKILLS column ONLY",
+                key="f2_keywords_skills_only",
+                placeholder='e.g., "machine learning" AND aws',
+                help=(
+                    "Searches ONLY the `skills` column. Use this when you specifically "
+                    "want a candidate to have a skill listed on their profile. "
+                    "Note: the LinkedIn skills column is often shallow / incomplete — "
+                    "if you get too few matches, switch to 'search FULL profile'.\n\n"
+                    + _bool_help
                 ),
             )
 
@@ -8621,52 +8636,48 @@ with tab_filter2:
                     removed['Excluded Title Keywords'] = mask.sum()
                     df = df[~mask]
 
-                # Required keywords filter (skills or full experience)
-                if required_skills and required_skills.strip():
-                    skills_list = [s.strip().lower() for s in required_skills.split(',') if s.strip()]
-                    if skills_list:
-                        # Determine which columns to search based on scope
-                        if search_scope == "Full profile":
-                            search_cols = ['skills', 'all_titles', 'all_employers', 'past_positions', 'summary', 'headline', 'raw_crustdata']
-                            scope_label = "profile"
+                # Boolean keyword filters. Each input is independent — both
+                # blank = no filter applied. Both filled = profile must satisfy
+                # BOTH the full-profile query AND the skills-only query.
+                from boolean_query import match_boolean_query
+                import json as json_module
+
+                def _row_full_text(row, cols):
+                    parts = []
+                    for c in cols:
+                        if c not in row or row.get(c) is None:
+                            continue
+                        val = row[c]
+                        if isinstance(val, dict):
+                            parts.append(json_module.dumps(val, ensure_ascii=False))
                         else:
-                            search_cols = ['skills']
-                            scope_label = "skills"
+                            parts.append(str(val))
+                    return ' '.join(parts)
 
-                        available_search_cols = [c for c in search_cols if c in df.columns]
+                if keywords_full_profile and keywords_full_profile.strip():
+                    full_cols = [c for c in [
+                        'skills', 'all_titles', 'all_employers', 'past_positions',
+                        'summary', 'headline', 'raw_crustdata'
+                    ] if c in df.columns]
+                    if full_cols:
+                        mask = df.apply(
+                            lambda row: match_boolean_query(keywords_full_profile, _row_full_text(row, full_cols)),
+                            axis=1,
+                        )
+                        removed['Missing keywords in full profile'] = (~mask).sum()
+                        df = df[mask]
+                    else:
+                        st.warning(f"No searchable columns for full-profile keyword filter. Available: {list(df.columns)}")
 
-                        if available_search_cols:
-                            import json as json_module
-                            def has_required_keywords(row):
-                                # Combine text from all search columns
-                                text_parts = []
-                                for c in available_search_cols:
-                                    if c not in row or row.get(c) is None:
-                                        continue
-                                    val = row[c]
-                                    # Handle raw_crustdata dict/JSON
-                                    if c == 'raw_crustdata' and isinstance(val, dict):
-                                        text_parts.append(json_module.dumps(val, ensure_ascii=False))
-                                    else:
-                                        text_parts.append(str(val))
-                                combined_text = ' '.join(text_parts).lower()
-
-                                if not combined_text.strip():
-                                    return False
-
-                                if skills_logic == "AND":
-                                    return all(kw in combined_text for kw in skills_list)
-                                else:  # OR
-                                    return any(kw in combined_text for kw in skills_list)
-
-                            mask = df.apply(has_required_keywords, axis=1)
-                            logic_label = "all" if skills_logic == "AND" else "any"
-                            filter_name = f'Missing Keywords in {scope_label} ({logic_label})'
-                            # MEMORY FIX: Store only count, not full records
-                            removed[filter_name] = (~mask).sum()
-                            df = df[mask]
-                        else:
-                            st.warning(f"No searchable columns found. Available: {list(df.columns)}")
+                if keywords_skills_only and keywords_skills_only.strip():
+                    if 'skills' in df.columns:
+                        mask = df['skills'].fillna('').astype(str).apply(
+                            lambda text: match_boolean_query(keywords_skills_only, text)
+                        )
+                        removed['Missing keywords in skills'] = (~mask).sum()
+                        df = df[mask]
+                    else:
+                        st.warning("`skills` column missing — cannot apply skills-only keyword filter.")
 
                 # Tenure filter — min/max months at current company.
                 # `current_years_at_company` is a DB column populated at

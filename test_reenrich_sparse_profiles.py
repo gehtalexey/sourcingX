@@ -607,9 +607,17 @@ def _sparse_row(url, name, screened_at=None, enriched_iso="2024-01-01T00:00:00Z"
 
 
 class TestPhaseSelection:
+    """Phase A (recently-screened prioritisation) is currently disabled —
+    `screened_at` is not a column on the `profiles` table in the live schema,
+    so the predicate returned a 400 from PostgREST and crashed the daily
+    refresh on 2026-05-13. Tests below pin the "Phase A is inert, Phase B
+    still works" contract. When a follow-up reintroduces Phase A via a join
+    to `screening_results`, these tests should be restored from git history
+    (master @ 8f77bef, this file)."""
 
-    def test_phase_a_predicates_use_screened_at_not_contacted_at(self, script):
-        """Phase A must filter on screened_at AND enriched_at, never contacted_at."""
+    def test_phase_a_disabled_regardless_of_flag(self, script):
+        """No select call is ever issued with a `screened_at` filter, even
+        when --prefer-screened-days is set to a positive value."""
         now = datetime(2026, 5, 11, 12, 0, 0, tzinfo=timezone.utc)
         client = _StubbedSelectClient(phase_a_rows=[], phase_b_rows=[])
         script.fetch_sparse_candidates(
@@ -620,112 +628,32 @@ class TestPhaseSelection:
             prefer_screened_days=90,
             now=now,
         )
-        assert client.select_calls, "expected at least one select call"
-        phase_a = client.select_calls[0]
-        flt = phase_a["filters"]
-        assert "screened_at" in flt
-        assert flt["screened_at"].startswith("gte.")
-        assert "enriched_at" in flt
-        assert flt["enriched_at"].startswith("lt.")
-        # 90 days before 2026-05-11T12:00:00Z = 2026-02-10T12:00:00Z
-        assert flt["screened_at"] == "gte.2026-02-10T12:00:00Z"
-        # contacted_at must NEVER appear in the filter or the serialized query.
         for call in client.select_calls:
+            assert "screened_at" not in call["filters"]
+            assert "screened_at" not in repr(call["filters"])
+            # contacted_at must never appear either.
             assert "contacted_at" not in call["filters"]
-            assert "contacted_at" not in repr(call["filters"])
 
-    def test_phase_a_results_come_first(self, script):
+    def test_phase_b_runs_when_flag_is_positive(self, script):
+        """Phase B still pulls rows even when --prefer-screened-days > 0."""
         now = datetime(2026, 5, 11, 12, 0, 0, tzinfo=timezone.utc)
-        recent = "2026-04-15T00:00:00Z"  # within 90d of now
-        phase_a_rows = [
-            _sparse_row("https://www.linkedin.com/in/a1", "A1", screened_at=recent),
-            _sparse_row("https://www.linkedin.com/in/a2", "A2", screened_at=recent),
-        ]
         phase_b_rows = [
             _sparse_row("https://www.linkedin.com/in/b1", "B1"),
             _sparse_row("https://www.linkedin.com/in/b2", "B2"),
         ]
-        client = _StubbedSelectClient(phase_a_rows=phase_a_rows, phase_b_rows=phase_b_rows)
-
+        client = _StubbedSelectClient(phase_a_rows=[], phase_b_rows=phase_b_rows)
         candidates, breakdown = script.fetch_sparse_candidates(
             client, max_age_days=60, limit=4, min_current_employers=1,
             prefer_screened_days=90, now=now,
         )
-        urls = [c["linkedin_url"] for c in candidates]
-        # Phase A first, then Phase B.
-        assert urls[:2] == [
-            "https://www.linkedin.com/in/a1",
-            "https://www.linkedin.com/in/a2",
-        ]
-        assert set(urls[2:]) == {
+        urls = {c["linkedin_url"] for c in candidates}
+        assert urls == {
             "https://www.linkedin.com/in/b1",
             "https://www.linkedin.com/in/b2",
         }
-        assert breakdown == {"phase_a": 2, "phase_b": 2, "total": 4}
+        assert breakdown == {"phase_a": 0, "phase_b": 2, "total": 2}
 
-    def test_phase_b_skipped_when_phase_a_fills_limit(self, script):
-        now = datetime(2026, 5, 11, 12, 0, 0, tzinfo=timezone.utc)
-        recent = "2026-04-15T00:00:00Z"
-        phase_a_rows = [
-            _sparse_row(f"https://www.linkedin.com/in/a{i}", f"A{i}", screened_at=recent)
-            for i in range(3)
-        ]
-        # If Phase B is queried, surface a poison row so the test fails loudly.
-        phase_b_rows = [_sparse_row("https://www.linkedin.com/in/SHOULD_NOT_APPEAR", "X")]
-        client = _StubbedSelectClient(phase_a_rows=phase_a_rows, phase_b_rows=phase_b_rows)
-
-        candidates, breakdown = script.fetch_sparse_candidates(
-            client, max_age_days=60, limit=3, min_current_employers=1,
-            prefer_screened_days=90, now=now,
-        )
-        assert len(candidates) == 3
-        assert all("SHOULD_NOT_APPEAR" not in c["linkedin_url"] for c in candidates)
-        # Only one select call was issued — the Phase A one.
-        assert len(client.select_calls) == 1
-        assert "screened_at" in client.select_calls[0]["filters"]
-        assert breakdown == {"phase_a": 3, "phase_b": 0, "total": 3}
-
-    def test_phase_b_fills_remainder_and_excludes_phase_a_urls(self, script):
-        now = datetime(2026, 5, 11, 12, 0, 0, tzinfo=timezone.utc)
-        recent = "2026-04-15T00:00:00Z"
-        phase_a_rows = [
-            _sparse_row("https://www.linkedin.com/in/a1", "A1", screened_at=recent),
-        ]
-        # Phase B fixture deliberately includes the same URL as Phase A so we
-        # can verify the dedupe path. The real DB would also exclude it via
-        # the not.in.(...) predicate; the test checks both layers.
-        phase_b_rows = [
-            _sparse_row("https://www.linkedin.com/in/a1", "A1 dup"),
-            _sparse_row("https://www.linkedin.com/in/b1", "B1"),
-            _sparse_row("https://www.linkedin.com/in/b2", "B2"),
-        ]
-        client = _StubbedSelectClient(phase_a_rows=phase_a_rows, phase_b_rows=phase_b_rows)
-
-        candidates, breakdown = script.fetch_sparse_candidates(
-            client, max_age_days=60, limit=3, min_current_employers=1,
-            prefer_screened_days=90, now=now,
-        )
-        urls = [c["linkedin_url"] for c in candidates]
-        assert urls[0] == "https://www.linkedin.com/in/a1"
-        # The Phase A URL must not appear a second time.
-        assert urls.count("https://www.linkedin.com/in/a1") == 1
-        assert set(urls[1:]) == {
-            "https://www.linkedin.com/in/b1",
-            "https://www.linkedin.com/in/b2",
-        }
-        assert breakdown == {"phase_a": 1, "phase_b": 2, "total": 3}
-
-        # The Phase B query must carry a not.in.(...) predicate on linkedin_url
-        # that lists the Phase A URL.
-        phase_b_call = client.select_calls[1]
-        assert "linkedin_url" in phase_b_call["filters"]
-        not_in = phase_b_call["filters"]["linkedin_url"]
-        assert not_in.startswith("not.in.(")
-        assert "https://www.linkedin.com/in/a1" in not_in
-        # Phase B query must NOT carry a screened_at predicate.
-        assert "screened_at" not in phase_b_call["filters"]
-
-    def test_prefer_screened_days_zero_disables_phase_a(self, script):
+    def test_prefer_screened_days_zero_also_disables_phase_a(self, script):
         now = datetime(2026, 5, 11, 12, 0, 0, tzinfo=timezone.utc)
         client = _StubbedSelectClient(phase_a_rows=[], phase_b_rows=[
             _sparse_row("https://www.linkedin.com/in/b1", "B1"),
@@ -739,29 +667,13 @@ class TestPhaseSelection:
         assert breakdown["phase_a"] == 0
         assert len(candidates) == 1
 
-    def test_custom_prefer_screened_days_used_in_cutoff(self, script):
-        """Non-default --prefer-screened-days flows into the screened_at cutoff."""
-        now = datetime(2026, 5, 11, 12, 0, 0, tzinfo=timezone.utc)
-        client = _StubbedSelectClient(phase_a_rows=[], phase_b_rows=[])
-        script.fetch_sparse_candidates(
-            client, max_age_days=60, limit=5, min_current_employers=1,
-            prefer_screened_days=30, now=now,
-        )
-        # 30 days before 2026-05-11T12:00:00Z = 2026-04-11T12:00:00Z
-        assert client.select_calls[0]["filters"]["screened_at"] == \
-            "gte.2026-04-11T12:00:00Z"
-
     def test_phase_breakdown_printed_in_dry_run(self, script, capsys):
-        # Use very recent screened_at relative to real "now" so Phase A keeps
-        # the row even though main() calls datetime.now() internally.
-        recent = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
-        phase_a_rows = [
-            _sparse_row("https://www.linkedin.com/in/a1", "A1", screened_at=recent),
-        ]
+        """Dry-run still prints the Phase A / Phase B / Total breakdown,
+        and Phase A always shows 0."""
         phase_b_rows = [
             _sparse_row("https://www.linkedin.com/in/b1", "B1"),
         ]
-        client = _StubbedSelectClient(phase_a_rows=phase_a_rows, phase_b_rows=phase_b_rows)
+        client = _StubbedSelectClient(phase_a_rows=[], phase_b_rows=phase_b_rows)
 
         with patch.object(script, "get_supabase_client", return_value=client):
             rc = script.main([

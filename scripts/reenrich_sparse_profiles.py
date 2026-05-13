@@ -192,24 +192,21 @@ def fetch_sparse_candidates(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """Return profiles eligible for re-enrichment, in priority order.
 
-    The selection is split into two phases:
+    Phase A (recently-screened prioritisation) is currently DISABLED because
+    the ``screened_at`` column does not exist on the ``profiles`` table in
+    the live schema — it lives on ``screening_results``. The previous query
+    returned a 400 from PostgREST and crashed the daily refresh (see issue
+    #33, run 25778025080 on 2026-05-13). The CLI flag and ``breakdown`` keys
+    are kept for API compatibility; ``phase_a`` will always report 0 until
+    a follow-up reintroduces it via a proper join.
 
-      Phase A — recently-screened candidates. Same staleness filter as
-        Phase B, plus ``screened_at >= now() - prefer_screened_days``. These
-        are profiles the recruiting pipeline actually touches, so we refresh
-        them first. We deliberately do NOT filter on ``contacted_at`` — that
-        column is vestigial in this codebase and is never populated, so any
-        predicate on it would match zero rows.
+    What runs today:
 
-      Phase B — fill the remainder from the original "oldest sparse" pool
-        (same staleness filter), excluding any URLs already picked in
-        Phase A. Ordered by ``enriched_at.asc`` so the oldest rows come
-        first.
-
-    Common filters applied to BOTH phases:
-      - ``enriched_at < now() - max_age_days``
-      - ``raw_data.current_employers`` length <= ``min_current_employers``
-        (including missing/null, which count as 0).
+      Phase B — pick the oldest sparse candidates: profiles whose
+        ``raw_data.current_employers`` length <= ``min_current_employers``
+        (including missing/null = 0) AND whose ``enriched_at`` is older than
+        ``max_age_days``. Ordered by ``enriched_at.asc`` so the oldest rows
+        come first.
 
     Returns a tuple ``(candidates, breakdown)`` where ``breakdown`` is a
     dict ``{"phase_a": N, "phase_b": M, "total": T}`` for observability.
@@ -225,24 +222,9 @@ def fetch_sparse_candidates(
 
     candidates: List[Dict[str, Any]] = []
 
-    # ---- Phase A: recently-screened candidates ----
-    if prefer_screened_days and prefer_screened_days > 0:
-        screened_cutoff = _cutoff_iso(prefer_screened_days, now=now)
-        phase_a_rows = client.select(
-            "profiles",
-            columns="linkedin_url,name,enriched_at,screened_at,raw_data",
-            filters={
-                "enriched_at": f"lt.{cutoff}",
-                "screened_at": f"gte.{screened_cutoff}",
-            },
-            limit=fetch_limit,
-            order_by="enriched_at.asc",
-        )
-        candidates.extend(
-            _apply_sparsity_filter(phase_a_rows, min_current_employers, limit)
-        )
-
-    phase_a_count = len(candidates)
+    # ---- Phase A: DISABLED (see docstring) ----
+    _ = prefer_screened_days  # kept for CLI/API compatibility
+    phase_a_count = 0
 
     # ---- Phase B: oldest-sparse fill ----
     remaining = limit - len(candidates)
@@ -543,11 +525,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--prefer-screened-days",
         type=int,
         default=90,
-        help="Phase A prioritises profiles whose screened_at is within this "
-             "many days; Phase B fills the remainder from the oldest-sparse "
-             "pool (default: 90). Pass 0 to disable Phase A entirely. "
-             "Note: contacted_at is intentionally NOT used — that column is "
-             "vestigial and never written by the app.",
+        help="Currently INERT: Phase A (recently-screened prioritisation) is "
+             "disabled because screened_at is not a column on profiles in the "
+             "live schema. The flag is preserved so existing automation keeps "
+             "running; Phase B (oldest-sparse fill) always runs.",
     )
     parser.add_argument(
         "--execute",
@@ -573,8 +554,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def _print_phase_breakdown(breakdown: Dict[str, int], prefer_screened_days: int) -> None:
     """Print the Phase A / Phase B split so the daily run is observable."""
+    # Phase A is currently disabled (schema mismatch — see fetch_sparse_candidates).
     print(
-        f"Phase A (screened within {prefer_screened_days}d): "
+        f"Phase A (disabled — screened_at not on profiles): "
         f"{breakdown.get('phase_a', 0)} candidates"
     )
     print(

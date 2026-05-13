@@ -7251,7 +7251,7 @@ with tab_enrich:
                         # to screening_results), status, screened_at, contacted_at.
                         # Selecting a dropped column makes PostgREST 400 and the try/except
                         # silently drops ALL matches, making every URL look "new".
-                        _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,enriched_at,current_start_date,current_years_at_company'
+                        _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,location,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,enriched_at,current_start_date,current_years_at_company'
                         # Without an explicit ORDER BY, paging through ~30k rows silently drops
                         # rows between pages (Postgres does not guarantee row order across pages
                         # without it). That caused profiles enriched in the last 3 months to be
@@ -8239,8 +8239,9 @@ with tab_filter2:
                 help=(
                     "Searches across EVERYTHING about the candidate: skills, job titles, "
                     "employer names, headline, summary, and the raw Crustdata JSON. "
-                    "Use this when you don't care exactly which LinkedIn field the keyword "
-                    "appears in.\n\n" + _bool_help
+                    "When you run this, the app pulls each candidate's full Crustdata response "
+                    "from the database for an exhaustive search — so it takes a few seconds for "
+                    "large batches.\n\n" + _bool_help
                 ),
             )
         with kw_col_skills:
@@ -8655,6 +8656,56 @@ with tab_filter2:
                     return ' '.join(parts)
 
                 if keywords_full_profile and keywords_full_profile.strip():
+                    # Full-profile search means the FULL Crustdata JSON, not just
+                    # the lightweight summary columns. Bulk-fetch raw_data from
+                    # the DB for rows that don't already carry it, then search
+                    # across the lightweight columns AND the raw JSON together.
+                    # Only runs when the user actually fills in this field, so
+                    # the cost is paid only when needed. Chunked at 50 URLs to
+                    # stay under PostgREST's URL length limit.
+                    if HAS_DATABASE and 'linkedin_url' in df.columns:
+                        urls_needing_raw = [
+                            u for u, has in zip(
+                                df['linkedin_url'].tolist(),
+                                (df['raw_crustdata'].notna() if 'raw_crustdata' in df.columns else [False] * len(df)),
+                            )
+                            if u and not has
+                        ]
+                        if urls_needing_raw:
+                            with st.spinner(f"Fetching raw profile data for {len(urls_needing_raw)} candidates..."):
+                                try:
+                                    _kw_db = _get_db_client()
+                                    if _kw_db:
+                                        raw_by_url = {}
+                                        _KW_CHUNK = 50
+                                        for _i in range(0, len(urls_needing_raw), _KW_CHUNK):
+                                            chunk = urls_needing_raw[_i:_i + _KW_CHUNK]
+                                            quoted = ','.join(f'"{u}"' for u in chunk)
+                                            rows = _kw_db.select(
+                                                'profiles', 'linkedin_url,raw_data',
+                                                {'linkedin_url': f'in.({quoted})'},
+                                                limit=len(chunk),
+                                            )
+                                            for r in (rows or []):
+                                                u = r.get('linkedin_url')
+                                                if u and r.get('raw_data') is not None:
+                                                    raw_by_url[u] = r['raw_data']
+                                        if 'raw_crustdata' not in df.columns:
+                                            df['raw_crustdata'] = None
+                                        df['raw_crustdata'] = df.apply(
+                                            lambda r: r.get('raw_crustdata') if r.get('raw_crustdata') is not None
+                                            else raw_by_url.get(r.get('linkedin_url')),
+                                            axis=1,
+                                        )
+                                        if is_admin_user():
+                                            st.caption(
+                                                f"Hydrated raw_data for {len(raw_by_url)} of {len(urls_needing_raw)} "
+                                                f"candidates before full-profile keyword search."
+                                            )
+                                except Exception as _kw_err:
+                                    if is_admin_user():
+                                        st.warning(f"raw_data hydration failed for full-profile search: {_kw_err}")
+
                     full_cols = [c for c in [
                         'skills', 'all_titles', 'all_employers', 'past_positions',
                         'summary', 'headline', 'raw_crustdata'

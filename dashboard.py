@@ -8826,41 +8826,55 @@ with tab_filter2:
             show_all_cols = st.checkbox("Show all columns", value=False, key="filter2_show_all_cols")
 
         if show_all_cols:
-            st.dataframe(display_df.head(100), width="stretch", hide_index=True,
-                        column_config={
-                            "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
-                            "public_url": st.column_config.LinkColumn("LinkedIn")
-                        })
-            st.caption(f"Showing {min(100, len(display_df))} of {len(display_df)} profiles | {len(display_df.columns)} columns")
+            # Hide columns that are empty for every row in the current display
+            # slice. Without this, recruiters see a wall of empty columns:
+            # PhantomBuster-only fields on Crustdata-only profiles, screening_*
+            # fields before screening has run, raw_data-derived fields that
+            # weren't hydrated, etc. Cheap to compute since we only inspect
+            # the first 100 rows.
+            preview = display_df.head(100)
 
-            # Admin-only diagnostic: show fill-rate per column so we can see
-            # which ones are empty and trace WHY (vs. just hiding them).
-            if is_admin_user():
-                with st.expander(f"Debug: column fill rates ({len(display_df.columns)} columns)", expanded=False):
-                    rows = []
-                    for c in display_df.columns:
-                        s = display_df[c]
-                        non_null = int(s.notna().sum())
-                        # Also count empty strings + literal "nan"/"None"
-                        try:
-                            non_empty = int(((s.fillna('').astype(str).str.strip() != '')
-                                             & (~s.fillna('').astype(str).isin(['nan', 'None', '[]', '{}']))).sum())
-                        except Exception:
-                            non_empty = non_null
-                        rows.append({
-                            'column': c,
-                            'non_empty': non_empty,
-                            'pct': f"{(non_empty / len(display_df) * 100):.0f}%" if len(display_df) else "—",
-                        })
-                    diag_df = pd.DataFrame(rows).sort_values('non_empty')
-                    st.dataframe(diag_df, width="stretch", hide_index=True)
+            def _col_is_empty(series):
+                if series.isna().all():
+                    return True
+                try:
+                    s = series.fillna('').astype(str).str.strip()
+                    return (s == '').all() or s.isin(['nan', 'None', '[]', '{}']).all()
+                except Exception:
+                    return False
+
+            non_empty_cols = [c for c in preview.columns if not _col_is_empty(preview[c])]
+            empty_cols = [c for c in preview.columns if c not in non_empty_cols]
+            preview_filtered = preview[non_empty_cols] if non_empty_cols else preview
+
+            st.dataframe(
+                preview_filtered, width="stretch", hide_index=True,
+                column_config={
+                    "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                    "public_url": st.column_config.LinkColumn("LinkedIn"),
+                },
+            )
+            caption = (
+                f"Showing {min(100, len(display_df))} of {len(display_df)} profiles | "
+                f"{len(non_empty_cols)} of {len(display_df.columns)} columns"
+            )
+            if empty_cols:
+                caption += f" ({len(empty_cols)} empty columns hidden)"
+            st.caption(caption)
+
+            # Admin-only: list the hidden columns so we can decide which ones
+            # are bugs (should be populated) vs. legitimate misses (e.g.
+            # screening_* before screening runs).
+            if empty_cols and is_admin_user():
+                with st.expander(f"Hidden empty columns ({len(empty_cols)})", expanded=False):
                     st.caption(
-                        "Empty columns are usually one of: (a) PhantomBuster-only fields "
-                        "on Crustdata-only profiles, (b) fields that need raw_data which "
-                        "wasn't loaded in this code path, (c) screening_* fields before "
-                        "screening has run, (d) fields the normalizer doesn't emit. Tell me "
-                        "which empties you want filled and I'll trace the source."
+                        "Empty in this preview because the column is either "
+                        "(a) raw_data-derived and raw_data wasn't loaded, "
+                        "(b) screening_* / screened_at / status (moved to a "
+                        "different table after a migration), or "
+                        "(c) PhantomBuster-only fields on a Crustdata-only batch."
                     )
+                    st.write(", ".join(f"`{c}`" for c in empty_cols))
         else:
             # Prefer 'name' for DB-loaded profiles, fallback to first_name/last_name
             if 'name' in display_df.columns and not display_df['name'].isna().all():

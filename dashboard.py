@@ -7845,6 +7845,38 @@ with tab_enrich:
                             else:
                                 db_msg = " | DB: not connected"
 
+                            # Wait for the just-written rows to become visible to subsequent
+                            # SELECT queries before triggering the rerun. Without this, the
+                            # immediate rerun queries the DB before Supabase's REST layer has
+                            # made the writes visible, so the "to enrich" / "already enriched"
+                            # counters re-render from a stale snapshot and the recruiter has to
+                            # manually F5. Verified 2026-05-13 (Shiri + Alexey field test).
+                            if HAS_DATABASE and successful:
+                                try:
+                                    expected_urls = {
+                                        r.get('linkedin_url')
+                                        for r in successful
+                                        if r.get('linkedin_url')
+                                    }
+                                    if expected_urls:
+                                        verify_client = _get_db_client()
+                                        if verify_client:
+                                            cutoff_iso = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
+                                            for _vis_attempt in range(5):
+                                                visible = verify_client.select(
+                                                    'profiles', 'linkedin_url',
+                                                    filters={'enriched_at': f'gte.{cutoff_iso}'},
+                                                    limit=max(len(expected_urls) * 2, 200),
+                                                )
+                                                visible_urls = {
+                                                    p.get('linkedin_url') for p in (visible or [])
+                                                }
+                                                if expected_urls.issubset(visible_urls):
+                                                    break
+                                                time.sleep(1)
+                                except Exception:
+                                    pass  # fall through to rerun even if verification fails
+
                             # Clear all caches so the "already enriched" count refreshes from DB.
                             # Explicitly clear the two most-relevant caches in addition to cache_data.clear()
                             # (belt-and-braces: some Streamlit versions don't always wipe decorated functions).

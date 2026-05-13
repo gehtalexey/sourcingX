@@ -47,6 +47,57 @@ problem**, not a partial-execution problem. URL-matching drops (the
 original hypothesis below) still happen, but explain a much smaller share of
 the gap than the doc previously assumed.
 
+### Verification (2026-05-13, Alexey live test)
+
+Loaded a CSV, hit "Start Enrichment" for all candidates, observed before vs.
+after a manual refresh:
+
+| Step | "to enrich" | "already enriched" | "unavailable" |
+|---|---|---|---|
+| After run finishes (no refresh) | **64** | 418 | 15 |
+| After F5 refresh + ~30s | **0** (line gone) | **482** | 15 |
+
+`418 + 64 = 482`. **Every one of the 64 profiles was successfully enriched
+and written to Supabase.** The Streamlit UI just did not recompute the
+"to enrich" count.
+
+So the bug is purely UI-state-stale. Not a Crustdata/SalesQL problem, not a
+URL-matching problem, not credit truncation.
+
+### Why the existing rerun isn't enough
+
+`dashboard.py:7849-7873` already does what should fix this:
+
+```python
+_cached_recently_enriched_urls.clear()
+_cached_not_found_urls.clear()
+st.cache_data.clear()
+for key in ['_detection_hash', '_detection_cache_version', '_skipped_urls',
+            '_new_urls', '_unavailable_urls', '_matched_profiles_cache',
+            '_unique_profile_count']:
+    if key in st.session_state:
+        del st.session_state[key]
+st.rerun()
+```
+
+But the verification above proves the count is still stale post-rerun.
+Something feeding the "to enrich" count is being recomputed from a source
+that isn't in this clear-block. Candidates to audit:
+
+- `@st.cache_data` / `@st.cache_resource` on the DB-fetch functions that
+  back `urls_for_enrichment` (different cache scope from `st.cache_data.clear()`)
+- A `_cached_*` function-level memo that isn't enumerated above
+- The `loaded_df` / `enriched_df` in session_state still holds the original
+  CSV row set with a stale "already enriched" boolean per row, and the
+  per-row recompute happens lazily on next render — but `st.rerun()` doesn't
+  force a re-derive if the loaded DataFrame is unchanged.
+
+Most likely culprit: the third one. The "to enrich" count is derived from
+the CSV's rows joined against the DB-known-enriched set. If that join is
+computed once when the CSV is loaded and cached in session_state, the rerun
+won't help — only a fresh CSV load (or a manual F5, which reruns the whole
+script from scratch and re-queries the DB) will recompute it.
+
 ## What the code does today
 
 ### Crustdata loop (Tab 3)

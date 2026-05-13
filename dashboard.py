@@ -8279,6 +8279,32 @@ with tab_filter2:
                 "Re-enrich or reload from DB to populate the field."
             )
 
+        # Admin-only: show the distribution of current_years_at_company values
+        # so we can see if the field is populated and where the threshold lands.
+        if has_tenure_col and is_admin_user():
+            with st.expander("Debug: tenure column stats", expanded=False):
+                tenure_series = pd.to_numeric(enriched_df['current_years_at_company'], errors='coerce')
+                total = len(tenure_series)
+                non_null = int(tenure_series.notna().sum())
+                null = total - non_null
+                st.write(f"- rows in enriched_df: `{total}`")
+                st.write(f"- rows with tenure populated: `{non_null}`")
+                st.write(f"- rows with NaN/None tenure: `{null}`")
+                if non_null > 0:
+                    st.write(f"- min years: `{tenure_series.min():.2f}` ({tenure_series.min()*12:.0f} months)")
+                    st.write(f"- max years: `{tenure_series.max():.2f}` ({tenure_series.max()*12:.0f} months)")
+                    st.write(f"- median years: `{tenure_series.median():.2f}` ({tenure_series.median()*12:.0f} months)")
+                    below_24mo = int((tenure_series * 12 < 24).sum())
+                    st.write(f"- count below 24 months: `{below_24mo}`")
+                if null == total:
+                    st.warning(
+                        "All rows have empty tenure. The profiles in `enriched_df` "
+                        "did not get the field populated — most likely they were "
+                        "loaded via a path that didn't go through "
+                        "`profile_to_display_row` or `normalize_crustdata_profile`. "
+                        "Check whether `raw_data` is present on the underlying profile dicts."
+                    )
+
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
         with btn_col1:
             apply_clicked = st.button("Apply Filters", type="primary", key="apply_filters_enriched")

@@ -7,7 +7,7 @@
 This PR ships three things:
 
 1. A small change to `normalize_crustdata_profile` so enriched profiles carry
-   `current_start_date` + `current_years_in_role`. Used by 2 and by PR-E.
+   `current_start_date` + `current_years_at_company`. Used by 2 and by PR-E.
 2. A new **tenure filter** in Filter+ (min/max years at current company), the
    parity fix Shiri asked for.
 3. A safer default for the **Required keywords scope** radio (defaults to
@@ -55,7 +55,7 @@ Filters supported:
 - Duration filters: **min/max months in role** and **min/max months at
   company** (`dashboard.py:6389-6421`). Active only when the CSV has
   PhantomBuster duration columns (`durationInRole`, `durationInCompany`,
-  `current_years_in_role`, etc.).
+  `current_years_at_company`, etc.).
 
 ### Filter+ (Tab 4, `dashboard.py:7888`+)
 
@@ -134,7 +134,7 @@ scope to "Full profile" and warn explicitly that "Skills only" is brittle.
 even if we wanted to add a Filter+ widget, there was nothing to filter on.
 
 This PR fixes that by adding `current_start_date` (raw string) and
-`current_years_in_role` (float) to the normalizer's output. Both are derived
+`current_years_at_company` (float) to the normalizer's output. Both are derived
 from `current_employers[*]` via the existing `pick_current_employer` +
 `_parse_start_date_sort_key` helpers — same parse path the screening prompt
 uses, so values are consistent end-to-end.
@@ -146,7 +146,7 @@ uses, so values are consistent end-to-end.
 ```python
 emp = pick_current_employer(raw.get('current_employers'))
 current_start_date = None
-current_years_in_role = None
+current_years_at_company = None
 if emp:
     current_title = emp.get('employee_title') or emp.get('title')
     current_company = emp.get('employer_name') or emp.get('company_name')
@@ -155,7 +155,7 @@ if emp:
         current_start_date = str(raw_start).strip()
         parseable, dt = _parse_start_date_sort_key(raw_start)
         if parseable:
-            current_years_in_role = round(
+            current_years_at_company = round(
                 (datetime.now() - dt).days / 365.25, 1
             )
 ```
@@ -164,7 +164,7 @@ Returned alongside the existing keys (`normalizers.py:594-611`):
 
 ```python
 'current_start_date': current_start_date,
-'current_years_in_role': current_years_in_role,
+'current_years_at_company': current_years_at_company,
 ```
 
 Tests pin the contract: `test_normalize_current_tenure.py`. CI runs them.
@@ -185,14 +185,14 @@ explaining why. No silent breakage.
 Runs after the keyword filter, before the result summary:
 
 ```python
-if 'current_years_in_role' in df.columns:
+if 'current_years_at_company' in df.columns:
     if min_years_at_company > 0:
-        tenure_series = pd.to_numeric(df['current_years_in_role'], errors='coerce')
+        tenure_series = pd.to_numeric(df['current_years_at_company'], errors='coerce')
         below_min_mask = tenure_series < min_years_at_company  # NaN is False
         ...
 ```
 
-Rows where `current_years_in_role` is NaN/None are **kept**, not dropped — a
+Rows where `current_years_at_company` is NaN/None are **kept**, not dropped — a
 profile with an unparseable `start_date` shouldn't be punished for a data
 quality issue.
 
@@ -273,7 +273,7 @@ others.
 
 `test_normalize_current_tenure.py` — five cases pin:
 - Tenure fields pulled from most recent current employer (not raw[0]).
-- Unparseable `start_date` ("Present") leaves `current_years_in_role` as
+- Unparseable `start_date` ("Present") leaves `current_years_at_company` as
   `None` (no 2025-year garbage).
 - Empty `current_employers` returns None on both fields.
 - Year-only ("2024") `start_date` parses to ~Jan 1 of that year.

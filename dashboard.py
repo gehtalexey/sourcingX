@@ -8243,37 +8243,40 @@ with tab_filter2:
             )
 
         # Tenure filter (Filter+ parity with the Filter tab's duration widget).
-        # Uses normalize_crustdata_profile's derived `current_years_in_role`
-        # field. If the column is missing (profiles loaded from older session
-        # state pre-this-feature) the widget renders but applies no-op.
-        has_tenure_col = 'current_years_in_role' in enriched_df.columns
+        # Uses `current_years_at_company` — the same field name the
+        # PhantomBuster normalizer emits, so Filter+ works for both data
+        # sources. Crustdata-enriched profiles get it from
+        # normalize_crustdata_profile's start_date computation. Unit shown to
+        # the user is months (to match the Filter tab); we convert
+        # years × 12 → months at filter time.
+        has_tenure_col = 'current_years_at_company' in enriched_df.columns
         tenure_col1, tenure_col2 = st.columns(2)
         with tenure_col1:
-            min_years_at_company = st.number_input(
-                "Min years at current company",
-                min_value=0.0, max_value=30.0, value=0.0, step=0.5,
-                key="f2_min_years_at_company",
+            min_months_at_company = st.number_input(
+                "Min months at current company",
+                min_value=0, max_value=240, value=0, step=1,
+                key="f2_min_months_at_company",
                 help=(
-                    "Drop candidates whose tenure at the CURRENT company is below this. "
-                    "0 = no minimum. Counted from current_employers[0].start_date in raw "
-                    "Crustdata; military / advisory parallel roles are excluded by "
-                    "pick_current_employer."
+                    "Drop candidates whose tenure at the CURRENT company is below this "
+                    "(in months). 0 = no minimum. Counted from "
+                    "current_employers[0].start_date in raw Crustdata; military / "
+                    "advisory parallel roles are excluded by pick_current_employer."
                 ),
                 disabled=not has_tenure_col,
             )
         with tenure_col2:
-            max_years_at_company = st.number_input(
-                "Max years at current company",
-                min_value=0.0, max_value=40.0, value=0.0, step=0.5,
-                key="f2_max_years_at_company",
+            max_months_at_company = st.number_input(
+                "Max months at current company",
+                min_value=0, max_value=480, value=0, step=1,
+                key="f2_max_months_at_company",
                 help="0 = no maximum. Use this to exclude very long tenures.",
                 disabled=not has_tenure_col,
             )
         if not has_tenure_col:
             st.caption(
                 "⚠️ Tenure filter is disabled — profiles were enriched before "
-                "`current_years_in_role` was added to the normalizer. Re-enrich "
-                "or reload from DB to populate the field."
+                "`current_years_at_company` was populated for Crustdata profiles. "
+                "Re-enrich or reload from DB to populate the field."
             )
 
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
@@ -8665,25 +8668,27 @@ with tab_filter2:
                         else:
                             st.warning(f"No searchable columns found. Available: {list(df.columns)}")
 
-                # Tenure filter — min/max years at current company.
-                # Field is normalize_crustdata_profile's `current_years_in_role`.
+                # Tenure filter — min/max months at current company.
+                # Field is `current_years_at_company` (years as float), shared
+                # with PhantomBuster normalizer. Widget shows months for parity
+                # with the Filter tab, so we compare months × 12 ≤ years × 12.
                 # Rows where the field is NaN/None are KEPT (we don't punish
                 # profiles whose start_date couldn't be parsed — that's a data
                 # quality issue, not a tenure violation).
-                if 'current_years_in_role' in df.columns:
-                    if min_years_at_company > 0:
-                        tenure_series = pd.to_numeric(df['current_years_in_role'], errors='coerce')
-                        below_min_mask = tenure_series < min_years_at_company  # NaN is False
+                if 'current_years_at_company' in df.columns:
+                    if min_months_at_company > 0:
+                        tenure_months = pd.to_numeric(df['current_years_at_company'], errors='coerce') * 12
+                        below_min_mask = tenure_months < min_months_at_company  # NaN is False
                         removed_below = int(below_min_mask.sum())
                         if removed_below > 0:
-                            removed[f'Below min tenure ({min_years_at_company:g}y)'] = removed_below
+                            removed[f'Below min tenure ({min_months_at_company}mo)'] = removed_below
                             df = df[~below_min_mask]
-                    if max_years_at_company > 0:
-                        tenure_series = pd.to_numeric(df['current_years_in_role'], errors='coerce')
-                        above_max_mask = tenure_series > max_years_at_company  # NaN is False
+                    if max_months_at_company > 0:
+                        tenure_months = pd.to_numeric(df['current_years_at_company'], errors='coerce') * 12
+                        above_max_mask = tenure_months > max_months_at_company  # NaN is False
                         removed_above = int(above_max_mask.sum())
                         if removed_above > 0:
-                            removed[f'Above max tenure ({max_years_at_company:g}y)'] = removed_above
+                            removed[f'Above max tenure ({max_months_at_company}mo)'] = removed_above
                             df = df[~above_max_mask]
 
                 # Store results - MEMORY OPTIMIZED: don't store f2_filtered_out

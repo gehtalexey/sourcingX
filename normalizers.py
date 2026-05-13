@@ -542,23 +542,25 @@ def normalize_crustdata_profile(raw: dict, original_url: str = None) -> Optional
 
     emp = pick_current_employer(raw.get('current_employers'))
     current_start_date = None
-    current_years_in_role = None
+    current_years_at_company = None
     if emp:
         current_title = emp.get('employee_title') or emp.get('title')
         current_company = emp.get('employer_name') or emp.get('company_name')
-        # Capture tenure of the current role so post-enrichment filters
-        # (Filter+, DB search) can filter on "minimum X years at current
+        # Capture tenure at the current company so post-enrichment filters
+        # (Filter+, DB search) can filter on "minimum X months at current
         # company" without re-loading raw_crustdata. start_date is preserved
-        # as the raw string; current_years_in_role is computed against today
-        # using the same parser pick_current_employer uses for sorting, so
-        # unparseable "Present" / "May 2025" strings leave it None instead of
-        # producing nonsensical multi-millennium values.
+        # as the raw string; current_years_at_company is computed against
+        # today using the same parser pick_current_employer uses for sorting,
+        # so unparseable "Present" / "May 2025" strings leave it None instead
+        # of producing nonsensical multi-millennium values. Field name matches
+        # normalize_phantombuster_profile so Filter+ can read both data
+        # sources from the same column.
         raw_start = emp.get('start_date')
         if raw_start is not None and str(raw_start).strip():
             current_start_date = str(raw_start).strip()
             parseable, dt = _parse_start_date_sort_key(raw_start)
             if parseable:
-                current_years_in_role = round((datetime.now() - dt).days / 365.25, 1)
+                current_years_at_company = round((datetime.now() - dt).days / 365.25, 1)
 
     # Fallback to top-level fields
     if not current_title:
@@ -623,7 +625,7 @@ def normalize_crustdata_profile(raw: dict, original_url: str = None) -> Optional
         'past_positions': past_positions_str,
         'connections_count': connections,
         'current_start_date': current_start_date,
-        'current_years_in_role': current_years_in_role,
+        'current_years_at_company': current_years_at_company,
         # Note: raw_crustdata NOT stored here to save memory - fetch from DB when needed
     }
 

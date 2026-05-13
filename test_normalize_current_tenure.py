@@ -1,13 +1,13 @@
 """Regression tests for normalize_crustdata_profile's tenure fields.
 
 `normalize_crustdata_profile` emits `current_start_date` (raw string) and
-`current_years_in_role` (float) so the Filter+ and DB-search tabs can filter
+`current_years_at_company` (float) so the Filter+ and DB-search tabs can filter
 by tenure-at-current-company without re-loading raw_crustdata. These tests
 pin the contract:
 
 - The fields are extracted from the MOST RECENT current employer (same one
   pick_current_employer returns), not from raw[0].
-- Unparseable start_date strings leave current_years_in_role as None instead
+- Unparseable start_date strings leave current_years_at_company as None instead
   of producing nonsensical values like 2025 years.
 - Missing current_employers leaves both fields as None — never crashes.
 - The computed years value is roughly today minus start_date, in years.
@@ -45,9 +45,9 @@ def test_tenure_fields_pulled_from_most_recent_current_employer():
     result = normalize_crustdata_profile(_stub_raw([older, newer]))
     assert result['current_start_date'] == '2023-10-01T00:00:00+00:00'
     # Years value must reflect ~2.5y+ tenure as of today.
-    assert result['current_years_in_role'] is not None
+    assert result['current_years_at_company'] is not None
     expected_years = (datetime.now() - datetime(2023, 10, 1)).days / 365.25
-    assert abs(result['current_years_in_role'] - expected_years) < 0.05
+    assert abs(result['current_years_at_company'] - expected_years) < 0.05
 
 
 def test_tenure_years_is_none_when_start_date_unparseable():
@@ -61,7 +61,7 @@ def test_tenure_years_is_none_when_start_date_unparseable():
     }
     result = normalize_crustdata_profile(_stub_raw([emp]))
     assert result['current_start_date'] == 'Present'
-    assert result['current_years_in_role'] is None
+    assert result['current_years_at_company'] is None
 
 
 def test_tenure_fields_none_when_no_current_employer():
@@ -76,7 +76,7 @@ def test_tenure_fields_none_when_no_current_employer():
     result = normalize_crustdata_profile(raw)
     assert result is not None
     assert result['current_start_date'] is None
-    assert result['current_years_in_role'] is None
+    assert result['current_years_at_company'] is None
 
 
 def test_tenure_fields_none_when_start_date_missing():
@@ -87,7 +87,7 @@ def test_tenure_fields_none_when_start_date_missing():
     }
     result = normalize_crustdata_profile(_stub_raw([emp]))
     assert result['current_start_date'] is None
-    assert result['current_years_in_role'] is None
+    assert result['current_years_at_company'] is None
 
 
 def test_tenure_handles_year_only_format():
@@ -100,6 +100,6 @@ def test_tenure_handles_year_only_format():
     }
     result = normalize_crustdata_profile(_stub_raw([emp]))
     assert result['current_start_date'] == '2024'
-    assert result['current_years_in_role'] is not None
+    assert result['current_years_at_company'] is not None
     expected = (datetime.now() - datetime(2024, 1, 1)).days / 365.25
-    assert abs(result['current_years_in_role'] - expected) < 0.05
+    assert abs(result['current_years_at_company'] - expected) < 0.05

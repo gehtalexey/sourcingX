@@ -42,6 +42,8 @@ class FakeClient:
 
     def select(self, table, columns="*", filters=None, limit=5000, **kwargs):
         self.select_calls.append({"table": table, "columns": columns, "filters": filters, "limit": limit})
+        if isinstance(self._select_return, dict):
+            return self._select_return.get(table, [])
         return self._select_return
 
     def count(self, table, filters=None):
@@ -62,6 +64,28 @@ def _all_payloads(client):
         if call["table"] == "profiles":
             out.append(call["data"])
     return out
+
+
+def _all_writes(client):
+    """Flatten every write payload, regardless of target table."""
+    out = []
+    for call in client.upsert_calls:
+        out.append({"table": call["table"], "payload": call["data"]})
+    for call in client.upsert_batch_calls:
+        for row in call["rows"]:
+            out.append({"table": call["table"], "payload": row})
+    for call in client.update_calls:
+        out.append({"table": call["table"], "payload": call["data"]})
+    return out
+
+
+def _all_profile_select_columns(client):
+    """Return the columns requested from profiles."""
+    return [
+        call["columns"]
+        for call in client.select_calls
+        if call["table"] == "profiles"
+    ]
 
 
 def _all_profile_filters(client):
@@ -109,6 +133,8 @@ def test_update_profile_screening_omits_status():
     )
     for payload in _all_payloads(client):
         assert "status" not in payload, f"profiles write leaked 'status': {payload}"
+    assert not _all_payloads(client), "screening writes must not target profiles"
+    assert client.upsert_calls[0]["table"] == "screening_results"
 
 
 def test_update_profile_screening_batch_omits_status():
@@ -124,6 +150,33 @@ def test_update_profile_screening_batch_omits_status():
     )
     for payload in _all_payloads(client):
         assert "status" not in payload, f"profiles write leaked 'status': {payload}"
+    assert not _all_payloads(client), "batch screening writes must not target profiles"
+    assert client.upsert_batch_calls[0]["table"] == "screening_results"
+
+
+def test_screening_writes_use_only_screening_results_columns():
+    client = FakeClient()
+    db.update_profile_screening(
+        client,
+        "https://www.linkedin.com/in/test-user",
+        score=7,
+        fit_level="Good Fit",
+        summary="ok",
+        reasoning="because",
+    )
+    forbidden_profile_columns = {
+        "status",
+        "screening_score",
+        "screening_fit_level",
+        "screening_summary",
+        "screening_reasoning",
+        "screening_notes",
+        "screened_at",
+    }
+    for write in _all_writes(client):
+        if write["table"] == "profiles":
+            leaked = forbidden_profile_columns & set(write["payload"])
+            assert not leaked, f"profiles write leaked missing columns: {leaked}"
 
 
 def test_prepare_profile_row_omits_status():
@@ -151,6 +204,92 @@ def test_get_profiles_needing_screening_filters_enrichment_status():
         assert "status" not in filters, f"profile filter leaked 'status': {filters}"
     # Sanity: it does filter on the replacement column
     assert any("enrichment_status" in f for f in _all_profile_filters(client))
+
+
+def test_get_profiles_needing_screening_does_not_filter_profiles_by_screening_score():
+    client = FakeClient()
+    db.get_profiles_needing_screening(client, limit=10)
+    for filters in _all_profile_filters(client):
+        assert "screening_score" not in filters, (
+            f"profile filter leaked missing screening_score column: {filters}"
+        )
+
+
+def test_get_profiles_by_fit_level_reads_latest_screening_not_profiles():
+    client = FakeClient(select_return={
+        "latest_screening": [
+            {
+                "linkedin_url": "https://www.linkedin.com/in/a",
+                "screening_score": 8,
+                "screening_fit_level": "Good Fit",
+            }
+        ],
+        "profiles": [
+            {
+                "linkedin_url": "https://www.linkedin.com/in/a",
+                "name": "A",
+            }
+        ],
+    })
+    rows = db.get_profiles_by_fit_level(client, "Good Fit", limit=10)
+    profile_calls = [c for c in client.select_calls if c["table"] == "profiles"]
+    latest_calls = [c for c in client.select_calls if c["table"] == "latest_screening"]
+
+    assert latest_calls
+    assert latest_calls[0]["filters"]["screening_fit_level"] == "eq.Good Fit"
+    for call in profile_calls:
+        filters = call["filters"] or {}
+        assert "screening_fit_level" not in filters
+    assert rows[0]["screening_fit_level"] == "Good Fit"
+
+
+def test_get_all_profiles_selects_only_live_profile_columns_and_merges_screening():
+    client = FakeClient(select_return={
+        "profiles": [
+            {
+                "linkedin_url": "https://www.linkedin.com/in/a",
+                "name": "A",
+                "enriched_at": "2026-01-01T00:00:00",
+            }
+        ],
+        "latest_screening": [
+            {
+                "linkedin_url": "https://www.linkedin.com/in/a",
+                "screening_score": 9,
+                "screening_fit_level": "Good Fit",
+                "screened_at": "2026-05-13T00:00:00",
+            }
+        ],
+    })
+    rows = db.get_all_profiles(client, limit=10, lightweight=False)
+    forbidden_profile_columns = {
+        "status",
+        "screening_score",
+        "screening_fit_level",
+        "screening_summary",
+        "screening_reasoning",
+        "screening_notes",
+        "screened_at",
+    }
+
+    for columns in _all_profile_select_columns(client):
+        selected = set(columns.split(",")) if columns != "*" else set()
+        leaked = forbidden_profile_columns & selected
+        assert not leaked, f"profiles SELECT leaked missing columns: {leaked}"
+    assert rows[0]["screening_score"] == 9
+    assert rows[0]["screening_fit_level"] == "Good Fit"
+
+
+def test_get_all_profiles_lightweight_selects_only_live_profile_columns():
+    client = FakeClient(select_return={
+        "profiles": [{"linkedin_url": "https://www.linkedin.com/in/a"}],
+        "latest_screening": [],
+    })
+    db.get_all_profiles(client, limit=10, lightweight=True)
+    for columns in _all_profile_select_columns(client):
+        assert "status" not in columns
+        assert "screening_score" not in columns
+        assert "screened_at" not in columns
 
 
 def test_get_profiles_by_enrichment_status_filters_enrichment_status():

@@ -1983,8 +1983,16 @@ def get_enriched_urls(client: SupabaseClient) -> set:
     """Get all LinkedIn URLs that have been enriched.
 
     Used to skip profiles that are already in the database when enriching.
+    Uses keyset pagination on enriched_at (matches get_recently_enriched_urls
+    and get_all_profiles). Offset pagination without ORDER BY silently drops
+    rows across pages when paging through 30k+ rows — see PR #57.
     """
-    result = client.select('profiles', 'linkedin_url', limit=50000)
+    result = client.select(
+        'profiles', 'linkedin_url,enriched_at',
+        limit=50000,
+        order_by='enriched_at.desc',
+        cursor_column='enriched_at',
+    )
     urls = set()
     for p in result:
         url = p.get('linkedin_url')
@@ -1994,8 +2002,16 @@ def get_enriched_urls(client: SupabaseClient) -> set:
 
 
 def get_all_linkedin_urls(client: SupabaseClient) -> list:
-    """Get all LinkedIn URLs from database."""
-    result = client.select('profiles', 'linkedin_url', limit=50000)
+    """Get all LinkedIn URLs from database.
+
+    Uses keyset pagination on enriched_at — see get_enriched_urls() for why.
+    """
+    result = client.select(
+        'profiles', 'linkedin_url,enriched_at',
+        limit=50000,
+        order_by='enriched_at.desc',
+        cursor_column='enriched_at',
+    )
     return [p['linkedin_url'] for p in result if p.get('linkedin_url')]
 
 

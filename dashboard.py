@@ -8316,7 +8316,23 @@ with tab_filter2:
                 original_count = len(df)
                 removed = {}
                 filtered_out = {}  # Track filtered profiles by reason
+                filtered_out_light = {}  # Lightweight dropped-rows-per-filter for the funnel expander
                 priority_matches = []
+
+                # Display columns kept on every captured row (parity with the
+                # Filter tab's _store_filtered helper). Lightweight — never
+                # carries raw_data or full enrichment blobs.
+                _F2_DISPLAY_COLS = ['name', 'current_title', 'current_company', 'location', 'linkedin_url']
+
+                def _f2_capture_dropped(source_df, drop_mask, label):
+                    """Capture up to 100 dropped rows (display cols only) for the funnel breakdown."""
+                    try:
+                        cols = [c for c in _F2_DISPLAY_COLS if c in source_df.columns]
+                        slice_df = source_df.loc[drop_mask, cols] if cols else source_df.loc[drop_mask]
+                        if not slice_df.empty:
+                            filtered_out_light[label] = slice_df.head(100).copy()
+                    except Exception:
+                        pass  # Diagnostic capture must never break the apply path
 
                 sheet_url = filter_sheets.get('url', '') if has_sheets else ''
 
@@ -8347,6 +8363,7 @@ with tab_filter2:
                                     full = df.apply(lambda r: _norm_name(f"{r.get('first_name', '')} {r.get('last_name', '')}"), axis=1)
                                     df['_is_past'] = df['_is_past'] | full.isin(past_names)
                                 removed['Past Candidates'] = df['_is_past'].sum()
+                                _f2_capture_dropped(df, df['_is_past'], 'Past Candidates')
                                 df = df[~df['_is_past']].drop(columns=['_is_past'])
 
                 # Blacklist companies filter
@@ -8364,6 +8381,7 @@ with tab_filter2:
                                 lambda x: _company_matches_filter_list(x, blacklist_items)
                             )
                             removed['Blacklist Companies'] = mask.sum()
+                            _f2_capture_dropped(df, mask, 'Blacklist Companies')
                             df = df[~mask]
 
                 # Not relevant companies filter (checks ALL employers)
@@ -8401,6 +8419,7 @@ with tab_filter2:
                             mask = df['all_employers'].apply(has_not_relevant_employer)
                             # MEMORY FIX: Store only count, not full records (saves 10-50MB)
                             removed['Not Relevant Companies'] = mask.sum()
+                            _f2_capture_dropped(df, mask, 'Not Relevant Companies')
                             df = df[~mask]
 
                 # Target companies filter (current + past employers)
@@ -8451,6 +8470,7 @@ with tab_filter2:
                             if target_company_mode == "Require (filter others out)":
                                 mask = ~df['_target_company']
                                 removed['Non-Target Companies'] = mask.sum()
+                                _f2_capture_dropped(df, mask, 'Non-Target Companies')
                                 df = df[df['_target_company']]
                                 df = df.drop(columns=['_target_company'], errors='ignore')
                                 st.info(f"Target Companies: {len(target_companies)} loaded, kept {len(df)} profiles with target company experience")
@@ -8519,6 +8539,7 @@ with tab_filter2:
                                 mask = ~df['_target_uni']
                                 # MEMORY FIX: Store only count, not full records
                                 removed['Non-Target Universities'] = mask.sum()
+                                _f2_capture_dropped(df, mask, 'Non-Target Universities')
                                 df = df[df['_target_uni']]
                                 df = df.drop(columns=['_target_uni'], errors='ignore')
                             else:
@@ -8578,6 +8599,7 @@ with tab_filter2:
                             if client_wanted_mode == "Require (filter others out)":
                                 mask = ~df['_client_wanted']
                                 removed['Non-Client Wanted Companies'] = mask.sum()
+                                _f2_capture_dropped(df, mask, 'Non-Client Wanted Companies')
                                 df = df[df['_client_wanted']]
                                 df = df.drop(columns=['_client_wanted'], errors='ignore')
                                 st.info(f"Client Wanted ({scope_label}): {len(client_wanted_companies)} loaded, kept {len(df)} profiles")
@@ -8605,6 +8627,7 @@ with tab_filter2:
                         mask = df.apply(has_include_keyword, axis=1)
                         # MEMORY FIX: Store only count, not full records
                         removed['Missing Title Keywords'] = (~mask).sum()
+                        _f2_capture_dropped(df, ~mask, 'Missing Title Keywords')
                         df = df[mask]
 
                 # Exclude keywords filter (job titles only, word boundary matching)
@@ -8635,6 +8658,7 @@ with tab_filter2:
                     mask = df.apply(has_exclude_keyword, axis=1)
                     # MEMORY FIX: Store only count, not full records
                     removed['Excluded Title Keywords'] = mask.sum()
+                    _f2_capture_dropped(df, mask, 'Excluded Title Keywords')
                     df = df[~mask]
 
                 # Boolean keyword filters. Each input is independent — both
@@ -8716,6 +8740,7 @@ with tab_filter2:
                             axis=1,
                         )
                         removed['Missing keywords in full profile'] = (~mask).sum()
+                        _f2_capture_dropped(df, ~mask, 'Missing keywords in full profile')
                         df = df[mask]
                     else:
                         st.warning(f"No searchable columns for full-profile keyword filter. Available: {list(df.columns)}")
@@ -8726,6 +8751,7 @@ with tab_filter2:
                             lambda text: match_boolean_query(keywords_skills_only, text)
                         )
                         removed['Missing keywords in skills'] = (~mask).sum()
+                        _f2_capture_dropped(df, ~mask, 'Missing keywords in skills')
                         df = df[mask]
                     else:
                         st.warning("`skills` column missing — cannot apply skills-only keyword filter.")
@@ -8748,6 +8774,7 @@ with tab_filter2:
                         removed_below = int(below_min_mask.sum())
                         if removed_below > 0:
                             removed[f'Below min tenure ({min_months_at_company}mo)'] = removed_below
+                            _f2_capture_dropped(df, below_min_mask.fillna(False), f'Below min tenure ({min_months_at_company}mo)')
                             df = df[~below_min_mask]
                             tenure_months = tenure_months[~below_min_mask]
                     if max_months_at_company > 0:
@@ -8755,13 +8782,18 @@ with tab_filter2:
                         removed_above = int(above_max_mask.sum())
                         if removed_above > 0:
                             removed[f'Above max tenure ({max_months_at_company}mo)'] = removed_above
+                            _f2_capture_dropped(df, above_max_mask.fillna(False), f'Above max tenure ({max_months_at_company}mo)')
                             df = df[~above_max_mask]
 
-                # Store results - MEMORY OPTIMIZED: don't store f2_filtered_out
+                # Store results — keep the lightweight per-filter dropped-rows
+                # dict (name/title/company/location/linkedin_url × up to 100
+                # rows per filter) so we can render the "View Filtered-Out
+                # Candidates" expander, same shape as the Filter tab uses.
                 st.session_state['passed_candidates_df'] = df.reset_index(drop=True)
-                # Don't store f2_filtered_out - it contains full profile data and uses too much memory
+                # Drop the old full-row dict if a previous run left one behind
                 if 'f2_filtered_out' in st.session_state:
                     del st.session_state['f2_filtered_out']
+                st.session_state['f2_filtered_out_light'] = filtered_out_light
                 st.session_state['f2_filter_stats'] = {
                     'original': original_count,
                     'total_removed': original_count - len(df),
@@ -8813,6 +8845,35 @@ with tab_filter2:
             # Reuses the shared helper so wording/colors stay identical even if
             # the Filter tab's summary evolves later.
             render_filter_funnel_breakdown(removed_by)
+
+            # Per-filter dropped-rows expander (parity with the Filter tab's
+            # "View Filtered-Out Candidates" section). Lets recruiters see WHO
+            # got dropped by each filter, not just the count.
+            f2_filtered_out_light = st.session_state.get('f2_filtered_out_light', {})
+            if f2_filtered_out_light:
+                with st.expander("View Filtered-Out Candidates", expanded=False):
+                    filter_tabs = list(f2_filtered_out_light.keys())
+                    selected_filter = st.selectbox(
+                        "Select filter category",
+                        filter_tabs,
+                        format_func=lambda x: f"{x} ({len(f2_filtered_out_light[x])} shown)",
+                        key="f2_filtered_out_selector",
+                    )
+                    if selected_filter and selected_filter in f2_filtered_out_light:
+                        view_df = f2_filtered_out_light[selected_filter]
+                        total_count = int(removed_by.get(selected_filter, len(view_df)))
+                        st.markdown(f"**{selected_filter}**: {total_count} removed")
+                        if total_count > len(view_df):
+                            st.caption(f"Showing first {len(view_df)} of {total_count}")
+                        st.dataframe(
+                            view_df,
+                            width="stretch",
+                            hide_index=True,
+                            column_config={
+                                "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
+                                "public_url": st.column_config.LinkColumn("LinkedIn"),
+                            },
+                        )
 
         # Show passed candidates
         st.divider()

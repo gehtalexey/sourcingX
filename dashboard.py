@@ -10783,6 +10783,61 @@ with tab_database:
 
                     filtered_df = df
 
+                    # Sparse-profile filter (client-side, post-fetch). Lets
+                    # recruiters skip profiles too thin to personalise outreach
+                    # for. Toggling it does NOT re-query Supabase — the search
+                    # cache from above is reused on the rerun, and the toggle
+                    # only changes which rows survive the post-filter.
+                    sparse_col1, sparse_col2 = st.columns([1, 2])
+                    with sparse_col1:
+                        hide_sparse = st.checkbox(
+                            "Hide sparse profiles",
+                            value=False,
+                            key="db_hide_sparse",
+                            help=(
+                                "Drop profiles where the combined word count "
+                                "of `summary` + `past_positions` is below the "
+                                "threshold on the right. Useful when you only "
+                                "want profiles with enough detail to "
+                                "personalise outreach."
+                            ),
+                        )
+                    with sparse_col2:
+                        sparse_threshold = st.slider(
+                            "Min words (summary + past_positions)",
+                            min_value=10, max_value=300, value=40, step=5,
+                            key="db_sparse_threshold",
+                            disabled=not hide_sparse,
+                        )
+
+                    if hide_sparse:
+                        def _profile_word_count(row):
+                            parts = []
+                            for col in ('summary', 'past_positions'):
+                                val = row.get(col)
+                                if val is None:
+                                    continue
+                                try:
+                                    if pd.isna(val):
+                                        continue
+                                except (TypeError, ValueError):
+                                    # Arrays / lists raise here — fall through
+                                    # and stringify normally.
+                                    pass
+                                parts.append(str(val))
+                            return len(' '.join(parts).split())
+
+                        _pre_sparse_count = len(filtered_df)
+                        _word_counts = filtered_df.apply(_profile_word_count, axis=1)
+                        filtered_df = filtered_df[_word_counts >= sparse_threshold].reset_index(drop=True)
+                        _dropped_sparse = _pre_sparse_count - len(filtered_df)
+                        if _dropped_sparse > 0:
+                            st.caption(
+                                f"Hid **{_dropped_sparse}** sparse profiles "
+                                f"(< {sparse_threshold} words across summary "
+                                "+ past_positions)."
+                            )
+
                     # Display limit to prevent browser freeze
                     DISPLAY_LIMIT = 500
 

@@ -839,9 +839,12 @@ def prepare_df_for_export(df: pd.DataFrame) -> pd.DataFrame:
 
     # -1 is an internal sentinel for "tenure unknown" on current_years_at_company
     # (legacy backfill marker). Don't leak it into user-facing CSVs — show blank.
+    # Match both numeric and string forms in case the column was ever coerced to object.
     if 'current_years_at_company' in out.columns:
         out = out.copy()
-        out.loc[out['current_years_at_company'] == -1, 'current_years_at_company'] = None
+        col = out['current_years_at_company']
+        mask = (col == -1) | (col == '-1')
+        out.loc[mask, 'current_years_at_company'] = None
 
     return out
 

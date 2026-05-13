@@ -8090,7 +8090,10 @@ with tab_filter2:
                 key="f2_exclude_title_presets"
             )
 
-        # Required skills/keywords
+        # Required skills/keywords. Default scope is "Full profile" because
+        # the Crustdata `skills` array is often shallow / empty post-enrichment
+        # — selecting "Skills only" + OR usually drops everyone and looks like
+        # an AND bug. See docs/feedback-may-2026/filter-overlap.md.
         skill_col1, skill_col2, skill_col3 = st.columns([3, 1, 2])
         with skill_col1:
             required_skills = st.text_input("Required keywords (comma-separated)", key="f2_required_skills",
@@ -8099,8 +8102,53 @@ with tab_filter2:
             skills_logic = st.radio("Logic:", ["AND", "OR"], key="f2_skills_logic", horizontal=True,
                                    help="AND = must have ALL keywords, OR = must have at least ONE")
         with skill_col3:
-            search_scope = st.radio("Search in:", ["Skills only", "Full profile"], key="f2_search_scope", horizontal=True,
-                                   help="Skills = skills column only | Full profile = everything including job descriptions")
+            search_scope = st.radio(
+                "Search in:",
+                ["Skills only", "Full profile"],
+                index=1,
+                key="f2_search_scope",
+                horizontal=True,
+                help=(
+                    "Full profile = skills + job titles + employer names + summary + headline + raw Crustdata JSON. "
+                    "Skills only = the `skills` column ONLY — this column is often shallow after enrichment, "
+                    "so OR-of-shallow-skills can still drop most profiles. Prefer 'Full profile' unless you "
+                    "deliberately want a strict skills-tag match."
+                ),
+            )
+
+        # Tenure filter (Filter+ parity with the Filter tab's duration widget).
+        # Uses normalize_crustdata_profile's derived `current_years_in_role`
+        # field. If the column is missing (profiles loaded from older session
+        # state pre-this-feature) the widget renders but applies no-op.
+        has_tenure_col = 'current_years_in_role' in enriched_df.columns
+        tenure_col1, tenure_col2 = st.columns(2)
+        with tenure_col1:
+            min_years_at_company = st.number_input(
+                "Min years at current company",
+                min_value=0.0, max_value=30.0, value=0.0, step=0.5,
+                key="f2_min_years_at_company",
+                help=(
+                    "Drop candidates whose tenure at the CURRENT company is below this. "
+                    "0 = no minimum. Counted from current_employers[0].start_date in raw "
+                    "Crustdata; military / advisory parallel roles are excluded by "
+                    "pick_current_employer."
+                ),
+                disabled=not has_tenure_col,
+            )
+        with tenure_col2:
+            max_years_at_company = st.number_input(
+                "Max years at current company",
+                min_value=0.0, max_value=40.0, value=0.0, step=0.5,
+                key="f2_max_years_at_company",
+                help="0 = no maximum. Use this to exclude very long tenures.",
+                disabled=not has_tenure_col,
+            )
+        if not has_tenure_col:
+            st.caption(
+                "⚠️ Tenure filter is disabled — profiles were enriched before "
+                "`current_years_in_role` was added to the normalizer. Re-enrich "
+                "or reload from DB to populate the field."
+            )
 
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
         with btn_col1:
@@ -8490,6 +8538,27 @@ with tab_filter2:
                             df = df[mask]
                         else:
                             st.warning(f"No searchable columns found. Available: {list(df.columns)}")
+
+                # Tenure filter — min/max years at current company.
+                # Field is normalize_crustdata_profile's `current_years_in_role`.
+                # Rows where the field is NaN/None are KEPT (we don't punish
+                # profiles whose start_date couldn't be parsed — that's a data
+                # quality issue, not a tenure violation).
+                if 'current_years_in_role' in df.columns:
+                    if min_years_at_company > 0:
+                        tenure_series = pd.to_numeric(df['current_years_in_role'], errors='coerce')
+                        below_min_mask = tenure_series < min_years_at_company  # NaN is False
+                        removed_below = int(below_min_mask.sum())
+                        if removed_below > 0:
+                            removed[f'Below min tenure ({min_years_at_company:g}y)'] = removed_below
+                            df = df[~below_min_mask]
+                    if max_years_at_company > 0:
+                        tenure_series = pd.to_numeric(df['current_years_in_role'], errors='coerce')
+                        above_max_mask = tenure_series > max_years_at_company  # NaN is False
+                        removed_above = int(above_max_mask.sum())
+                        if removed_above > 0:
+                            removed[f'Above max tenure ({max_years_at_company:g}y)'] = removed_above
+                            df = df[~above_max_mask]
 
                 # Store results - MEMORY OPTIMIZED: don't store f2_filtered_out
                 st.session_state['passed_candidates_df'] = df.reset_index(drop=True)
@@ -10656,6 +10725,61 @@ with tab_database:
                         df = df[df['email'].fillna('').astype(bool)]
 
                     filtered_df = df
+
+                    # Sparse-profile filter (client-side, post-fetch). Lets
+                    # recruiters skip profiles too thin to personalise outreach
+                    # for. Toggling it does NOT re-query Supabase — the search
+                    # cache from above is reused on the rerun, and the toggle
+                    # only changes which rows survive the post-filter.
+                    sparse_col1, sparse_col2 = st.columns([1, 2])
+                    with sparse_col1:
+                        hide_sparse = st.checkbox(
+                            "Hide sparse profiles",
+                            value=False,
+                            key="db_hide_sparse",
+                            help=(
+                                "Drop profiles where the combined word count "
+                                "of `summary` + `past_positions` is below the "
+                                "threshold on the right. Useful when you only "
+                                "want profiles with enough detail to "
+                                "personalise outreach."
+                            ),
+                        )
+                    with sparse_col2:
+                        sparse_threshold = st.slider(
+                            "Min words (summary + past_positions)",
+                            min_value=10, max_value=300, value=40, step=5,
+                            key="db_sparse_threshold",
+                            disabled=not hide_sparse,
+                        )
+
+                    if hide_sparse:
+                        def _profile_word_count(row):
+                            parts = []
+                            for col in ('summary', 'past_positions'):
+                                val = row.get(col)
+                                if val is None:
+                                    continue
+                                try:
+                                    if pd.isna(val):
+                                        continue
+                                except (TypeError, ValueError):
+                                    # Arrays / lists raise here — fall through
+                                    # and stringify normally.
+                                    pass
+                                parts.append(str(val))
+                            return len(' '.join(parts).split())
+
+                        _pre_sparse_count = len(filtered_df)
+                        _word_counts = filtered_df.apply(_profile_word_count, axis=1)
+                        filtered_df = filtered_df[_word_counts >= sparse_threshold].reset_index(drop=True)
+                        _dropped_sparse = _pre_sparse_count - len(filtered_df)
+                        if _dropped_sparse > 0:
+                            st.caption(
+                                f"Hid **{_dropped_sparse}** sparse profiles "
+                                f"(< {sparse_threshold} words across summary "
+                                "+ past_positions)."
+                            )
 
                     # Display limit to prevent browser freeze
                     DISPLAY_LIMIT = 500

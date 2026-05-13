@@ -7252,8 +7252,21 @@ with tab_enrich:
                         # Selecting a dropped column makes PostgREST 400 and the try/except
                         # silently drops ALL matches, making every URL look "new".
                         _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,enriched_at'
-                        all_profiles = db_client.select('profiles', _MATCH_COLUMNS,
-                            filters={'enriched_at': f'gte.{cutoff}'}, limit=50000)
+                        # Use keyset pagination (matches db.py:get_recently_enriched_urls). Without
+                        # order_by, the underlying offset pagination through ~30k rows can silently
+                        # drop or duplicate rows between pages — Postgres does not guarantee row
+                        # order without an ORDER BY clause. That caused profiles enriched in the
+                        # last 3 months to be missing from `profile_by_username` and surface as
+                        # "to enrich" even though they were already in the DB. Verified
+                        # 2026-05-13 (Niv Hanin, Jason Elbaum, Constantin Paigin, Yair Nevet all
+                        # had EXACT MATCH FOUND but matched: False in the debug expander).
+                        all_profiles = db_client.select(
+                            'profiles', _MATCH_COLUMNS,
+                            filters={'enriched_at': f'gte.{cutoff}'},
+                            limit=50000,
+                            order_by='enriched_at.desc',
+                            cursor_column='enriched_at',
+                        )
 
                         # Build profile lookup by username variants (SAME logic as Load from DB)
                         import re

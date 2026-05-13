@@ -5,9 +5,7 @@ This is the ONE place where Crustdata field names are mapped to display fields.
 If Crustdata changes their API, update only this file.
 """
 
-from datetime import datetime
-
-from normalizers import pick_current_employer, _parse_start_date_sort_key
+from normalizers import pick_current_employer
 
 
 def extract_display_fields(raw_data: dict) -> dict:
@@ -220,24 +218,6 @@ def profile_to_display_row(profile: dict) -> dict:
     import json
     past_positions = json.dumps(past_employers, ensure_ascii=False) if past_employers else ''
 
-    # Compute tenure-at-current-company on the fly when raw_data is present.
-    # This makes the Filter+ tenure widget work for ALL profiles loaded from
-    # DB (including 30k+ already-enriched rows), not just freshly-enriched
-    # ones — without needing a DB migration or backfill. Same logic
-    # normalize_crustdata_profile uses, kept in lock-step so both paths
-    # produce identical values.
-    current_start_date = None
-    current_years_at_company = None
-    if raw:
-        emp = pick_current_employer(raw.get('current_employers'))
-        if emp:
-            raw_start = emp.get('start_date')
-            if raw_start is not None and str(raw_start).strip():
-                current_start_date = str(raw_start).strip()
-                parseable, dt = _parse_start_date_sort_key(raw_start)
-                if parseable:
-                    current_years_at_company = round((datetime.now() - dt).days / 365.25, 1)
-
     return {
         'linkedin_url': profile.get('linkedin_url', ''),
         'name': name,
@@ -273,9 +253,10 @@ def profile_to_display_row(profile: dict) -> dict:
         'all_titles': all_titles_str,
         'num_positions': num_positions,
 
-        # Tenure (derived from raw_data; works for already-enriched profiles)
-        'current_start_date': current_start_date,
-        'current_years_at_company': current_years_at_company,
+        # Tenure — read straight from indexed DB columns
+        # (populated at enrichment time, backfilled for legacy rows).
+        'current_start_date': profile.get('current_start_date'),
+        'current_years_at_company': profile.get('current_years_at_company'),
     }
 
 

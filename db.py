@@ -15,7 +15,7 @@ from typing import Optional
 from pathlib import Path
 import pandas as pd
 
-from normalizers import normalize_linkedin_url, pick_current_employer
+from normalizers import normalize_linkedin_url, pick_current_employer, _parse_start_date_sort_key
 
 # Refresh threshold for re-enriching stale profiles
 ENRICHMENT_REFRESH_MONTHS = 3
@@ -332,9 +332,30 @@ def _prepare_profile_row(linkedin_url: str, crustdata_response: dict, original_u
 
     # Try current_employers first (Crustdata format) — pick most recent
     emp = pick_current_employer(cd.get('current_employers'))
+    current_start_date = None
+    current_years_at_company = None
     if emp:
         current_title = emp.get('employee_title') or emp.get('title')
         current_company = emp.get('employer_name') or emp.get('company_name')
+        # Tenure-at-current-company: persist alongside the indexed fields so
+        # Filter+ can read it without raw_data. Parsed via the same helper the
+        # normalizer + backfill use, so all three paths produce identical
+        # values.
+        raw_start = emp.get('start_date')
+        if raw_start is not None and str(raw_start).strip():
+            from datetime import datetime as _dt
+            parseable, dt = _parse_start_date_sort_key(raw_start)
+            if parseable:
+                current_start_date = dt.isoformat()
+                current_years_at_company = round((_dt.now() - dt).days / 365.25, 1)
+            else:
+                # Sentinel: row processed, value unknowable. Filter+ treats
+                # this the same as NULL (does not drop the row).
+                current_years_at_company = -1.0
+    else:
+        # No current employer at all — same sentinel so we don't keep
+        # re-checking via the IS NULL backfill path.
+        current_years_at_company = -1.0
 
     # Fallback: extract from headline (e.g., "CEO at Company")
     if not current_title or not current_company:
@@ -384,6 +405,8 @@ def _prepare_profile_row(linkedin_url: str, crustdata_response: dict, original_u
         'enriched_at': now,
         'enrichment_status': 'enriched',
         'enrichment_attempted_at': now,
+        'current_start_date': current_start_date,
+        'current_years_at_company': current_years_at_company,
     }
 
     # Include email if provided

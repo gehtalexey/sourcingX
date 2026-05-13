@@ -7251,7 +7251,7 @@ with tab_enrich:
                         # to screening_results), status, screened_at, contacted_at.
                         # Selecting a dropped column makes PostgREST 400 and the try/except
                         # silently drops ALL matches, making every URL look "new".
-                        _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,enriched_at'
+                        _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,enriched_at,current_start_date,current_years_at_company'
                         # Without an explicit ORDER BY, paging through ~30k rows silently drops
                         # rows between pages (Postgres does not guarantee row order across pages
                         # without it). That caused profiles enriched in the last 3 months to be
@@ -7542,44 +7542,6 @@ with tab_enrich:
                                                 matched_profiles.append(profile)
 
                                     if matched_profiles:
-                                        # Fetch raw_data for these profiles before converting to a
-                                        # DataFrame. The bulk dedup query (line 7254) intentionally
-                                        # skips raw_data for memory reasons, but Filter+ now needs
-                                        # it to compute current_years_at_company on-the-fly inside
-                                        # profile_to_display_row. We batch-fetch in chunks (~500 URLs
-                                        # per request) so a single click can load thousands of
-                                        # profiles without blowing the request size.
-                                        try:
-                                            _db = _get_db_client()
-                                            if _db:
-                                                _urls_to_fetch = [
-                                                    p.get('linkedin_url') for p in matched_profiles
-                                                    if p.get('linkedin_url') and not p.get('raw_data')
-                                                ]
-                                                _raw_by_url = {}
-                                                _CHUNK = 500
-                                                for _i in range(0, len(_urls_to_fetch), _CHUNK):
-                                                    _chunk = _urls_to_fetch[_i:_i + _CHUNK]
-                                                    _quoted = ','.join(f'"{u}"' for u in _chunk)
-                                                    _rows = _db.select(
-                                                        'profiles', 'linkedin_url,raw_data',
-                                                        {'linkedin_url': f'in.({_quoted})'},
-                                                        limit=len(_chunk),
-                                                    )
-                                                    for _r in (_rows or []):
-                                                        _u = _r.get('linkedin_url')
-                                                        if _u:
-                                                            _raw_by_url[_u] = _r.get('raw_data')
-                                                for _p in matched_profiles:
-                                                    _u = _p.get('linkedin_url')
-                                                    if _u and _u in _raw_by_url:
-                                                        _p['raw_data'] = _raw_by_url[_u]
-                                        except Exception as _fetch_err:
-                                            # Non-fatal: profile_to_display_row will fall back to
-                                            # indexed columns; tenure filter just won't have data.
-                                            if is_admin_user():
-                                                st.warning(f"raw_data hydration failed: {_fetch_err}")
-
                                         db_loaded_df = profiles_to_dataframe(matched_profiles)
                                         st.session_state['enriched_df'] = db_loaded_df
                                         if 'enriched_results' in st.session_state:
@@ -8059,74 +8021,6 @@ with tab_filter2:
     if not is_enriched:
         st.info("Enrich profiles first (tab 3) to use advanced filtering.")
     else:
-        # Just-in-time tenure hydration: if enriched_df is missing
-        # current_years_at_company (e.g. came from a saved session built
-        # before this feature, or from a path that skipped raw_data),
-        # batch-fetch raw_data from DB for those URLs, compute tenure on
-        # the fly, and patch the column in-place. Caches the result via a
-        # session-state flag so we don't refetch on every render.
-        needs_tenure_hydration = (
-            HAS_DATABASE
-            and (
-                'current_years_at_company' not in enriched_df.columns
-                or enriched_df['current_years_at_company'].isna().all()
-            )
-            and 'linkedin_url' in enriched_df.columns
-            and not st.session_state.get('_tenure_hydrated_for', None) == id(enriched_df)
-        )
-        if needs_tenure_hydration:
-            try:
-                _db = _get_db_client()
-                if _db:
-                    urls_to_fetch = [
-                        u for u in enriched_df['linkedin_url'].dropna().tolist() if u
-                    ]
-                    raw_by_url = {}
-                    CHUNK = 500
-                    with st.spinner(f"Computing tenure for {len(urls_to_fetch)} profiles..."):
-                        for i in range(0, len(urls_to_fetch), CHUNK):
-                            chunk = urls_to_fetch[i:i + CHUNK]
-                            quoted = ','.join(f'"{u}"' for u in chunk)
-                            rows = _db.select(
-                                'profiles', 'linkedin_url,raw_data',
-                                {'linkedin_url': f'in.({quoted})'},
-                                limit=len(chunk),
-                            )
-                            for r in (rows or []):
-                                u = r.get('linkedin_url')
-                                if u and r.get('raw_data') is not None:
-                                    raw_by_url[u] = r['raw_data']
-                    # Compute tenure for each row from its raw_data
-                    def _compute_tenure(url):
-                        raw = raw_by_url.get(url)
-                        if not raw:
-                            return None
-                        emp = pick_current_employer(raw.get('current_employers'))
-                        if not emp:
-                            return None
-                        raw_start = emp.get('start_date')
-                        if raw_start is None or not str(raw_start).strip():
-                            return None
-                        parseable, dt = _parse_start_date_sort_key(raw_start)
-                        if not parseable:
-                            return None
-                        return round((datetime.now() - dt).days / 365.25, 1)
-
-                    from normalizers import pick_current_employer, _parse_start_date_sort_key
-                    enriched_df = enriched_df.copy()
-                    enriched_df['current_years_at_company'] = enriched_df['linkedin_url'].apply(_compute_tenure)
-                    st.session_state['enriched_df'] = enriched_df
-                    st.session_state['_tenure_hydrated_for'] = id(enriched_df)
-                    if is_admin_user():
-                        populated = int(enriched_df['current_years_at_company'].notna().sum())
-                        st.caption(
-                            f"Tenure hydrated for {populated}/{len(enriched_df)} profiles "
-                            f"(fetched {len(raw_by_url)} raw_data rows from DB)."
-                        )
-            except Exception as _hyd_err:
-                if is_admin_user():
-                    st.warning(f"Tenure hydration failed: {_hyd_err}")
-
         # enriched_df already contains exactly the profiles loaded - no filtering needed
         st.success(f"**{len(enriched_df)}** enriched profiles ready for filtering")
 
@@ -8384,32 +8278,6 @@ with tab_filter2:
                 "`current_years_at_company` was populated for Crustdata profiles. "
                 "Re-enrich or reload from DB to populate the field."
             )
-
-        # Admin-only: show the distribution of current_years_at_company values
-        # so we can see if the field is populated and where the threshold lands.
-        if has_tenure_col and is_admin_user():
-            with st.expander("Debug: tenure column stats", expanded=False):
-                tenure_series = pd.to_numeric(enriched_df['current_years_at_company'], errors='coerce')
-                total = len(tenure_series)
-                non_null = int(tenure_series.notna().sum())
-                null = total - non_null
-                st.write(f"- rows in enriched_df: `{total}`")
-                st.write(f"- rows with tenure populated: `{non_null}`")
-                st.write(f"- rows with NaN/None tenure: `{null}`")
-                if non_null > 0:
-                    st.write(f"- min years: `{tenure_series.min():.2f}` ({tenure_series.min()*12:.0f} months)")
-                    st.write(f"- max years: `{tenure_series.max():.2f}` ({tenure_series.max()*12:.0f} months)")
-                    st.write(f"- median years: `{tenure_series.median():.2f}` ({tenure_series.median()*12:.0f} months)")
-                    below_24mo = int((tenure_series * 12 < 24).sum())
-                    st.write(f"- count below 24 months: `{below_24mo}`")
-                if null == total:
-                    st.warning(
-                        "All rows have empty tenure. The profiles in `enriched_df` "
-                        "did not get the field populated — most likely they were "
-                        "loaded via a path that didn't go through "
-                        "`profile_to_display_row` or `normalize_crustdata_profile`. "
-                        "Check whether `raw_data` is present on the underlying profile dicts."
-                    )
 
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
         with btn_col1:
@@ -8801,22 +8669,26 @@ with tab_filter2:
                             st.warning(f"No searchable columns found. Available: {list(df.columns)}")
 
                 # Tenure filter — min/max months at current company.
-                # Field is `current_years_at_company` (years as float), shared
-                # with PhantomBuster normalizer. Widget shows months for parity
-                # with the Filter tab, so we compare months × 12 ≤ years × 12.
-                # Rows where the field is NaN/None are KEPT (we don't punish
-                # profiles whose start_date couldn't be parsed — that's a data
-                # quality issue, not a tenure violation).
+                # `current_years_at_company` is a DB column populated at
+                # enrichment time (and backfilled once for the historical
+                # 30k+ rows). The value -1.0 is a sentinel for "row processed
+                # but tenure couldn't be derived" (no current employer, or
+                # unparseable start_date). We treat -1 the same as NaN here —
+                # do NOT drop those rows. Widget unit is months; stored value
+                # is years × 12.
                 if 'current_years_at_company' in df.columns:
+                    tenure_raw = pd.to_numeric(df['current_years_at_company'], errors='coerce')
+                    # Mask of rows we can meaningfully compare against the threshold.
+                    valid_mask = tenure_raw.notna() & (tenure_raw >= 0)
+                    tenure_months = tenure_raw.where(valid_mask) * 12
                     if min_months_at_company > 0:
-                        tenure_months = pd.to_numeric(df['current_years_at_company'], errors='coerce') * 12
                         below_min_mask = tenure_months < min_months_at_company  # NaN is False
                         removed_below = int(below_min_mask.sum())
                         if removed_below > 0:
                             removed[f'Below min tenure ({min_months_at_company}mo)'] = removed_below
                             df = df[~below_min_mask]
+                            tenure_months = tenure_months[~below_min_mask]
                     if max_months_at_company > 0:
-                        tenure_months = pd.to_numeric(df['current_years_at_company'], errors='coerce') * 12
                         above_max_mask = tenure_months > max_months_at_company  # NaN is False
                         removed_above = int(above_max_mask.sum())
                         if removed_above > 0:

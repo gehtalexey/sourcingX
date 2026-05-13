@@ -8781,6 +8781,35 @@ with tab_filter2:
                             "public_url": st.column_config.LinkColumn("LinkedIn")
                         })
             st.caption(f"Showing {min(100, len(display_df))} of {len(display_df)} profiles | {len(display_df.columns)} columns")
+
+            # Admin-only diagnostic: show fill-rate per column so we can see
+            # which ones are empty and trace WHY (vs. just hiding them).
+            if is_admin_user():
+                with st.expander(f"Debug: column fill rates ({len(display_df.columns)} columns)", expanded=False):
+                    rows = []
+                    for c in display_df.columns:
+                        s = display_df[c]
+                        non_null = int(s.notna().sum())
+                        # Also count empty strings + literal "nan"/"None"
+                        try:
+                            non_empty = int(((s.fillna('').astype(str).str.strip() != '')
+                                             & (~s.fillna('').astype(str).isin(['nan', 'None', '[]', '{}']))).sum())
+                        except Exception:
+                            non_empty = non_null
+                        rows.append({
+                            'column': c,
+                            'non_empty': non_empty,
+                            'pct': f"{(non_empty / len(display_df) * 100):.0f}%" if len(display_df) else "—",
+                        })
+                    diag_df = pd.DataFrame(rows).sort_values('non_empty')
+                    st.dataframe(diag_df, width="stretch", hide_index=True)
+                    st.caption(
+                        "Empty columns are usually one of: (a) PhantomBuster-only fields "
+                        "on Crustdata-only profiles, (b) fields that need raw_data which "
+                        "wasn't loaded in this code path, (c) screening_* fields before "
+                        "screening has run, (d) fields the normalizer doesn't emit. Tell me "
+                        "which empties you want filled and I'll trace the source."
+                    )
         else:
             # Prefer 'name' for DB-loaded profiles, fallback to first_name/last_name
             if 'name' in display_df.columns and not display_df['name'].isna().all():

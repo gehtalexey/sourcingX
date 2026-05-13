@@ -22,6 +22,31 @@ So three sub-complaints:
 2. **Email enrich** (Tab 6) same shape.
 3. **After-run notification** about "some profiles" — unclear what it means.
 
+## Field observation (Alexey, 2026-05-13)
+
+> "We are talking about profiles loaded from a CSV. The problem is that we
+> need to refresh, or wait until all enriched profiles are loading, or ask
+> the app to enrich again."
+
+**Scope clarification**: this is specifically the Enrich tab acting on a
+freshly-uploaded CSV (Load tab → Enrich tab flow), not the DB-search /
+re-enrich path. Matches Shiri's quote ("I'm working on files I uploaded in
+Load").
+
+This reframes the symptom:
+
+- Enrichment **does complete** in the background — profiles are written to the
+  DB even when the UI looks stuck or partial.
+- The visible "remaining to enrich" list is computed once when the page
+  renders; it doesn't auto-update as `enrich_batch()` saves results.
+- Hitting refresh re-queries the DB → the list now correctly excludes the
+  just-enriched profiles → the count drops to (or near) zero.
+
+If this read is right, the perceived "partial batch" is mostly a **stale-UI
+problem**, not a partial-execution problem. URL-matching drops (the
+original hypothesis below) still happen, but explain a much smaller share of
+the gap than the doc previously assumed.
+
 ## What the code does today
 
 ### Crustdata loop (Tab 3)

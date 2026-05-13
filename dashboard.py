@@ -7251,7 +7251,7 @@ with tab_enrich:
                         # to screening_results), status, screened_at, contacted_at.
                         # Selecting a dropped column makes PostgREST 400 and the try/except
                         # silently drops ALL matches, making every URL look "new".
-                        _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,enriched_at'
+                        _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,location,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,enriched_at,current_start_date,current_years_at_company'
                         # Without an explicit ORDER BY, paging through ~30k rows silently drops
                         # rows between pages (Postgres does not guarantee row order across pages
                         # without it). That caused profiles enriched in the last 3 months to be
@@ -8216,17 +8216,84 @@ with tab_filter2:
                 key="f2_exclude_title_presets"
             )
 
-        # Required skills/keywords
-        skill_col1, skill_col2, skill_col3 = st.columns([3, 1, 2])
-        with skill_col1:
-            required_skills = st.text_input("Required keywords (comma-separated)", key="f2_required_skills",
-                                           placeholder="e.g., Python, AWS, Kubernetes")
-        with skill_col2:
-            skills_logic = st.radio("Logic:", ["AND", "OR"], key="f2_skills_logic", horizontal=True,
-                                   help="AND = must have ALL keywords, OR = must have at least ONE")
-        with skill_col3:
-            search_scope = st.radio("Search in:", ["Skills only", "Full profile"], key="f2_search_scope", horizontal=True,
-                                   help="Skills = skills column only | Full profile = everything including job descriptions")
+        # Boolean keyword filters. Two separate inputs, each supporting LinkedIn
+        # Sales Navigator syntax — AND / OR / NOT, parens, quoted phrases. The
+        # two scopes are explicitly named so recruiters can't confuse them.
+        st.markdown("**Keyword Filters (boolean — search full profile / skills):**")
+        _bool_help = (
+            "Use LinkedIn Sales Navigator boolean syntax:\n"
+            '- `python AND aws` — must contain BOTH terms\n'
+            '- `python OR java` — must contain AT LEAST ONE term\n'
+            '- `senior NOT intern` — must contain `senior` but NOT `intern`\n'
+            '- `(python OR java) AND senior` — parentheses group operators\n'
+            '- `"machine learning"` — quoted phrases match as exact substring\n'
+            'Adjacent terms with no operator imply AND.\n'
+            'Leave blank to skip the filter. Case-insensitive.'
+        )
+        kw_col_full, kw_col_skills = st.columns(2)
+        with kw_col_full:
+            keywords_full_profile = st.text_input(
+                "Keywords — search FULL profile",
+                key="f2_keywords_full_profile",
+                placeholder='e.g., (python OR java) AND senior NOT intern',
+                help=(
+                    "Searches across EVERYTHING about the candidate: skills, job titles, "
+                    "employer names, headline, summary, and the raw Crustdata JSON. "
+                    "When you run this, the app pulls each candidate's full Crustdata response "
+                    "from the database for an exhaustive search — so it takes a few seconds for "
+                    "large batches.\n\n" + _bool_help
+                ),
+            )
+        with kw_col_skills:
+            keywords_skills_only = st.text_input(
+                "Keywords — search SKILLS column ONLY",
+                key="f2_keywords_skills_only",
+                placeholder='e.g., "machine learning" AND aws',
+                help=(
+                    "Searches ONLY the `skills` column. Use this when you specifically "
+                    "want a candidate to have a skill listed on their profile. "
+                    "Note: the LinkedIn skills column is often shallow / incomplete — "
+                    "if you get too few matches, switch to 'search FULL profile'.\n\n"
+                    + _bool_help
+                ),
+            )
+
+        # Tenure filter (Filter+ parity with the Filter tab's duration widget).
+        # Uses `current_years_at_company` — the same field name the
+        # PhantomBuster normalizer emits, so Filter+ works for both data
+        # sources. Crustdata-enriched profiles get it from
+        # normalize_crustdata_profile's start_date computation. Unit shown to
+        # the user is months (to match the Filter tab); we convert
+        # years × 12 → months at filter time.
+        has_tenure_col = 'current_years_at_company' in enriched_df.columns
+        tenure_col1, tenure_col2 = st.columns(2)
+        with tenure_col1:
+            min_months_at_company = st.number_input(
+                "Min months at current company",
+                min_value=0, max_value=240, value=0, step=1,
+                key="f2_min_months_at_company",
+                help=(
+                    "Drop candidates whose tenure at the CURRENT company is below this "
+                    "(in months). 0 = no minimum. Counted from "
+                    "current_employers[0].start_date in raw Crustdata; military / "
+                    "advisory parallel roles are excluded by pick_current_employer."
+                ),
+                disabled=not has_tenure_col,
+            )
+        with tenure_col2:
+            max_months_at_company = st.number_input(
+                "Max months at current company",
+                min_value=0, max_value=480, value=0, step=1,
+                key="f2_max_months_at_company",
+                help="0 = no maximum. Use this to exclude very long tenures.",
+                disabled=not has_tenure_col,
+            )
+        if not has_tenure_col:
+            st.caption(
+                "⚠️ Tenure filter is disabled — profiles were enriched before "
+                "`current_years_at_company` was populated for Crustdata profiles. "
+                "Re-enrich or reload from DB to populate the field."
+            )
 
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
         with btn_col1:
@@ -8570,52 +8637,125 @@ with tab_filter2:
                     removed['Excluded Title Keywords'] = mask.sum()
                     df = df[~mask]
 
-                # Required keywords filter (skills or full experience)
-                if required_skills and required_skills.strip():
-                    skills_list = [s.strip().lower() for s in required_skills.split(',') if s.strip()]
-                    if skills_list:
-                        # Determine which columns to search based on scope
-                        if search_scope == "Full profile":
-                            search_cols = ['skills', 'all_titles', 'all_employers', 'past_positions', 'summary', 'headline', 'raw_crustdata']
-                            scope_label = "profile"
+                # Boolean keyword filters. Each input is independent — both
+                # blank = no filter applied. Both filled = profile must satisfy
+                # BOTH the full-profile query AND the skills-only query.
+                from boolean_query import match_boolean_query
+                import json as json_module
+
+                def _row_full_text(row, cols):
+                    parts = []
+                    for c in cols:
+                        if c not in row or row.get(c) is None:
+                            continue
+                        val = row[c]
+                        if isinstance(val, dict):
+                            parts.append(json_module.dumps(val, ensure_ascii=False))
                         else:
-                            search_cols = ['skills']
-                            scope_label = "skills"
+                            parts.append(str(val))
+                    return ' '.join(parts)
 
-                        available_search_cols = [c for c in search_cols if c in df.columns]
+                if keywords_full_profile and keywords_full_profile.strip():
+                    # Full-profile search means the FULL Crustdata JSON, not just
+                    # the lightweight summary columns. Bulk-fetch raw_data from
+                    # the DB for rows that don't already carry it, then search
+                    # across the lightweight columns AND the raw JSON together.
+                    # Only runs when the user actually fills in this field, so
+                    # the cost is paid only when needed. Chunked at 50 URLs to
+                    # stay under PostgREST's URL length limit.
+                    if HAS_DATABASE and 'linkedin_url' in df.columns:
+                        urls_needing_raw = [
+                            u for u, has in zip(
+                                df['linkedin_url'].tolist(),
+                                (df['raw_crustdata'].notna() if 'raw_crustdata' in df.columns else [False] * len(df)),
+                            )
+                            if u and not has
+                        ]
+                        if urls_needing_raw:
+                            with st.spinner(f"Fetching raw profile data for {len(urls_needing_raw)} candidates..."):
+                                try:
+                                    _kw_db = _get_db_client()
+                                    if _kw_db:
+                                        raw_by_url = {}
+                                        _KW_CHUNK = 50
+                                        for _i in range(0, len(urls_needing_raw), _KW_CHUNK):
+                                            chunk = urls_needing_raw[_i:_i + _KW_CHUNK]
+                                            quoted = ','.join(f'"{u}"' for u in chunk)
+                                            rows = _kw_db.select(
+                                                'profiles', 'linkedin_url,raw_data',
+                                                {'linkedin_url': f'in.({quoted})'},
+                                                limit=len(chunk),
+                                            )
+                                            for r in (rows or []):
+                                                u = r.get('linkedin_url')
+                                                if u and r.get('raw_data') is not None:
+                                                    raw_by_url[u] = r['raw_data']
+                                        if 'raw_crustdata' not in df.columns:
+                                            df['raw_crustdata'] = None
+                                        df['raw_crustdata'] = df.apply(
+                                            lambda r: r.get('raw_crustdata') if r.get('raw_crustdata') is not None
+                                            else raw_by_url.get(r.get('linkedin_url')),
+                                            axis=1,
+                                        )
+                                        if is_admin_user():
+                                            st.caption(
+                                                f"Hydrated raw_data for {len(raw_by_url)} of {len(urls_needing_raw)} "
+                                                f"candidates before full-profile keyword search."
+                                            )
+                                except Exception as _kw_err:
+                                    if is_admin_user():
+                                        st.warning(f"raw_data hydration failed for full-profile search: {_kw_err}")
 
-                        if available_search_cols:
-                            import json as json_module
-                            def has_required_keywords(row):
-                                # Combine text from all search columns
-                                text_parts = []
-                                for c in available_search_cols:
-                                    if c not in row or row.get(c) is None:
-                                        continue
-                                    val = row[c]
-                                    # Handle raw_crustdata dict/JSON
-                                    if c == 'raw_crustdata' and isinstance(val, dict):
-                                        text_parts.append(json_module.dumps(val, ensure_ascii=False))
-                                    else:
-                                        text_parts.append(str(val))
-                                combined_text = ' '.join(text_parts).lower()
+                    full_cols = [c for c in [
+                        'skills', 'all_titles', 'all_employers', 'past_positions',
+                        'summary', 'headline', 'raw_crustdata'
+                    ] if c in df.columns]
+                    if full_cols:
+                        mask = df.apply(
+                            lambda row: match_boolean_query(keywords_full_profile, _row_full_text(row, full_cols)),
+                            axis=1,
+                        )
+                        removed['Missing keywords in full profile'] = (~mask).sum()
+                        df = df[mask]
+                    else:
+                        st.warning(f"No searchable columns for full-profile keyword filter. Available: {list(df.columns)}")
 
-                                if not combined_text.strip():
-                                    return False
+                if keywords_skills_only and keywords_skills_only.strip():
+                    if 'skills' in df.columns:
+                        mask = df['skills'].fillna('').astype(str).apply(
+                            lambda text: match_boolean_query(keywords_skills_only, text)
+                        )
+                        removed['Missing keywords in skills'] = (~mask).sum()
+                        df = df[mask]
+                    else:
+                        st.warning("`skills` column missing — cannot apply skills-only keyword filter.")
 
-                                if skills_logic == "AND":
-                                    return all(kw in combined_text for kw in skills_list)
-                                else:  # OR
-                                    return any(kw in combined_text for kw in skills_list)
-
-                            mask = df.apply(has_required_keywords, axis=1)
-                            logic_label = "all" if skills_logic == "AND" else "any"
-                            filter_name = f'Missing Keywords in {scope_label} ({logic_label})'
-                            # MEMORY FIX: Store only count, not full records
-                            removed[filter_name] = (~mask).sum()
-                            df = df[mask]
-                        else:
-                            st.warning(f"No searchable columns found. Available: {list(df.columns)}")
+                # Tenure filter — min/max months at current company.
+                # `current_years_at_company` is a DB column populated at
+                # enrichment time (and backfilled once for the historical
+                # 30k+ rows). The value -1.0 is a sentinel for "row processed
+                # but tenure couldn't be derived" (no current employer, or
+                # unparseable start_date). We treat -1 the same as NaN here —
+                # do NOT drop those rows. Widget unit is months; stored value
+                # is years × 12.
+                if 'current_years_at_company' in df.columns:
+                    tenure_raw = pd.to_numeric(df['current_years_at_company'], errors='coerce')
+                    # Mask of rows we can meaningfully compare against the threshold.
+                    valid_mask = tenure_raw.notna() & (tenure_raw >= 0)
+                    tenure_months = tenure_raw.where(valid_mask) * 12
+                    if min_months_at_company > 0:
+                        below_min_mask = tenure_months < min_months_at_company  # NaN is False
+                        removed_below = int(below_min_mask.sum())
+                        if removed_below > 0:
+                            removed[f'Below min tenure ({min_months_at_company}mo)'] = removed_below
+                            df = df[~below_min_mask]
+                            tenure_months = tenure_months[~below_min_mask]
+                    if max_months_at_company > 0:
+                        above_max_mask = tenure_months > max_months_at_company  # NaN is False
+                        removed_above = int(above_max_mask.sum())
+                        if removed_above > 0:
+                            removed[f'Above max tenure ({max_months_at_company}mo)'] = removed_above
+                            df = df[~above_max_mask]
 
                 # Store results - MEMORY OPTIMIZED: don't store f2_filtered_out
                 st.session_state['passed_candidates_df'] = df.reset_index(drop=True)
@@ -8692,6 +8832,35 @@ with tab_filter2:
                             "public_url": st.column_config.LinkColumn("LinkedIn")
                         })
             st.caption(f"Showing {min(100, len(display_df))} of {len(display_df)} profiles | {len(display_df.columns)} columns")
+
+            # Admin-only diagnostic: show fill-rate per column so we can see
+            # which ones are empty and trace WHY (vs. just hiding them).
+            if is_admin_user():
+                with st.expander(f"Debug: column fill rates ({len(display_df.columns)} columns)", expanded=False):
+                    rows = []
+                    for c in display_df.columns:
+                        s = display_df[c]
+                        non_null = int(s.notna().sum())
+                        # Also count empty strings + literal "nan"/"None"
+                        try:
+                            non_empty = int(((s.fillna('').astype(str).str.strip() != '')
+                                             & (~s.fillna('').astype(str).isin(['nan', 'None', '[]', '{}']))).sum())
+                        except Exception:
+                            non_empty = non_null
+                        rows.append({
+                            'column': c,
+                            'non_empty': non_empty,
+                            'pct': f"{(non_empty / len(display_df) * 100):.0f}%" if len(display_df) else "—",
+                        })
+                    diag_df = pd.DataFrame(rows).sort_values('non_empty')
+                    st.dataframe(diag_df, width="stretch", hide_index=True)
+                    st.caption(
+                        "Empty columns are usually one of: (a) PhantomBuster-only fields "
+                        "on Crustdata-only profiles, (b) fields that need raw_data which "
+                        "wasn't loaded in this code path, (c) screening_* fields before "
+                        "screening has run, (d) fields the normalizer doesn't emit. Tell me "
+                        "which empties you want filled and I'll trace the source."
+                    )
         else:
             # Prefer 'name' for DB-loaded profiles, fallback to first_name/last_name
             if 'name' in display_df.columns and not display_df['name'].isna().all():

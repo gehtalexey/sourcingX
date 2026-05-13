@@ -252,6 +252,11 @@ def profile_to_display_row(profile: dict) -> dict:
         'all_employers': all_employers_str,
         'all_titles': all_titles_str,
         'num_positions': num_positions,
+
+        # Tenure — read straight from indexed DB columns
+        # (populated at enrichment time, backfilled for legacy rows).
+        'current_start_date': profile.get('current_start_date'),
+        'current_years_at_company': profile.get('current_years_at_company'),
     }
 
 

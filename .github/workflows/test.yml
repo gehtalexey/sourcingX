@@ -62,4 +62,5 @@ jobs:
             test_api_key_strip.py \
             test_filter_funnel_breakdown.py \
             test_csv_upload_clears_derived_state.py \
-            test_crustdata_title_variants.py
+            test_crustdata_title_variants.py \
+            test_normalize_current_tenure.py

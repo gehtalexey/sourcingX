@@ -8059,6 +8059,74 @@ with tab_filter2:
     if not is_enriched:
         st.info("Enrich profiles first (tab 3) to use advanced filtering.")
     else:
+        # Just-in-time tenure hydration: if enriched_df is missing
+        # current_years_at_company (e.g. came from a saved session built
+        # before this feature, or from a path that skipped raw_data),
+        # batch-fetch raw_data from DB for those URLs, compute tenure on
+        # the fly, and patch the column in-place. Caches the result via a
+        # session-state flag so we don't refetch on every render.
+        needs_tenure_hydration = (
+            HAS_DATABASE
+            and (
+                'current_years_at_company' not in enriched_df.columns
+                or enriched_df['current_years_at_company'].isna().all()
+            )
+            and 'linkedin_url' in enriched_df.columns
+            and not st.session_state.get('_tenure_hydrated_for', None) == id(enriched_df)
+        )
+        if needs_tenure_hydration:
+            try:
+                _db = _get_db_client()
+                if _db:
+                    urls_to_fetch = [
+                        u for u in enriched_df['linkedin_url'].dropna().tolist() if u
+                    ]
+                    raw_by_url = {}
+                    CHUNK = 500
+                    with st.spinner(f"Computing tenure for {len(urls_to_fetch)} profiles..."):
+                        for i in range(0, len(urls_to_fetch), CHUNK):
+                            chunk = urls_to_fetch[i:i + CHUNK]
+                            quoted = ','.join(f'"{u}"' for u in chunk)
+                            rows = _db.select(
+                                'profiles', 'linkedin_url,raw_data',
+                                {'linkedin_url': f'in.({quoted})'},
+                                limit=len(chunk),
+                            )
+                            for r in (rows or []):
+                                u = r.get('linkedin_url')
+                                if u and r.get('raw_data') is not None:
+                                    raw_by_url[u] = r['raw_data']
+                    # Compute tenure for each row from its raw_data
+                    def _compute_tenure(url):
+                        raw = raw_by_url.get(url)
+                        if not raw:
+                            return None
+                        emp = pick_current_employer(raw.get('current_employers'))
+                        if not emp:
+                            return None
+                        raw_start = emp.get('start_date')
+                        if raw_start is None or not str(raw_start).strip():
+                            return None
+                        parseable, dt = _parse_start_date_sort_key(raw_start)
+                        if not parseable:
+                            return None
+                        return round((datetime.now() - dt).days / 365.25, 1)
+
+                    from normalizers import pick_current_employer, _parse_start_date_sort_key
+                    enriched_df = enriched_df.copy()
+                    enriched_df['current_years_at_company'] = enriched_df['linkedin_url'].apply(_compute_tenure)
+                    st.session_state['enriched_df'] = enriched_df
+                    st.session_state['_tenure_hydrated_for'] = id(enriched_df)
+                    if is_admin_user():
+                        populated = int(enriched_df['current_years_at_company'].notna().sum())
+                        st.caption(
+                            f"Tenure hydrated for {populated}/{len(enriched_df)} profiles "
+                            f"(fetched {len(raw_by_url)} raw_data rows from DB)."
+                        )
+            except Exception as _hyd_err:
+                if is_admin_user():
+                    st.warning(f"Tenure hydration failed: {_hyd_err}")
+
         # enriched_df already contains exactly the profiles loaded - no filtering needed
         st.success(f"**{len(enriched_df)}** enriched profiles ready for filtering")
 

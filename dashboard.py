@@ -7863,10 +7863,18 @@ with tab_enrich:
                                         if verify_client:
                                             cutoff_iso = (datetime.utcnow() - timedelta(minutes=10)).isoformat()
                                             for _vis_attempt in range(5):
+                                                # Order newest-first so the just-written rows are
+                                                # at the head of the result set. Without an order,
+                                                # other recent enrichments (other users, prior
+                                                # batches in the same 10-min window) could fill the
+                                                # limited result set and hide our writes, making
+                                                # this loop always wait the full 5s. (Codex review,
+                                                # PR #57.)
                                                 visible = verify_client.select(
                                                     'profiles', 'linkedin_url',
                                                     filters={'enriched_at': f'gte.{cutoff_iso}'},
                                                     limit=max(len(expected_urls) * 2, 200),
+                                                    order_by='enriched_at.desc',
                                                 )
                                                 visible_urls = {
                                                     p.get('linkedin_url') for p in (visible or [])

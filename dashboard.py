@@ -7707,10 +7707,12 @@ with tab_enrich:
                                             'gap': 0
                                         }
                                         st.session_state['enrichment_message'] = f"success:Loaded {len(matched_profiles)} enriched profiles"
-                                        # Clear detection cache so UI updates correctly
-                                        for key in ['_detection_hash', '_detection_cache_version', '_skipped_urls', '_new_urls', '_unavailable_urls', '_matched_profiles_cache', '_unique_profile_count']:
-                                            if key in st.session_state:
-                                                del st.session_state[key]
+                                        # NOTE: the detection cache is intentionally KEPT here.
+                                        # Loading profiles into enriched_df changes neither the
+                                        # input URLs nor the DB, so the "to enrich / already
+                                        # enriched" split is unchanged. Clearing it forced the
+                                        # rerun below to re-run the full DB detection (several
+                                        # seconds) only to recompute the identical numbers.
                                         st.rerun()
                                     else:
                                         st.warning("No cached profiles found. Please refresh the page and try again.")

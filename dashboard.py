@@ -506,6 +506,152 @@ def _cached_recently_enriched_urls(months: int) -> list:
     return []
 
 
+def _build_candidate_query_specs(urls: list, cutoff: str) -> list:
+    """Build the PostgREST query specs that fetch DB profiles matching `urls`.
+
+    Pure (no I/O) so it can be unit-tested. Returns a list of dicts shaped
+    {'filters': <primary>, 'fallback': <optional simpler filter>}, each meant to
+    run as one HTTP GET. Two kinds of spec are produced:
+
+    1. Exact pass — the normalized URL (and its hyphen-free form) matched against
+       linkedin_url / original_url / original_urls.
+    2. Suffix pass — a clean multi-part name slug (john-doe) may be stored in the
+       DB only under an ID-suffixed form (john-doe-abc123, or the hyphen-free
+       johndoe-abc123). An exact lookup would miss those, so a left-anchored LIKE
+       prefix (`/in/<stem>-*`) is matched against linkedin_url / original_url for
+       both the original slug and its hyphen-free form. The variant matcher in
+       the caller re-filters, so an over-broad prefix hit costs a wasted row
+       fetch, never a wrong match.
+
+    Accepted residual: the suffix pass does NOT prefix-match inside the
+    original_urls array — PostgREST can't express "any array element LIKE
+    prefix" without a custom DB function, and this is a shared database. So a
+    multi-source row whose ONLY suffixed form lives in original_urls (its
+    linkedin_url / original_url being some other source) is not fetched for a
+    clean-slug input. Measured at 47 / 31.5k rows (0.15%) and self-healing — the
+    profile gets re-enriched once (~$0.03), after which its canonical URL is
+    recorded and every later lookup matches. Pinned by
+    test_suffixed_url_only_in_original_urls_array_is_accepted_residual.
+    """
+    exact_urls = set()        # for the exact in.() / ov.{} pass
+    prefix_stems = set()      # for the suffix-variant prefix pass
+
+    for url in urls:
+        normalized = normalize_linkedin_url(url)
+        if not normalized or '/in/' not in normalized:
+            continue
+        # Use the normalized URL exactly as-is. The DB stores linkedin_url via
+        # the same normalize_linkedin_url(), which lowercases ASCII but PRESERVES
+        # percent-encoding case (e.g. Hebrew slugs: %D7%90). Lowercasing here
+        # would turn %D7 into %d7 and the exact in.() match would silently miss.
+        exact_urls.add(normalized)
+        slug = normalized.split('/in/')[-1].rstrip('/')
+        no_hyphen = slug.replace('-', '')
+        if no_hyphen and no_hyphen != slug:
+            exact_urls.add(f'https://www.linkedin.com/in/{no_hyphen}')
+        # Suffix pass — for a hyphenated slug whose last segment is NOT a numeric
+        # LinkedIn ID. Such a slug (john-doe, einav-friedman) may be stored in
+        # the DB only under an ID-suffixed form; the exact pass would miss it. If
+        # the last segment already contains a digit the slug IS the full
+        # ID-suffixed form, so there's nothing extra to look for. '%' slugs are
+        # skipped — '%' is a LIKE wildcard — and are covered exactly. Both the
+        # slug and its hyphen-free form are added as stems, because the DB may
+        # store the suffixed form either way (john-doe-abc123 OR johndoe-abc123).
+        if '-' in slug and '%' not in slug:
+            last_segment = slug.rsplit('-', 1)[-1]
+            if not any(ch.isdigit() for ch in last_segment):
+                prefix_stems.add(slug)
+                if no_hyphen and no_hyphen != slug:
+                    prefix_stems.add(no_hyphen)
+
+    query_specs = []
+
+    # Exact pass. Batch kept small: the quoted URL list is repeated 3x in the OR
+    # filter, and PostgREST rejects GET query strings beyond ~20k chars (400).
+    exact_list = sorted(exact_urls)
+    for i in range(0, len(exact_list), 60):
+        batch = exact_list[i:i + 60]
+        quoted = ','.join(f'"{u}"' for u in batch)
+        query_specs.append({
+            'filters': {
+                'or': (
+                    f'(linkedin_url.in.({quoted}),'
+                    f'original_url.in.({quoted}),'
+                    f'original_urls.ov.{{{quoted}}})'
+                ),
+                'enriched_at': f'gte.{cutoff}',
+            },
+            # Fallback if the combined OR is rejected (e.g. original_urls column
+            # missing on an un-migrated DB): plain linkedin_url lookup.
+            'fallback': {'linkedin_url': f'in.({quoted})', 'enriched_at': f'gte.{cutoff}'},
+        })
+
+    # Suffix pass. A left-anchored LIKE prefix per stem — matches any stored URL
+    # whose path is `/in/<stem>-...`. LIKE is ~2.5x faster than an equivalent
+    # regex here and returns the same rows. The value is double-quoted so the
+    # ':' '/' '*' chars survive or=() parsing. Stems containing '%' (which LIKE
+    # would treat as a wildcard) were already excluded above.
+    prefix_list = sorted(prefix_stems)
+    for i in range(0, len(prefix_list), 100):
+        batch = prefix_list[i:i + 100]
+        clauses = []
+        for stem in batch:
+            pattern = f'"https://www.linkedin.com/in/{stem}-*"'
+            clauses.append(f'linkedin_url.like.{pattern}')
+            clauses.append(f'original_url.like.{pattern}')
+        query_specs.append({
+            'filters': {
+                'or': '(' + ','.join(clauses) + ')',
+                'enriched_at': f'gte.{cutoff}',
+            },
+        })
+
+    return query_specs
+
+
+def _fetch_candidate_profiles_for_urls(db_client, urls: list, columns: str, cutoff: str) -> list:
+    """Fetch only the DB profiles that could match the given input URLs.
+
+    Replaces the old "download every profile enriched in the last N months and
+    build a 30k+-entry lookup" approach, which got slower on every enrichment as
+    the table grew. The caller still runs the full username-variant matching on
+    whatever comes back — this only narrows the candidate set from the whole
+    table to roughly the input size. See _build_candidate_query_specs for how
+    the (exact + suffix-variant) matching contract is preserved.
+    """
+    query_specs = _build_candidate_query_specs(urls, cutoff)
+    if not query_specs:
+        return []
+
+    def _fetch_one(spec):
+        try:
+            return db_client.select('profiles', columns, filters=spec['filters'], limit=1000)
+        except Exception:
+            fallback = spec.get('fallback')
+            if fallback:
+                try:
+                    return db_client.select('profiles', columns, filters=fallback, limit=1000)
+                except Exception:
+                    return []
+            return []
+
+    # Run the batch queries concurrently — they're independent HTTP GETs, and
+    # the round-trip latency to Supabase (eu-west-1) dominates. Serial fetching
+    # of these batches was the remaining slow part after killing the full scan.
+    seen_pk = set()
+    rows = []
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        for page in executor.map(_fetch_one, query_specs):
+            for p in (page or []):
+                pk = p.get('linkedin_url')
+                if pk and pk in seen_pk:
+                    continue
+                if pk:
+                    seen_pk.add(pk)
+                rows.append(p)
+    return rows
+
+
 def _start_keep_alive():
     """Ping the app's own URL every 10 minutes to prevent Streamlit Cloud from sleeping."""
     app_url = None
@@ -7249,8 +7395,7 @@ with tab_enrich:
                         not_found_list = _cached_not_found_urls(months=refresh_months)
                         not_found_urls_db = set(normalize_linkedin_url(u) for u in not_found_list if u)
 
-                        # UNIFIED MATCHING: Fetch profiles and build lookup (same as Load from DB)
-                        # MEMORY FIX: Exclude raw_data (20-50KB per profile) — not needed for URL matching or display
+                        # UNIFIED MATCHING: Fetch candidate profiles and build lookup (same as Load from DB)
                         # STABILITY FIX: Round cutoff to start of day to prevent inconsistent counts on refresh
                         # BUGFIX: Use NAIVE utcnow() to match how db.get_recently_enriched_urls() formats the
                         # cutoff. A tz-aware datetime produces "+00:00" in the ISO string, which compares
@@ -7263,24 +7408,15 @@ with tab_enrich:
                         # Selecting a dropped column makes PostgREST 400 and the try/except
                         # silently drops ALL matches, making every URL look "new".
                         _MATCH_COLUMNS = 'linkedin_url,original_url,original_urls,name,location,current_title,current_company,all_employers,all_titles,all_schools,skills,email,email_source,enriched_at,current_start_date,current_years_at_company'
-                        # Without an explicit ORDER BY, paging through ~30k rows silently drops
-                        # rows between pages (Postgres does not guarantee row order across pages
-                        # without it). That caused profiles enriched in the last 3 months to be
-                        # missing from `profile_by_username` and surface as "to enrich" despite
-                        # already being in the DB. Verified 2026-05-13: Niv Hanin, Jason Elbaum,
-                        # Constantin Paigin, Yair Nevet all had EXACT MATCH FOUND but were
-                        # matched: False in the debug expander.
-                        #
-                        # Order by (enriched_at desc, linkedin_url desc): enriched_at gives us
-                        # an indexed primary sort; linkedin_url is a guaranteed-unique
-                        # tie-breaker. That makes the order fully deterministic across pages, so
-                        # rows that share the same enriched_at can't drift between pages and get
-                        # skipped — the failure mode flagged in Codex round-4 review on PR #57.
-                        all_profiles = db_client.select(
-                            'profiles', _MATCH_COLUMNS,
-                            filters={'enriched_at': f'gte.{cutoff}'},
-                            limit=50000,
-                            order_by='enriched_at.desc,linkedin_url.desc',
+                        # PERF FIX: Only fetch the profiles that could match the input URLs,
+                        # instead of downloading every profile enriched in the last N months
+                        # (~31k rows in 32 paged requests + a 31k-entry lookup build) on every
+                        # uncached render. That full scan got slower on every enrichment as the
+                        # table grew, and was the cause of the long "sit and wait" after a large
+                        # enrichment. The variant-matching below is unchanged — it just runs on
+                        # a much smaller candidate set.
+                        all_profiles = _fetch_candidate_profiles_for_urls(
+                            db_client, urls, _MATCH_COLUMNS, cutoff
                         )
 
                         # Build profile lookup by username variants (SAME logic as Load from DB)

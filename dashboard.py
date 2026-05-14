@@ -952,6 +952,24 @@ def load_salesql_key():
 
 
 # ===== Export Helpers =====
+def blank_tenure_sentinel(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of ``df`` with the -1 tenure sentinel blanked out.
+
+    -1 is an internal sentinel for "tenure unknown" on current_years_at_company
+    (legacy backfill marker). Don't leak it into anything user-facing — not the
+    explicit "Download CSV" buttons AND not the on-screen st.dataframe tables
+    (Streamlit's built-in download icon exports those raw). Match both numeric
+    and string forms in case the column was ever coerced to object.
+    """
+    if df is None or df.empty or 'current_years_at_company' not in df.columns:
+        return df
+    out = df.copy()
+    col = out['current_years_at_company']
+    mask = (col == -1) | (col == '-1') | (col == -1.0) | (col == '-1.0')
+    out.loc[mask, 'current_years_at_company'] = None
+    return out
+
+
 def prepare_df_for_export(df: pd.DataFrame) -> pd.DataFrame:
     """Prepare a DataFrame for CSV export with consistent column order.
 
@@ -983,16 +1001,7 @@ def prepare_df_for_export(df: pd.DataFrame) -> pd.DataFrame:
 
     out = df[final_cols]
 
-    # -1 is an internal sentinel for "tenure unknown" on current_years_at_company
-    # (legacy backfill marker). Don't leak it into user-facing CSVs — show blank.
-    # Match both numeric and string forms in case the column was ever coerced to object.
-    if 'current_years_at_company' in out.columns:
-        out = out.copy()
-        col = out['current_years_at_company']
-        mask = (col == -1) | (col == '-1')
-        out.loc[mask, 'current_years_at_company'] = None
-
-    return out
+    return blank_tenure_sentinel(out)
 
 
 # ===== Session Persistence =====
@@ -7253,7 +7262,7 @@ with tab_enrich:
             if show_all_cols:
                 # Show ALL columns in dataframe
                 st.dataframe(
-                    enriched_df.head(50),
+                    blank_tenure_sentinel(enriched_df.head(50)),
                     width="stretch",
                     hide_index=True,
                     column_config={
@@ -11176,7 +11185,7 @@ with tab_database:
                     if show_all_db_cols:
                         # Show ALL columns in dataframe
                         st.dataframe(
-                            display_df,
+                            blank_tenure_sentinel(display_df),
                             width="stretch",
                             hide_index=True,
                             column_config={

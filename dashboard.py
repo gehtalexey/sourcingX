@@ -4177,7 +4177,7 @@ _DEFAULT_USER_REQUEST = "Senior software engineering candidate. Apply the standa
 
 def screen_profile(profile: dict, job_description: str, client,
                    tracker: 'UsageTracker' = None, mode: str = "detailed",
-                   ai_model: str = "gpt-4o-mini",
+                   ai_model: str = "gpt-4.1-mini",
                    ai_provider: str = "openai", user_request: str = None) -> dict:
     """Screen a profile against a job description using OpenAI or Anthropic.
 
@@ -4187,7 +4187,7 @@ def screen_profile(profile: dict, job_description: str, client,
         client: OpenAI or Anthropic client instance
         tracker: Optional usage tracker
         mode: "quick" for cheaper/faster or "detailed" for full analysis
-        ai_model: Model to use (e.g. gpt-4o-mini, claude-haiku-4-5-20251001)
+        ai_model: Model to use (e.g. gpt-4.1-mini, claude-haiku-4-5-20251001)
         ai_provider: "openai" or "anthropic"
         user_request: Recruiter request text (role, must-haves, exclusions).
             If empty/None, a sensible default is used. This always routes
@@ -4238,9 +4238,9 @@ def screen_profile(profile: dict, job_description: str, client,
     try:
         if ai_provider == "anthropic":
             # Anthropic API: system prompt as list with cache_control for prompt caching.
-            # The system prompt (~2,300 tokens) is identical for every profile in a run,
+            # The system prompt (~1,800 tokens) is identical for every profile in a run,
             # so caching it cuts cost from $0.80/1M → $0.08/1M for all calls after the first.
-            # Requires model support + prompt must be >1024 tokens (ours is ~2,300).
+            # Requires model support + prompt must be >1024 tokens (ours is ~1,800).
             # Retry up to 3 times on 429 rate limit with exponential backoff.
             _anthropic_delay = 2
             for _attempt in range(3):
@@ -4468,7 +4468,7 @@ def fetch_raw_data_for_batch(profiles: list, raw_index: dict = None, db_client =
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
                           max_workers: int = 15,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
-                          ai_model: str = "gpt-4o-mini",
+                          ai_model: str = "gpt-4.1-mini",
                           ai_provider: str = "openai", api_key: str = None,
                           user_request: str = None) -> list:
     """Screen multiple profiles in parallel using ThreadPoolExecutor.
@@ -9030,16 +9030,16 @@ with tab_screening:
             key="screen_count"
         )
 
-        # Fixed settings - gpt-4o-mini detailed mode (best cost/quality)
+        # Fixed settings - gpt-4.1-mini detailed mode (stronger instruction-following)
         screening_mode = "Detailed"
-        ai_model = "gpt-4o-mini"
+        ai_model = "gpt-4.1-mini"
         ai_provider = "openai"
-        model_input_cost = 0.15   # $0.15/1M input tokens
-        model_output_cost = 0.60  # $0.60/1M output tokens
+        model_input_cost = 0.40   # $0.40/1M input tokens
+        model_output_cost = 1.60  # $1.60/1M output tokens
         output_tokens = 150
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
-        st.info(f"Rubric: **Unified policy** | Model: **gpt-4o-mini** | Est. cost: **${est_cost:.3f}**")
+        st.info(f"Rubric: **Unified policy** | Model: **gpt-4.1-mini** | Est. cost: **${est_cost:.3f}**")
 
         # Debug: Show available fields and test single profile (admin-only)
         if is_admin_user():
@@ -9233,7 +9233,7 @@ with tab_screening:
                 profiles_to_screen = batch_state.get('profiles', [])
                 job_desc = batch_state.get('job_description', '')
                 screen_mode = batch_state.get('mode', 'detailed')
-                batch_ai_model = batch_state.get('ai_model', 'gpt-4o-mini')
+                batch_ai_model = batch_state.get('ai_model', 'gpt-4.1-mini')
                 batch_ai_provider = batch_state.get('ai_provider', 'openai')
                 batch_api_key = batch_state.get('api_key', openai_key)
                 max_workers = batch_state.get('max_workers', 10)  # Reduced from 15 to avoid rate limits
@@ -11498,7 +11498,7 @@ with tab_usage:
                         st.metric(
                             "OpenAI",
                             f"${cost:.4f}",
-                            help="gpt-4o-mini: $0.15/1M input, $0.60/1M output"
+                            help="gpt-4.1-mini: $0.40/1M input, $1.60/1M output"
                         )
                         tokens_in = openai.get('tokens_input', 0)
                         tokens_out = openai.get('tokens_output', 0)

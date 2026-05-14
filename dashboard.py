@@ -1266,15 +1266,28 @@ def _build_session_data():
         'active_screening_prompt', 'active_screening_role',
         'jd_screening'
     ]
+    serialized_dfs = []  # [(key, DataFrame)] already serialized this pass
     for key in keys_to_save:
         if key in st.session_state and st.session_state[key] is not None:
             value = st.session_state[key]
             # Convert DataFrames to dict for JSON serialization
             if isinstance(value, pd.DataFrame):
-                # Replace NaN with None for JSON compatibility
-                clean_df = value.where(pd.notnull(value), None)
-                data = _clean_for_json(clean_df.to_dict('records'))
-                session_data[key] = {'_type': 'dataframe', 'data': data}
+                # Dedup: right after a load, results_df / original_results_df /
+                # enriched_df often hold identical data. Store a reference
+                # instead of serializing (and writing) the same rows twice.
+                ref_key = None
+                for prev_key, prev_df in serialized_dfs:
+                    if value is prev_df or prev_df.equals(value):
+                        ref_key = prev_key
+                        break
+                if ref_key is not None:
+                    session_data[key] = {'_type': 'ref', 'ref': ref_key}
+                else:
+                    # Fast C-level serialization — handles NaN/inf/numpy types
+                    # natively, avoiding the slow pure-Python per-cell walk.
+                    data = json.loads(value.to_json(orient='records', date_format='iso'))
+                    session_data[key] = {'_type': 'dataframe', 'data': data}
+                serialized_dfs.append((key, value))
             elif isinstance(value, list):
                 session_data[key] = {'_type': 'list', 'data': _clean_for_json(value)}
             elif isinstance(value, dict):
@@ -1286,15 +1299,26 @@ def _build_session_data():
 
 def _restore_session_data(session_data: dict):
     """Restore session state from session data dict."""
+    refs = {}
     for key, item in session_data.items():
-        if item['_type'] == 'dataframe':
+        item_type = item['_type']
+        if item_type == 'dataframe':
             st.session_state[key] = pd.DataFrame(item['data'])
-        elif item['_type'] == 'list':
+        elif item_type == 'ref':
+            # Resolved in a second pass once the target DataFrame is restored
+            refs[key] = item['ref']
+        elif item_type == 'list':
             st.session_state[key] = item['data']
-        elif item['_type'] == 'dict':
+        elif item_type == 'dict':
             st.session_state[key] = item['data']
         else:
             st.session_state[key] = item['data']
+
+    # Second pass: resolve DataFrame references (dedup'd in _build_session_data)
+    for key, ref_key in refs.items():
+        src = st.session_state.get(ref_key)
+        if isinstance(src, pd.DataFrame):
+            st.session_state[key] = src.copy()
 
     # MEMORY OPTIMIZATION: Don't reconstruct list versions - they duplicate DataFrames
     # Code should use results_df / enriched_df directly
@@ -1339,11 +1363,18 @@ def save_session_state(to_db: bool = False):
                Default False to avoid excessive IO on every auto-save.
     """
     try:
-        # Log memory state before save (for crash diagnosis)
+        # Log memory state before save (for crash diagnosis). Throttled to at
+        # most once per 30s — the memory audit re-serializes the whole session,
+        # so running it on every save makes uploads noticeably slower on cloud.
+        # The timestamp lives in session_state so the throttle survives
+        # Streamlit reruns (a module global would reset on each re-execution).
         if _IS_STREAMLIT_CLOUD:
-            import traceback
-            caller = traceback.extract_stack(limit=3)[0]
-            _log_session_memory(f"save from {caller.filename.split('/')[-1]}:{caller.lineno}")
+            now = time.time()
+            if now - st.session_state.get('_last_memory_log_ts', 0.0) > 30:
+                st.session_state['_last_memory_log_ts'] = now
+                import traceback
+                caller = traceback.extract_stack(limit=3)[0]
+                _log_session_memory(f"save from {caller.filename.split('/')[-1]}:{caller.lineno}")
 
         session_data = _build_session_data()
         if not session_data:
@@ -5662,12 +5693,16 @@ with tab_upload:
                     st.session_state['pre_enriched_upload_nonce'] = _csv_uploader_nonce + 1
 
                 if not has_existing:
-                    # Fresh load — preserve original single-step UX with inline success.
+                    # Fresh load — commit, then reset the uploader and rerun so
+                    # the file isn't re-parsed on every subsequent interaction.
                     _commit_results(df_uploaded)
-                    msg = f"Loaded **{len(df_uploaded)}** profiles"
+                    st.session_state['last_load_count'] = len(df_uploaded)
+                    st.session_state['last_load_file'] = pre_enriched_file.name
+                    st.session_state['last_load_mode'] = 'loaded'
                     if skipped_no_url > 0:
-                        msg += f" ({skipped_no_url} skipped - no LinkedIn URL)"
-                    st.success(msg)
+                        st.session_state['last_load_skipped'] = skipped_no_url
+                    _reset_uploader()
+                    st.rerun()
                 else:
                     st.info(
                         f"You already have **{len(existing_df)}** profiles loaded. "
@@ -5717,7 +5752,9 @@ with tab_upload:
                 if load_mode == 'added':
                     st.success(f"Added **{load_count}** new profiles (total: **{load_total}**) from **{load_file}**")
                 else:
-                    st.success(f"Loaded **{load_count}** profiles from **{load_file}** - ready for enrichment")
+                    skipped = st.session_state.pop('last_load_skipped', 0)
+                    skip_note = f" ({skipped} skipped - no LinkedIn URL)" if skipped else ""
+                    st.success(f"Loaded **{load_count}** profiles from **{load_file}**{skip_note} - ready for enrichment")
 
                 # Clear after showing once
                 del st.session_state['last_load_count']

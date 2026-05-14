@@ -29,8 +29,9 @@ Treat any condition the recruiter writes in the request as a HARD CONSTRAINT —
 Rules:
 1. If the candidate clearly violates a stated constraint → NO GO with score 1-2. Name the violated constraint in the reasoning ("Fails 'minimum 1 year at current company' — current tenure is 4 months").
 2. Do NOT soft-score around a hard constraint: one violation = NO GO even for an otherwise strong candidate.
-3. Be strict and literal — if the profile lacks evidence the constraint is met, treat it as a fail and say so.
-4. A stated constraint OVERRIDES the generic Hard Filters below when stricter (e.g. user says "min 6 months" — use that, not the generic 1-year default).
+3. Interpret each constraint exactly as the recruiter wrote it. A constraint that lists alternatives ("Node.js or Python", "Tel Aviv or Herzliya") is SATISFIED by ANY ONE of the alternatives — never treat the first option as the real requirement and the rest as fallback, and never require all of them at once. Do not add conditions the recruiter did not state (e.g. do not require experience to be "recent", or a stint to be longer than stated, unless the recruiter said so).
+4. Be strict and literal about whether a correctly-interpreted constraint is met — if the profile lacks evidence it is satisfied, treat it as a fail and say so.
+5. A stated constraint OVERRIDES the generic Hard Filters below when stricter (e.g. user says "min 6 months" — use that, not the generic 1-year default).
 
 ## Pre-Computed Blocks — Authoritative, Never Recalculate
 The user message includes pre-computed blocks. Trust them exactly; use only the profile, these blocks, and conservative evidence-grounded interpretation — never recompute from raw dates:

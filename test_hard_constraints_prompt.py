@@ -79,6 +79,25 @@ class TestUnifiedPolicyHardConstraints:
         assert "minimum 1 year at current company" in user_prompt
         assert "Recruiter Request" in user_prompt
 
+    @pytest.mark.parametrize("phrase", [
+        # An "X or Y" constraint must be satisfied by ANY ONE alternative.
+        # Regression: gpt-4.1-mini was reading "Node.js or Python" as
+        # "Node.js required" and rejecting Python-only candidates.
+        "lists alternatives",
+        "ANY ONE of the alternatives",
+        "never require all of them",
+        # The model must not invent conditions the recruiter never wrote
+        # (e.g. demanding startup experience be "recent").
+        "Do not add conditions the recruiter did not state",
+    ])
+    def test_policy_handles_alternative_constraints(self, phrase):
+        system_prompt = get_system_prompt()
+        assert phrase in system_prompt, (
+            f"Unified policy should contain '{phrase}' so an 'X or Y' "
+            f"constraint is satisfied by either option and the model does "
+            f"not invent unstated conditions."
+        )
+
 
 # ---------------------------------------------------------------------------
 # screening_prompt_builder.py (structured path)

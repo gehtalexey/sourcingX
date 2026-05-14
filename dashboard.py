@@ -9009,7 +9009,7 @@ with tab_filter2:
             preview_filtered = preview[non_empty_cols] if non_empty_cols else preview
 
             st.dataframe(
-                preview_filtered, width="stretch", hide_index=True,
+                blank_tenure_sentinel(preview_filtered), width="stretch", hide_index=True,
                 column_config={
                     "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                     "public_url": st.column_config.LinkColumn("LinkedIn"),
@@ -9775,7 +9775,7 @@ with tab_screening:
                 df_display = df_display[ordered_cols + other_cols]
 
                 st.dataframe(
-                    df_display,
+                    blank_tenure_sentinel(df_display),
                     width="stretch",
                     hide_index=True,
                     column_config={

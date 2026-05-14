@@ -171,6 +171,23 @@ def test_clean_slug_fetches_id_suffixed_db_row():
     )
 
 
+def test_clean_slug_fetches_hyphen_free_id_suffixed_db_row():
+    """Code-review follow-up P1: the DB row may carry the ID suffix on the
+    HYPHEN-FREE form (johndoe-abc123). Input john-doe must still fetch it — the
+    old full scan matched it via username_no_hyphen."""
+    specs = _build_candidate_query_specs(
+        ["https://www.linkedin.com/in/john-doe"], CUTOFF
+    )
+    hyphen_free_suffixed = {
+        "linkedin_url": "https://www.linkedin.com/in/johndoe-abc123",
+        "original_url": "https://www.linkedin.com/in/johndoe-abc123",
+        "original_urls": ["https://www.linkedin.com/in/johndoe-abc123"],
+    }
+    assert rows_fetched_by(specs, [hyphen_free_suffixed]) == [hyphen_free_suffixed], (
+        "clean-slug input must also fetch the hyphen-free ID-suffixed DB row"
+    )
+
+
 def test_suffix_pass_does_not_match_different_name():
     """The suffix prefix must not bleed across a name boundary:
     input john-doe must NOT fetch john-doely-... (no hyphen after 'doe')."""

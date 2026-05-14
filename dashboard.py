@@ -516,14 +516,15 @@ def _build_candidate_query_specs(urls: list, cutoff: str) -> list:
     1. Exact pass — the normalized URL (and its hyphen-free form) matched against
        linkedin_url / original_url / original_urls.
     2. Suffix pass — a clean multi-part name slug (john-doe) may be stored in the
-       DB only under an ID-suffixed form (john-doe-abc123). An exact lookup would
-       miss that, so a left-anchored LIKE prefix (`/in/<slug>-*`) is matched
-       against linkedin_url / original_url. The variant matcher in the caller
-       re-filters, so an over-broad prefix hit costs a wasted row fetch, never a
-       wrong match.
+       DB only under an ID-suffixed form (john-doe-abc123, or the hyphen-free
+       johndoe-abc123). An exact lookup would miss those, so a left-anchored LIKE
+       prefix (`/in/<stem>-*`) is matched against linkedin_url / original_url for
+       both the original slug and its hyphen-free form. The variant matcher in
+       the caller re-filters, so an over-broad prefix hit costs a wasted row
+       fetch, never a wrong match.
     """
     exact_urls = set()        # for the exact in.() / ov.{} pass
-    prefix_slugs = set()      # for the suffix-variant prefix pass
+    prefix_stems = set()      # for the suffix-variant prefix pass
 
     for url in urls:
         normalized = normalize_linkedin_url(url)
@@ -540,14 +541,18 @@ def _build_candidate_query_specs(urls: list, cutoff: str) -> list:
             exact_urls.add(f'https://www.linkedin.com/in/{no_hyphen}')
         # Suffix pass — for a hyphenated slug whose last segment is NOT a numeric
         # LinkedIn ID. Such a slug (john-doe, einav-friedman) may be stored in
-        # the DB only under an ID-suffixed form (john-doe-abc123); the exact pass
-        # would miss it. If the last segment already contains a digit the slug IS
-        # the full ID-suffixed form, so there's nothing extra to look for. '%'
-        # slugs are skipped — '%' is a LIKE wildcard — and are covered exactly.
+        # the DB only under an ID-suffixed form; the exact pass would miss it. If
+        # the last segment already contains a digit the slug IS the full
+        # ID-suffixed form, so there's nothing extra to look for. '%' slugs are
+        # skipped — '%' is a LIKE wildcard — and are covered exactly. Both the
+        # slug and its hyphen-free form are added as stems, because the DB may
+        # store the suffixed form either way (john-doe-abc123 OR johndoe-abc123).
         if '-' in slug and '%' not in slug:
             last_segment = slug.rsplit('-', 1)[-1]
             if not any(ch.isdigit() for ch in last_segment):
-                prefix_slugs.add(slug)
+                prefix_stems.add(slug)
+                if no_hyphen and no_hyphen != slug:
+                    prefix_stems.add(no_hyphen)
 
     query_specs = []
 
@@ -571,17 +576,17 @@ def _build_candidate_query_specs(urls: list, cutoff: str) -> list:
             'fallback': {'linkedin_url': f'in.({quoted})', 'enriched_at': f'gte.{cutoff}'},
         })
 
-    # Suffix pass. A left-anchored LIKE prefix per slug — matches any stored URL
-    # whose path is `/in/<slug>-...`. LIKE is ~2.5x faster than an equivalent
+    # Suffix pass. A left-anchored LIKE prefix per stem — matches any stored URL
+    # whose path is `/in/<stem>-...`. LIKE is ~2.5x faster than an equivalent
     # regex here and returns the same rows. The value is double-quoted so the
-    # ':' '/' '*' chars survive or=() parsing. Slugs containing '%' (which LIKE
+    # ':' '/' '*' chars survive or=() parsing. Stems containing '%' (which LIKE
     # would treat as a wildcard) were already excluded above.
-    prefix_list = sorted(prefix_slugs)
+    prefix_list = sorted(prefix_stems)
     for i in range(0, len(prefix_list), 100):
         batch = prefix_list[i:i + 100]
         clauses = []
-        for s in batch:
-            pattern = f'"https://www.linkedin.com/in/{s}-*"'
+        for stem in batch:
+            pattern = f'"https://www.linkedin.com/in/{stem}-*"'
             clauses.append(f'linkedin_url.like.{pattern}')
             clauses.append(f'original_url.like.{pattern}')
         query_specs.append({

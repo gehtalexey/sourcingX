@@ -114,3 +114,116 @@ def get_system_prompt() -> str:
     Uses str.replace (not .format) because the policy contains literal
     curly braces in the JSON output example."""
     return SCREENING_POLICY.replace("{today}", datetime.now().strftime("%Y-%m-%d"))
+
+
+# ===========================================================================
+# Structured screening path
+# ---------------------------------------------------------------------------
+# Same senior-recruiter rubric, but:
+#   1. Per-criterion output — the model returns an explicit verdict on EACH
+#      must-have and EACH exclusion before deciding. This forces it to fully
+#      evaluate compound conditions ("at a big company AND no startup history")
+#      instead of half-reading them, and keeps the decision internally
+#      consistent with its own per-criterion verdicts.
+#   2. Nice-to-haves are NOT part of this prompt at all. They go to a separate
+#      bonus pass (NICE_TO_HAVE_SYSTEM_PROMPT) so a nice-to-have can never
+#      cause a NO GO — it isn't in the decision context.
+# No new screening *rules* were added vs SCREENING_POLICY — only the output
+# format changed, and the nice-to-haves section was removed (net leaner).
+# ===========================================================================
+
+_STRUCTURED_OUTPUT = """## Request Format & Output
+The recruiter request below has labelled sections — ROLE & CONTEXT (calibration only), MUST-HAVES (all required), EXCLUSIONS (any match disqualifies). An "X or Y" line is met by either option; judge each line holistically against the whole profile.
+
+Return ONLY this JSON object, no prose, no markdown:
+{
+  "must_haves": [{"text": "<must-have, verbatim>", "met": true or false, "evidence": "<one sentence>"}],
+  "exclusions": [{"text": "<exclusion, verbatim>", "matched": true or false, "why": "<one sentence>"}],
+  "decision": "GO" or "NO GO",
+  "score": integer 1-10,
+  "reasoning": "2-3 sentences: strongest signal, biggest concern, why GO/NO GO."
+}
+Give an explicit verdict on every must-have and every exclusion before deciding. GO only when every must-have is met and no exclusion matched.
+
+Today's date: {today}
+"""
+
+
+NICE_TO_HAVE_SYSTEM_PROMPT = """You check which "nice-to-have" qualities a candidate has, for scoring-bonus purposes only. This NEVER affects any hire decision — it only tags strengths a recruiter may want to see.
+
+Return ONLY this JSON object, no prose, no markdown:
+{
+  "nice_to_haves": [{"text": "<nice-to-have, verbatim>", "met": true or false, "evidence": "<short>"}]
+}
+Judge each item holistically against the whole profile."""
+
+
+def get_structured_system_prompt() -> str:
+    """System prompt for the structured (per-criterion) screening call.
+
+    The senior-recruiter rubric is unchanged; only the output format section
+    is swapped for the per-criterion schema. The nice-to-haves bullet is
+    dropped entirely — nice-to-haves are handled by a separate pass.
+    """
+    head = SCREENING_POLICY.split("## Output Format")[0].rstrip()
+    body = head + "\n\n" + _STRUCTURED_OUTPUT
+    return body.replace("{today}", datetime.now().strftime("%Y-%m-%d"))
+
+
+def _format_list(items) -> str:
+    """Render a list of criteria as a numbered block, or '(none specified)'."""
+    cleaned = [str(i).strip() for i in (items or []) if str(i).strip()]
+    if not cleaned:
+        return "(none specified)"
+    return "\n".join(f"{n}. {text}" for n, text in enumerate(cleaned, 1))
+
+
+def build_structured_user_prompt(role_context: str, must_haves: list,
+                                 exclusions: list, durations_text: str,
+                                 trimmed_raw: dict) -> str:
+    """Assemble the user-side prompt for the structured screening call.
+
+    Note: nice-to-haves are intentionally NOT included here — they go to the
+    separate nice-to-have bonus pass so they cannot influence GO/NO GO.
+
+    Args:
+        role_context: One-line role + setting (calibration only).
+        must_haves: List of must-have requirement strings (all required).
+        exclusions: List of exclusion / deal-breaker strings.
+        durations_text: Pre-computed durations + stability + experience block.
+        trimmed_raw: Trimmed raw Crustdata profile.
+    """
+    durations_header = f"{durations_text}\n\n" if durations_text else ""
+    return f"""{durations_header}## Role & Context
+{(role_context or "").strip() or "(none specified)"}
+
+## Must-Haves (ALL required — any one not met = NO GO)
+{_format_list(must_haves)}
+
+## Exclusions / Deal-Breakers (any match = NO GO)
+{_format_list(exclusions)}
+
+## Candidate Profile (raw JSON)
+```json
+{json.dumps(trimmed_raw, indent=2, default=str)}
+```
+
+Evaluate this candidate. Return ONLY the JSON object."""
+
+
+def build_nice_to_have_prompt(nice_to_haves: list, trimmed_raw: dict) -> str:
+    """Assemble the user-side prompt for the separate nice-to-have bonus pass.
+
+    Args:
+        nice_to_haves: List of nice-to-have strings.
+        trimmed_raw: Trimmed raw Crustdata profile.
+    """
+    return f"""## Nice-to-Haves to check
+{_format_list(nice_to_haves)}
+
+## Candidate Profile (raw JSON)
+```json
+{json.dumps(trimmed_raw, indent=2, default=str)}
+```
+
+Return ONLY the JSON object."""

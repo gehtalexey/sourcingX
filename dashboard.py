@@ -1355,9 +1355,6 @@ def _log_session_memory(context: str = ""):
         print(f"[Memory] Log failed: {e}")
 
 
-_last_memory_log_ts = 0.0
-
-
 def save_session_state(to_db: bool = False):
     """Save current session state to local file and optionally to Supabase.
 
@@ -1369,11 +1366,12 @@ def save_session_state(to_db: bool = False):
         # Log memory state before save (for crash diagnosis). Throttled to at
         # most once per 30s — the memory audit re-serializes the whole session,
         # so running it on every save makes uploads noticeably slower on cloud.
+        # The timestamp lives in session_state so the throttle survives
+        # Streamlit reruns (a module global would reset on each re-execution).
         if _IS_STREAMLIT_CLOUD:
-            global _last_memory_log_ts
             now = time.time()
-            if now - _last_memory_log_ts > 30:
-                _last_memory_log_ts = now
+            if now - st.session_state.get('_last_memory_log_ts', 0.0) > 30:
+                st.session_state['_last_memory_log_ts'] = now
                 import traceback
                 caller = traceback.extract_stack(limit=3)[0]
                 _log_session_memory(f"save from {caller.filename.split('/')[-1]}:{caller.lineno}")

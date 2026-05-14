@@ -522,6 +522,16 @@ def _build_candidate_query_specs(urls: list, cutoff: str) -> list:
        both the original slug and its hyphen-free form. The variant matcher in
        the caller re-filters, so an over-broad prefix hit costs a wasted row
        fetch, never a wrong match.
+
+    Accepted residual: the suffix pass does NOT prefix-match inside the
+    original_urls array — PostgREST can't express "any array element LIKE
+    prefix" without a custom DB function, and this is a shared database. So a
+    multi-source row whose ONLY suffixed form lives in original_urls (its
+    linkedin_url / original_url being some other source) is not fetched for a
+    clean-slug input. Measured at 47 / 31.5k rows (0.15%) and self-healing — the
+    profile gets re-enriched once (~$0.03), after which its canonical URL is
+    recorded and every later lookup matches. Pinned by
+    test_suffixed_url_only_in_original_urls_array_is_accepted_residual.
     """
     exact_urls = set()        # for the exact in.() / ov.{} pass
     prefix_stems = set()      # for the suffix-variant prefix pass

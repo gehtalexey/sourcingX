@@ -188,6 +188,34 @@ def test_clean_slug_fetches_hyphen_free_id_suffixed_db_row():
     )
 
 
+def test_suffixed_url_only_in_original_urls_array_is_accepted_residual():
+    """ACCEPTED RESIDUAL (code review P2), pinned deliberately.
+
+    The suffix pass prefix-matches linkedin_url / original_url, but NOT the
+    original_urls array — PostgREST can't express "any array element LIKE
+    prefix" without a custom function on this shared DB. So a multi-source row
+    whose suffixed form lives ONLY in original_urls (linkedin_url / original_url
+    being other sources) is not fetched for a clean-slug input.
+
+    Measured at 47 / 31.5k rows (0.15%) and self-healing: the profile is
+    re-enriched once (~$0.03), after which its canonical URL is recorded and
+    every later lookup matches. If this test ever needs to flip to "fetched",
+    that means the gap was closed — update it deliberately, don't delete it.
+    """
+    specs = _build_candidate_query_specs(
+        ["https://www.linkedin.com/in/john-doe"], CUTOFF
+    )
+    array_only = {
+        "linkedin_url": "https://www.linkedin.com/in/canonical-profile",
+        "original_url": "https://www.linkedin.com/in/other-source",
+        "original_urls": ["https://www.linkedin.com/in/john-doe-abc123"],
+    }
+    # Exact array entries ARE covered (ov.{...}); only the *suffixed-variant*
+    # array case is the residual. This row's array holds a suffixed form whose
+    # clean base is the input — not an exact match — so it is not fetched.
+    assert rows_fetched_by(specs, [array_only]) == []
+
+
 def test_suffix_pass_does_not_match_different_name():
     """The suffix prefix must not bleed across a name boundary:
     input john-doe must NOT fetch john-doely-... (no hyphen after 'doe')."""

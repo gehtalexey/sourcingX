@@ -4157,23 +4157,31 @@ def _extract_json_from_text(text):
     return text
 
 
-MAYBE_SCORE_THRESHOLD = 6
+GO_CONFIDENCE_THRESHOLD = 7  # GO-decision at/above this score = confident GO; below = Maybe
 
 
 def _decision_to_fit_label(decision: str, score: int) -> str:
-    """Map unified-policy {decision, score} to recruiter-facing buckets.
-    GO → Good Fit; NO GO with score ≥ MAYBE_SCORE_THRESHOLD → Maybe
-    (borderline — worth a human glance); otherwise Not a Fit."""
+    """Map a screening {decision, score} to one recruiter-facing bucket.
+
+    The decision is structural — a NO GO means a must-have failed or an
+    exclusion matched. The score then splits the GO-decisions into confident
+    GOs vs. fence-sitters worth a human glance:
+      - NO GO decision           → "Not a Fit"  (skip)
+      - GO decision, score >= 7  → "Good Fit"   (act — confident GO)
+      - GO decision, score <= 6  → "Maybe"      (glance — cleared the bar, low confidence)
+
+    A failed must-have can never be a "Maybe": if the decision is NO GO the
+    bucket is "Not a Fit" regardless of score. The internal label strings
+    ("Good Fit"/"Maybe"/"Not a Fit") are unchanged so existing filters keep
+    working; the recruiter-facing display maps them to GO/MAYBE/NO GO."""
     is_go = str(decision).upper().strip() == "GO"
-    if is_go:
-        return "Good Fit"
+    if not is_go:
+        return "Not a Fit"
     try:
         s = int(score or 0)
     except (TypeError, ValueError):
         s = 0
-    if s >= MAYBE_SCORE_THRESHOLD:
-        return "Maybe"
-    return "Not a Fit"
+    return "Good Fit" if s >= GO_CONFIDENCE_THRESHOLD else "Maybe"
 
 
 _DEFAULT_USER_REQUEST = "Senior software engineering candidate. Apply the standard policy."
@@ -9650,7 +9658,7 @@ with tab_screening:
             not_fit = sum(1 for r in screening_results if r.get('fit') == 'Not a Fit')
 
             stats_col1.metric("GO", good_fit, delta=None)
-            stats_col2.metric("Maybe", maybe_fit, delta=None)
+            stats_col2.metric("MAYBE", maybe_fit, delta=None)
             stats_col3.metric("NO GO", not_fit, delta=None)
 
             # Filter by fit level
@@ -9723,7 +9731,7 @@ with tab_screening:
                         )
 
                 # Reorder columns to put important ones first (linkedin_url next to name for easy click)
-                priority_cols = ['score', 'decision', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
+                priority_cols = ['score', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
                 ordered_cols = [c for c in priority_cols if c in df_display.columns]
                 other_cols = [c for c in df_display.columns if c not in priority_cols and c != 'index']
                 df_display = df_display[ordered_cols + other_cols]
@@ -9765,12 +9773,15 @@ with tab_screening:
                         parts.append("exclusions clear")
                     return " · ".join(parts)
 
+                # One recruiter-facing verdict column (GO / MAYBE / NO GO),
+                # not the old redundant Decision + Fit pair.
+                _verdict_label = {"Good Fit": "GO", "Maybe": "MAYBE", "Not a Fit": "NO GO"}
                 display_data = []
                 for r in sorted_results:
+                    fit_val = r.get('fit', '') or ''
                     display_data.append({
-                        'Decision': r.get('decision', '') or '',
+                        'Verdict': _verdict_label.get(fit_val, fit_val),  # Error/Skipped pass through
                         'Score': r.get('score', 0),
-                        'Fit': r.get('fit', ''),
                         'Name': r.get('name', '') or '',
                         'LinkedIn': r.get('linkedin_url', ''),
                         'Title': str(r.get('current_title', '') or '')[:40],
@@ -9787,15 +9798,14 @@ with tab_screening:
                     width="stretch",
                     hide_index=True,
                     column_config={
-                        "Decision": st.column_config.TextColumn("Decision", width="small", help="GO / NO GO"),
+                        "Verdict": st.column_config.TextColumn("Verdict", width="small", help="GO = reach out · MAYBE = cleared every must-have but the AI scored it 5-6, worth a glance · NO GO = failed a must-have or hit an exclusion"),
                         "Score": st.column_config.NumberColumn("Score", format="%d/10", width="small"),
-                        "Fit": st.column_config.TextColumn("Fit", width="small"),
                         "Name": st.column_config.TextColumn("Name", width="medium"),
                         "LinkedIn": st.column_config.LinkColumn("🔗", width="small", display_text="Open"),
                         "Title": st.column_config.TextColumn("Title", width="medium"),
                         "Company": st.column_config.TextColumn("Company", width="small"),
                         "Why": st.column_config.TextColumn("Why", width="large", help="Per-criterion verdict: how many must-haves were met, which were missing, and whether any exclusion matched"),
-                        "Bonus": st.column_config.TextColumn("Bonus", width="medium", help="Nice-to-haves the candidate has (informational only — never affects GO/NO GO)"),
+                        "Bonus": st.column_config.TextColumn("Bonus", width="medium", help="Nice-to-haves the candidate has (informational only — never affects the verdict)"),
                         "Summary": st.column_config.TextColumn("Summary", width="large")
                     }
                 )

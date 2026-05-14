@@ -114,3 +114,31 @@ class TestScreenProfileAcceptsBrief:
     def test_screen_profiles_batch_has_screening_brief_param(self):
         import dashboard
         assert "screening_brief" in inspect.signature(dashboard.screen_profiles_batch).parameters
+
+
+class TestVerdictBuckets:
+    """The single recruiter-facing verdict — GO / MAYBE / NO GO — is derived
+    structure-first (decision), then score splits the GO-decisions:
+      - NO GO decision           -> Not a Fit  (regardless of score)
+      - GO decision, score >= 7  -> Good Fit
+      - GO decision, score <= 6  -> Maybe
+    """
+
+    @pytest.mark.parametrize("decision,score,expected", [
+        ("NO GO", 8, "Not a Fit"),   # failed must-have can't be a Maybe, even at 8
+        ("NO GO", 6, "Not a Fit"),
+        ("NO GO", 2, "Not a Fit"),
+        ("GO", 10, "Good Fit"),
+        ("GO", 8, "Good Fit"),
+        ("GO", 7, "Good Fit"),       # 7 is the GO/Maybe line — 7 is a GO
+        ("GO", 6, "Maybe"),          # 6 is a Maybe
+        ("GO", 5, "Maybe"),
+        ("GO", 3, "Maybe"),          # GO-decision but low confidence — still a glance, not a skip
+    ])
+    def test_decision_to_fit_label(self, decision, score, expected):
+        from dashboard import _decision_to_fit_label
+        assert _decision_to_fit_label(decision, score) == expected
+
+    def test_go_confidence_threshold_is_seven(self):
+        import dashboard
+        assert dashboard.GO_CONFIDENCE_THRESHOLD == 7

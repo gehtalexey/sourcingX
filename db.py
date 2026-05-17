@@ -336,7 +336,7 @@ def _prepare_profile_row(linkedin_url: str, crustdata_response: dict, original_u
     current_years_at_company = None
     if emp:
         current_title = emp.get('employee_title') or emp.get('title')
-        current_company = emp.get('employer_name') or emp.get('company_name')
+        current_company = emp.get('employer_name') or emp.get('company_name') or emp.get('name')
         # Tenure-at-current-company: persist alongside the indexed fields so
         # Filter+ can read it without raw_data. Parsed via the same helper the
         # normalizer + backfill use, so all three paths produce identical
@@ -367,16 +367,59 @@ def _prepare_profile_row(linkedin_url: str, crustdata_response: dict, original_u
             if not current_company and len(parts) > 1:
                 current_company = parts[1].split('/')[0].strip()
 
-    # Extract pre-flattened arrays from Crustdata (already provided by API)
-    all_employers = cd.get('all_employers') or []
-    all_titles = cd.get('all_titles') or []
-    all_schools = cd.get('all_schools') or []
+    # Extract pre-flattened arrays from Crustdata.
+    # Enrich endpoint: all_employers / all_titles / all_schools are flat string lists.
+    # Search endpoint (compact=false): all_employers is a list of objects (each has 'name',
+    # 'title', etc.); all_titles may be empty; education uses education_background objects.
+    # Both paths must produce identical indexed string arrays in the DB row.
+
+    def _extract_employer_arrays(raw_list):
+        """Return (names, titles) from a list that is either strings or employer objects."""
+        names, titles = [], []
+        for item in (raw_list or []):
+            if isinstance(item, dict):
+                n = item.get('name') or item.get('employer_name') or ''
+                t = item.get('title') or item.get('employee_title') or ''
+                if n:
+                    names.append(n)
+                if t:
+                    titles.append(t)
+            elif isinstance(item, str) and item:
+                names.append(item)
+        return names, titles
+
+    def _extract_school_array(raw_list):
+        """Return school names from a list that is either strings or education objects."""
+        schools = []
+        for item in (raw_list or []):
+            if isinstance(item, dict):
+                s = item.get('institute_name') or item.get('school') or item.get('name') or ''
+                if s:
+                    schools.append(s)
+            elif isinstance(item, str) and item:
+                schools.append(item)
+        return schools
+
+    raw_all_employers = cd.get('all_employers') or []
+    raw_all_titles = cd.get('all_titles') or []
+    raw_all_schools = cd.get('all_schools') or []
     skills = cd.get('skills') or []
 
-    # Ensure they're lists of strings
-    all_employers = [str(x) for x in all_employers if x] if isinstance(all_employers, list) else []
-    all_titles = [str(x) for x in all_titles if x] if isinstance(all_titles, list) else []
-    all_schools = [str(x) for x in all_schools if x] if isinstance(all_schools, list) else []
+    # all_employers / all_titles: handle both flat strings and employer objects
+    all_employers, employers_titles = _extract_employer_arrays(raw_all_employers)
+    # all_titles may be a flat list (enrich) or empty (search — titles live in all_employers objects)
+    all_titles = [str(x) for x in raw_all_titles if x] if raw_all_titles else employers_titles
+
+    # all_schools: flat strings (enrich) or education objects (search via education_background)
+    all_schools = _extract_school_array(raw_all_schools) or _extract_school_array(cd.get('education_background'))
+
+    # past_employers fallback: if all_employers still empty, try the search 'past_employers' key
+    if not all_employers:
+        fallback_names, fallback_titles = _extract_employer_arrays(cd.get('past_employers'))
+        all_employers = fallback_names
+        if not all_titles:
+            all_titles = fallback_titles
+
     skills = [str(x) for x in skills if x] if isinstance(skills, list) else []
 
     now = datetime.utcnow().isoformat()
@@ -546,7 +589,13 @@ def save_enriched_profiles_bulk(client: SupabaseClient, profiles: list,
     # Step 1: Collect all linkedin_urls and normalize
     url_profile_pairs = []
     for profile in profiles:
-        linkedin_url = profile.get('linkedin_flagship_url') or profile.get('linkedin_url')
+        # Enrich response: linkedin_flagship_url. Search response: flagship_profile_url.
+        linkedin_url = (
+            profile.get('linkedin_flagship_url')
+            or profile.get('flagship_profile_url')
+            or profile.get('linkedin_profile_url')
+            or profile.get('linkedin_url')
+        )
         if not linkedin_url:
             continue
         norm_url = normalize_linkedin_url(linkedin_url)

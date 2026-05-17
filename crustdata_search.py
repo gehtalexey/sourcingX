@@ -52,19 +52,27 @@ from normalizers import normalize_linkedin_url, clean_value, is_nan_or_none, pic
 CRUSTDATA_SEARCH_ENDPOINT = "https://api.crustdata.com/screener/persondb/search"
 CRUSTDATA_CREDITS_ENDPOINT = "https://api.crustdata.com/account/credits"
 
-# Seniority levels supported by Crustdata
+# Seniority levels supported by Crustdata.
+# Canonical values verified via crustdata_autocomplete_person on 2026-05-17.
+# Previously this list used "Manager", "Senior", "Entry", "Training" which
+# Crustdata silently does not recognize, so those filters returned zero matches.
 SENIORITY_LEVELS = [
-    "CXO",
-    "Vice President",
-    "Director",
-    "Manager",
+    "Entry Level",
+    "Entry Level Manager",
     "Senior",
-    "Entry",
-    "Training",
+    "Experienced Manager",
+    "Director",
+    "Vice President",
+    "CXO",
     "Owner / Partner",
+    "In Training",
+    "Strategic",
 ]
 
-# Company headcount ranges supported by Crustdata
+# Company headcount ranges supported by Crustdata.
+# Note the comma in "10,001+" — Crustdata writes the top bucket that way and
+# the value sent in filters must match exactly. Previously this list used
+# "10001+" (no comma), so the largest-company filter silently missed matches.
 HEADCOUNT_RANGES = [
     "1-10",
     "11-50",
@@ -73,7 +81,7 @@ HEADCOUNT_RANGES = [
     "501-1000",
     "1001-5000",
     "5001-10000",
-    "10001+",
+    "10,001+",
 ]
 
 # Credits per 100 results
@@ -560,9 +568,17 @@ def search_people_db(
         api_key = _load_api_key()
     limiter = get_rate_limiter('crustdata')
 
-    # Build request body
+    # Build request body.
+    # compact=false is the load-bearing parameter that makes search return the
+    # FULL profile (past_employers with descriptions, certifications, summary,
+    # flagship_profile_url, etc.). Crustdata's default is compact=true which
+    # silently strips nested data — that's what created the original (incorrect)
+    # assumption that enrichment was needed after every search.
+    # Verified via Crustdata founder call + live test against Ami Blonder
+    # on 2026-05-15. See .planning equivalent docs / GitHub issue #68.
     body = {
         "limit": min(limit, 1000),  # Cap at 1000
+        "compact": False,
     }
 
     # Add filters if provided
@@ -734,8 +750,13 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalize a Crustdata search result to pipeline DataFrame format.
 
-    Search results have partial data (no full employment history).
-    Enrichment is recommended for full details.
+    With ``compact=false`` (now the default in ``search_people_db``), Crustdata
+    search returns the FULL profile: flagship_profile_url, past_employers with
+    full descriptions and dates, education, certifications, summary, skills,
+    languages, etc. The only field NOT returned by search is ``emails`` (SourcingX
+    uses SalesQL for emails separately). A follow-up enrichment call is no
+    longer needed in the default pipeline — see GitHub issue #68 / the
+    Crustdata-founder call notes.
 
     Args:
         profile: Raw profile dict from search results
@@ -749,7 +770,7 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
             - skills (comma-separated string)
             - years_experience
             - _source = 'crustdata_search'
-            - _needs_enrichment = True
+            - _needs_enrichment = False  (search response is complete with compact=false)
     """
     if not profile:
         return None
@@ -833,7 +854,7 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
         'years_experience': years_exp,
         # Metadata
         '_source': 'crustdata_search',
-        '_needs_enrichment': True,
+        '_needs_enrichment': False,  # compact=false returns full profile
         '_raw_search_result': profile,  # Keep raw for debugging
     }
 

@@ -5347,6 +5347,14 @@ with tab_search:
                         st.session_state['crustdata_search_credits_used'] = total_credits
                         st.session_state['crustdata_search_selected'] = list(range(loaded_count))
                         st.success(f"Loaded **{loaded_count:,}** profiles (of {total_count:,} total matching)")
+
+                        # Auto-save to Supabase
+                        try:
+                            db_client = _get_db_client()
+                            bulk_result = save_enriched_profiles_bulk(db_client, all_profiles)
+                            st.caption(f"Saved {bulk_result['saved']}/{loaded_count} to database")
+                        except Exception as db_err:
+                            st.caption(f"DB save skipped: {db_err}")
                     else:
                         progress_placeholder.empty()
                         st.session_state['crustdata_search_results'] = []
@@ -5536,7 +5544,14 @@ with tab_search:
                                     new_indices = list(range(len(current_results), len(current_results) + len(new_profiles)))
                                     st.session_state['crustdata_search_selected'] = current_selected + new_indices
 
-                                    st.success(f"Loaded {len(new_profiles)} more profiles")
+                                    # Auto-save new page to Supabase
+                                    try:
+                                        db_client = _get_db_client()
+                                        bulk_result = save_enriched_profiles_bulk(db_client, new_profiles)
+                                        st.success(f"Loaded {len(new_profiles)} more profiles — saved {bulk_result['saved']}/{len(new_profiles)} to database")
+                                    except Exception as db_err:
+                                        st.success(f"Loaded {len(new_profiles)} more profiles")
+                                        st.caption(f"DB save skipped: {db_err}")
                                     _get_crustdata_credits_cached.clear()
                                     st.rerun()
                                 else:

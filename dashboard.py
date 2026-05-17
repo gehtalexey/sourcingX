@@ -8443,13 +8443,14 @@ with tab_filter2:
     st.caption("Filter on full profile data: work history, education, skills")
 
     enriched_df = st.session_state.get('enriched_df')
-    is_enriched = enriched_df is not None and not enriched_df.empty
+    if enriched_df is None or (isinstance(enriched_df, pd.DataFrame) and enriched_df.empty):
+        enriched_df = st.session_state.get('results_df')
+    is_enriched = enriched_df is not None and isinstance(enriched_df, pd.DataFrame) and not enriched_df.empty
 
     if not is_enriched:
-        st.info("Enrich profiles first (tab 3) to use advanced filtering.")
+        st.info("Search for profiles first (Search tab) or upload data (Load tab).")
     else:
-        # enriched_df already contains exactly the profiles loaded - no filtering needed
-        st.success(f"**{len(enriched_df)}** enriched profiles ready for filtering")
+        st.success(f"**{len(enriched_df)}** profiles ready for filtering")
 
         # Show available enriched columns and sample data for debugging (admin-only)
         if is_admin_user():
@@ -8478,43 +8479,23 @@ with tab_filter2:
                     non_empty = (enriched_df[col].notna() & (enriched_df[col] != '')).sum()
                     st.write(f"  - {col}: {non_empty}/{len(enriched_df)} profiles")
 
-        # Google Sheets filtering (same as Filter tab)
+        # Sheet config — reuses the URL entered at the top of this tab (no duplicate input)
         filter_sheets = get_filter_sheets_config().copy()
         gspread_client = get_gspread_client()
-
-        st.markdown("**Your Filter Sheet:**")
-        st.caption(f"Share your sheet with: `linkedin-enricher@linkedin-enricher-485616.iam.gserviceaccount.com`")
-        user_sheet_url = st.text_input(
-            "Google Sheet URL (required — paste your sheet)",
-            value=st.session_state.get('user_sheet_url', ''),
-            placeholder="https://docs.google.com/spreadsheets/d/...",
-            key="filter2_sheet_input"
-        )
-
-        # No fallback to a baked-in default sheet: see the Filter tab above for
-        # the rationale. Tab-name defaults below stay because those are sheet
-        # tabs inside the user's own spreadsheet, not URLs.
-        if user_sheet_url:
-            st.session_state['user_sheet_url'] = user_sheet_url
-            filter_sheets['url'] = user_sheet_url
-            # Set default tab names if not already set
-            if 'past_candidates' not in filter_sheets:
-                filter_sheets['past_candidates'] = 'Past Candidates'
-            if 'blacklist' not in filter_sheets:
-                filter_sheets['blacklist'] = 'Blacklist'
-            if 'not_relevant' not in filter_sheets:
-                filter_sheets['not_relevant'] = 'NotRelevant Companies'
-            if 'universities' not in filter_sheets:
-                filter_sheets['universities'] = 'Universities'
-            if 'target_companies' not in filter_sheets:
-                filter_sheets['target_companies'] = 'Target Companies'
-            if 'client_wanted_companies' not in filter_sheets:
-                filter_sheets['client_wanted_companies'] = 'Client specific wanted companies'
+        _adv_sheet_url = st.session_state.get('user_sheet_url', '')
+        if _adv_sheet_url:
+            filter_sheets['url'] = _adv_sheet_url
+            filter_sheets.setdefault('past_candidates', 'Past Candidates')
+            filter_sheets.setdefault('blacklist', 'Blacklist')
+            filter_sheets.setdefault('not_relevant', 'NotRelevant Companies')
+            filter_sheets.setdefault('universities', 'Universities')
+            filter_sheets.setdefault('target_companies', 'Target Companies')
+            filter_sheets.setdefault('client_wanted_companies', 'Client specific wanted companies')
         else:
-            # User left the input empty — treat the sheet as not connected.
             filter_sheets['url'] = ''
-
-        has_sheets = render_filter_sheet_status(filter_sheets, gspread_client)
+        has_sheets = bool(_adv_sheet_url) and gspread_client is not None
+        if not _adv_sheet_url:
+            st.caption("Sheet-based filters (blacklist, past candidates, etc.) need a Google Sheet URL — enter it in the Filter section above.")
 
         st.divider()
         st.markdown("**Filter Options:**")
@@ -8727,7 +8708,6 @@ with tab_filter2:
             apply_clicked = st.button("Apply Filters", type="primary", key="apply_filters_enriched")
         with btn_col2:
             if st.button("Reset Filters", key="reset_filters_enriched"):
-                # Reset to original enriched_df
                 st.session_state['passed_candidates_df'] = enriched_df.copy()
                 if 'f2_filter_stats' in st.session_state:
                     del st.session_state['f2_filter_stats']

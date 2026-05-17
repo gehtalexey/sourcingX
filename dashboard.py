@@ -5115,7 +5115,7 @@ with tab_search:
         _render_ai_field(col3, "Location", "crust_search_location", "expanded_locations", "location",
                          "e.g., west coast usa")
 
-        # Row 1b: Country, Continent (structured alternatives to the Location text box)
+        # Row 1b: Country, Continent, Geo radius (all location filters together)
         _COUNTRIES = [
             "", "Argentina", "Australia", "Bangladesh", "Belgium", "Brazil",
             "Canada", "Chile", "China", "Colombia", "Denmark", "Ecuador",
@@ -5129,7 +5129,7 @@ with tab_search:
             "United States", "Venezuela",
         ]
         _CONTINENTS = ["", "Africa", "Asia", "Europe", "North America", "Oceania", "South America"]
-        col1b1, col1b2 = st.columns(2)
+        col1b1, col1b2, col1b3, col1b4 = st.columns(4)
         with col1b1:
             search_country = st.selectbox(
                 "Country",
@@ -5144,6 +5144,21 @@ with tab_search:
                 options=_CONTINENTS,
                 index=0,
                 key="crust_search_continent"
+            )
+        with col1b3:
+            search_geo_city = st.text_input(
+                "Geo radius: City",
+                key="crust_search_geo_city",
+                placeholder="e.g., Tel Aviv"
+            )
+        with col1b4:
+            search_geo_radius = st.number_input(
+                "Radius (km)",
+                min_value=0,
+                max_value=500,
+                value=0,
+                key="crust_search_geo_radius",
+                help="0 = disabled. Use with City to find people within N km."
             )
 
         # Row 2: Seniority, Company Size
@@ -5265,31 +5280,14 @@ with tab_search:
 
             st.divider()
 
-            # Geo radius + min connections
-            adv_geo_col1, adv_geo_col2, adv_conn_col = st.columns(3)
-            with adv_geo_col1:
-                search_geo_city = st.text_input(
-                    "Geo radius: City",
-                    key="crust_search_geo_city",
-                    placeholder="e.g., Tel Aviv"
-                )
-            with adv_geo_col2:
-                search_geo_radius = st.number_input(
-                    "Radius (km)",
-                    min_value=0,
-                    max_value=500,
-                    value=0,
-                    key="crust_search_geo_radius",
-                    help="0 = disabled"
-                )
-            with adv_conn_col:
-                search_min_connections = st.number_input(
-                    "Min connections",
-                    min_value=0,
-                    value=0,
-                    key="crust_search_min_connections",
-                    help="0 = no minimum. Filters for people with at least this many LinkedIn connections."
-                )
+            # Min connections (geo radius moved to main section)
+            search_min_connections = st.number_input(
+                "Min connections",
+                min_value=0,
+                value=0,
+                key="crust_search_min_connections",
+                help="0 = no minimum. Filters for people with at least this many LinkedIn connections."
+            )
 
         # Controls row
         ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])

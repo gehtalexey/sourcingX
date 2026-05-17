@@ -913,12 +913,43 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
     current_title = ''
     seniority = ''
     company_size = ''
-    emp = pick_current_employer(profile.get('current_employers'))
+    current_years_in_role = None
+    current_years_at_company = None
+    all_current = profile.get('current_employers') or []
+    emp = pick_current_employer(all_current)
     if emp:
         current_company = emp.get('employer_name') or emp.get('name') or ''
         current_title = emp.get('employee_title') or emp.get('title') or ''
         seniority = emp.get('seniority_level') or emp.get('seniority') or ''
         company_size = emp.get('company_headcount_range') or emp.get('headcount') or ''
+
+        # Tenure in current ROLE (most recent entry's start_date)
+        raw_start = emp.get('start_date')
+        if raw_start:
+            from normalizers import _parse_start_date_sort_key
+            parseable, dt = _parse_start_date_sort_key(raw_start)
+            if parseable:
+                from datetime import datetime
+                current_years_in_role = round((datetime.now() - dt).days / 365.25, 1)
+
+        # Tenure at COMPANY — find earliest start_date for the same company
+        current_years_at_company = current_years_in_role
+        if current_company and isinstance(all_current, list) and len(all_current) > 1:
+            from normalizers import _parse_start_date_sort_key as _psd
+            from datetime import datetime as _dt
+            company_lower = current_company.lower().strip()
+            earliest = None
+            for entry in all_current:
+                if not isinstance(entry, dict):
+                    continue
+                name = (entry.get('employer_name') or entry.get('name') or '').lower().strip()
+                if name != company_lower:
+                    continue
+                ok, d = _psd(entry.get('start_date'))
+                if ok and (earliest is None or d < earliest):
+                    earliest = d
+            if earliest:
+                current_years_at_company = round((_dt.now() - earliest).days / 365.25, 1)
 
     # Fallback to top-level fields
     if not current_title:
@@ -934,6 +965,19 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
         skills_str = str(skills)
     else:
         skills_str = ''
+
+    # All employers / titles / schools (for Filter tab matching)
+    raw_all_emp = profile.get('all_employers', [])
+    all_employers_str = ', '.join(str(x) for x in raw_all_emp if x) if isinstance(raw_all_emp, list) else ''
+
+    raw_all_titles = profile.get('all_titles', [])
+    all_titles_str = ', '.join(str(x) for x in raw_all_titles if x) if isinstance(raw_all_titles, list) else ''
+
+    raw_all_schools = profile.get('all_schools', [])
+    all_schools_str = ', '.join(str(x) for x in raw_all_schools if x) if isinstance(raw_all_schools, list) else ''
+
+    # Connections
+    connections_count = profile.get('num_of_connections') or profile.get('connections_count')
 
     # Experience
     years_exp = profile.get('years_of_experience_raw')
@@ -955,9 +999,17 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
         'current_title': clean_value(current_title) or '',
         'seniority': clean_value(seniority) or '',
         'company_size': clean_value(company_size) or '',
+        # Tenure
+        'current_years_in_role': current_years_in_role,
+        'current_years_at_company': current_years_at_company,
         # Skills and experience
         'skills': skills_str,
         'years_experience': years_exp,
+        # Filter tab fields
+        'all_employers': all_employers_str,
+        'all_titles': all_titles_str,
+        'all_schools': all_schools_str,
+        'connections_count': connections_count,
         # Metadata
         '_source': 'crustdata_search',
         '_needs_enrichment': False,  # compact=false returns full profile

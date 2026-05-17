@@ -122,6 +122,8 @@ try:
         expand_variations,
         SENIORITY_LEVELS,
         HEADCOUNT_RANGES,
+        FUNCTION_CATEGORIES,
+        COMPANY_INDUSTRIES,
     )
     HAS_CRUSTDATA_SEARCH = True
 except ImportError:
@@ -5104,6 +5106,12 @@ with tab_search:
         _render_ai_field(col2, "Company", "crust_search_company", "expanded_companies", "company",
                          "e.g., SaaS startups in Tel Aviv",
                          geo_key="crust_search_location")
+        with col2:
+            search_exact_company = st.checkbox(
+                "Exact match only",
+                key="crust_search_exact_company",
+                help="Match the exact company name instead of substring. Type the name exactly as it appears on LinkedIn."
+            )
         _render_ai_field(col3, "Location", "crust_search_location", "expanded_locations", "location",
                          "e.g., west coast usa")
 
@@ -5122,6 +5130,25 @@ with tab_search:
                 options=HEADCOUNT_RANGES,
                 default=[],
                 key="crust_search_headcount"
+            )
+
+        # Row 2b: Function, Industry
+        col2b1, col2b2 = st.columns(2)
+        with col2b1:
+            search_function = st.multiselect(
+                "Function",
+                options=FUNCTION_CATEGORIES,
+                default=[],
+                key="crust_search_function",
+                help="Filter by job function (e.g. Engineering, Sales). Matches people currently in these functions."
+            )
+        with col2b2:
+            search_industry = st.multiselect(
+                "Industry",
+                options=COMPANY_INDUSTRIES,
+                default=[],
+                key="crust_search_industry",
+                help="Filter by the industry their current employer is in."
             )
 
         # Row 3: Experience range, Keywords
@@ -5205,6 +5232,66 @@ with tab_search:
                     key="crust_search_has_email"
                 )
 
+            st.divider()
+
+            # Country / Continent structured location filters
+            _COUNTRIES = [
+                "", "Argentina", "Australia", "Bangladesh", "Belgium", "Brazil",
+                "Canada", "Chile", "China", "Colombia", "Denmark", "Ecuador",
+                "Egypt", "France", "Germany", "India", "Indonesia", "Iran",
+                "Ireland", "Israel", "Italy", "Japan", "Kenya", "Malaysia",
+                "Mexico", "Morocco", "Netherlands", "New Zealand", "Nigeria",
+                "Norway", "Pakistan", "Peru", "Philippines", "Poland", "Portugal",
+                "Romania", "Russia", "Saudi Arabia", "Singapore", "South Africa",
+                "South Korea", "Spain", "Sweden", "Switzerland", "Thailand",
+                "Turkey", "Ukraine", "United Arab Emirates", "United Kingdom",
+                "United States", "Venezuela",
+            ]
+            _CONTINENTS = ["", "Africa", "Asia", "Europe", "North America", "Oceania", "South America"]
+
+            adv_loc_col1, adv_loc_col2 = st.columns(2)
+            with adv_loc_col1:
+                search_country = st.selectbox(
+                    "Country",
+                    options=_COUNTRIES,
+                    index=0,
+                    key="crust_search_country",
+                    help="Filter to people located in a specific country. More reliable than the Location text box."
+                )
+            with adv_loc_col2:
+                search_continent = st.selectbox(
+                    "Continent",
+                    options=_CONTINENTS,
+                    index=0,
+                    key="crust_search_continent"
+                )
+
+            # Geo radius + min connections
+            adv_geo_col1, adv_geo_col2, adv_conn_col = st.columns(3)
+            with adv_geo_col1:
+                search_geo_city = st.text_input(
+                    "Geo radius: City",
+                    key="crust_search_geo_city",
+                    placeholder="e.g., Tel Aviv"
+                )
+            with adv_geo_col2:
+                search_geo_radius = st.number_input(
+                    "Radius (km)",
+                    min_value=0,
+                    max_value=500,
+                    value=0,
+                    key="crust_search_geo_radius",
+                    help="0 = disabled"
+                )
+            with adv_conn_col:
+                search_min_connections = st.number_input(
+                    "Min connections",
+                    min_value=0,
+                    value=0,
+                    key="crust_search_min_connections",
+                    help="0 = no minimum. Filters for people with at least this many LinkedIn connections."
+                )
+
         # Controls row
         ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
         with ctrl_col1:
@@ -5215,7 +5302,12 @@ with tab_search:
                 key="crust_search_limit"
             )
         with ctrl_col2:
-            pass  # Spacer
+            search_sort = st.selectbox(
+                "Sort by",
+                options=["Connections (most first)", "Experience (most first)", "No sort"],
+                index=0,
+                key="crust_search_sort"
+            )
         with ctrl_col3:
             btn_col1, btn_col2 = st.columns(2)
             with btn_col1:
@@ -5250,6 +5342,9 @@ with tab_search:
                 'crustdata_search_results', 'crustdata_search_cursor',
                 'crustdata_search_total', 'crustdata_search_selected',
                 'crustdata_search_credits_used',
+                'crust_search_exact_company', 'crust_search_function', 'crust_search_industry',
+                'crust_search_sort', 'crust_search_country', 'crust_search_continent',
+                'crust_search_geo_city', 'crust_search_geo_radius', 'crust_search_min_connections',
                 'expanded_titles', 'expanded_companies', 'expanded_locations',
                 'expanded_keywords', 'expanded_skills', 'expanded_past_titles',
                 'expanded_past_companies', 'expanded_schools',
@@ -5285,8 +5380,17 @@ with tab_search:
                 search_exp_min > 0, search_exp_max > 0,
                 effective_keywords, skill_groups, effective_past_titles,
                 effective_past_companies, effective_school,
-                search_recently_changed, search_has_email
+                search_recently_changed, search_has_email,
+                search_function, search_industry, search_country, search_continent,
+                search_geo_city and search_geo_radius > 0, search_min_connections > 0,
             ])
+
+            _SORT_MAP = {
+                "Connections (most first)": [{"column": "num_of_connections", "order": "desc"}],
+                "Experience (most first)": [{"column": "years_of_experience_raw", "order": "desc"}],
+                "No sort": None,
+            }
+            search_sorts = _SORT_MAP.get(search_sort, [{"column": "num_of_connections", "order": "desc"}])
 
             if not has_filters:
                 st.warning("Please provide at least one search filter.")
@@ -5306,6 +5410,14 @@ with tab_search:
                     school=effective_school if effective_school else None,
                     recently_changed_jobs=search_recently_changed if search_recently_changed else None,
                     has_verified_email=search_has_email if search_has_email else None,
+                    function_categories=search_function if search_function else None,
+                    industries=search_industry if search_industry else None,
+                    country=search_country if search_country else None,
+                    continent=search_continent if search_continent else None,
+                    geo_city=search_geo_city if search_geo_city else None,
+                    geo_radius_km=int(search_geo_radius) if search_geo_radius > 0 else None,
+                    min_connections=int(search_min_connections) if search_min_connections > 0 else None,
+                    exact_company=search_exact_company,
                 )
 
                 try:
@@ -5313,7 +5425,7 @@ with tab_search:
                     progress_placeholder = st.empty()
                     progress_placeholder.info("Searching Crustdata database...")
 
-                    results = search_people_db(filters, limit=min(search_limit, 1000), api_key=api_key)
+                    results = search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key)
 
                     if results.get("profiles"):
                         all_profiles = results['profiles']
@@ -5330,6 +5442,7 @@ with tab_search:
                                 filters,
                                 limit=min(remaining, 1000),
                                 cursor=cursor,
+                                sorts=search_sorts,
                                 api_key=api_key
                             )
                             if page_results.get("profiles"):
@@ -5512,6 +5625,16 @@ with tab_search:
                                     if group_val and group_val.strip():
                                         load_more_skill_groups.append(group_val.strip())
 
+                                _lm_sort_raw = st.session_state.get('crust_search_sort', 'Connections (most first)')
+                                _lm_sort_map = {
+                                    "Connections (most first)": [{"column": "num_of_connections", "order": "desc"}],
+                                    "Experience (most first)": [{"column": "years_of_experience_raw", "order": "desc"}],
+                                    "No sort": None,
+                                }
+                                _lm_geo_city = st.session_state.get('crust_search_geo_city', '') or None
+                                _lm_geo_radius = st.session_state.get('crust_search_geo_radius', 0) or 0
+                                _lm_min_conn = st.session_state.get('crust_search_min_connections', 0) or 0
+
                                 filters = build_search_filters(
                                     title=st.session_state.get('crust_search_title'),
                                     company=st.session_state.get('crust_search_company'),
@@ -5527,12 +5650,21 @@ with tab_search:
                                     school=st.session_state.get('crust_search_school'),
                                     recently_changed_jobs=st.session_state.get('crust_search_recently_changed'),
                                     has_verified_email=st.session_state.get('crust_search_has_email'),
+                                    function_categories=st.session_state.get('crust_search_function') or None,
+                                    industries=st.session_state.get('crust_search_industry') or None,
+                                    country=st.session_state.get('crust_search_country') or None,
+                                    continent=st.session_state.get('crust_search_continent') or None,
+                                    geo_city=_lm_geo_city,
+                                    geo_radius_km=int(_lm_geo_radius) if _lm_geo_radius > 0 else None,
+                                    min_connections=int(_lm_min_conn) if _lm_min_conn > 0 else None,
+                                    exact_company=bool(st.session_state.get('crust_search_exact_company', False)),
                                 )
 
                                 more_results = search_people_db(
                                     filters,
                                     limit=st.session_state.get('crust_search_limit', 100),
                                     cursor=cursor,
+                                    sorts=_lm_sort_map.get(_lm_sort_raw),
                                     api_key=api_key
                                 )
 

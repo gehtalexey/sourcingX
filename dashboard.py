@@ -5556,6 +5556,39 @@ with tab_search:
                 industry = ", ".join(str(x) for x in industries_raw)
                 summary = profile.get("summary", "") or ""
 
+                # Full work history: current + past employers with dates and role descriptions
+                _hist_parts = []
+                for _e in (profile.get("current_employers") or []):
+                    _t = _e.get("employee_title") or _e.get("title", "")
+                    _c = _e.get("employer_name") or _e.get("name", "")
+                    _s = (_e.get("start_date") or "")[:4]
+                    _line = f"{_t} @ {_c}" if _t or _c else ""
+                    if _s:
+                        _line += f" ({_s}–present)"
+                    _desc = _e.get("employee_description") or _e.get("description") or ""
+                    if _desc:
+                        _line += f"\n{_desc}"
+                    if _line.strip():
+                        _hist_parts.append(_line)
+                for _e in (profile.get("past_employers") or []):
+                    _t = _e.get("employee_title") or _e.get("title", "")
+                    _c = _e.get("employer_name") or _e.get("name", "")
+                    _s = (_e.get("start_date") or "")[:4]
+                    _en = (_e.get("end_date") or "")[:4]
+                    _dur = _e.get("duration", "")
+                    _line = f"{_t} @ {_c}" if _t or _c else ""
+                    if _s:
+                        _date = f"{_s}–{_en}" if _en else _s
+                        if _dur:
+                            _date += f" · {_dur}"
+                        _line += f" ({_date})"
+                    _desc = _e.get("employee_description") or _e.get("description") or ""
+                    if _desc:
+                        _line += f"\n{_desc}"
+                    if _line.strip():
+                        _hist_parts.append(_line)
+                work_history = "\n\n".join(_hist_parts)
+
                 display_data.append({
                     "idx": i,
                     "Select": i in st.session_state.get('crustdata_search_selected', []),
@@ -5574,6 +5607,7 @@ with tab_search:
                     "Skills": top_skills,
                     "All Skills": all_skills,
                     "Summary": summary,
+                    "Work History": work_history,
                     "LinkedIn": linkedin_url,
                 })
 
@@ -5581,7 +5615,7 @@ with tab_search:
 
             # Display with data_editor for selection
             _compact_cols = ["Select", "Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn"]
-            _all_cols = ["Select", "Name", "Title", "Headline", "Company", "Location", "Country", "Seniority", "Function", "Industry", "Size", "Exp", "Connections", "All Skills", "Summary", "LinkedIn"]
+            _all_cols = ["Select", "Name", "Title", "Headline", "Company", "Location", "Country", "Seniority", "Function", "Industry", "Size", "Exp", "Connections", "All Skills", "Summary", "Work History", "LinkedIn"]
             _show_cols = _all_cols if show_all_cols else _compact_cols
 
             edited_df = st.data_editor(
@@ -5606,9 +5640,10 @@ with tab_search:
                     "Connections": st.column_config.TextColumn("Connections", width="small"),
                     "All Skills": st.column_config.TextColumn("All Skills", width="large"),
                     "Summary": st.column_config.TextColumn("Summary", width="large"),
+                    "Work History": st.column_config.TextColumn("Work History", width="large"),
                 },
                 disabled=["Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn",
-                          "Country", "Seniority", "Function", "Industry", "Connections", "All Skills", "Summary"],
+                          "Country", "Seniority", "Function", "Industry", "Connections", "All Skills", "Summary", "Work History"],
                 key="crust_results_editor"
             )
 

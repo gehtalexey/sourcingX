@@ -5351,8 +5351,11 @@ with tab_search:
                         # Auto-save to Supabase
                         try:
                             db_client = _get_db_client()
-                            bulk_result = save_enriched_profiles_bulk(db_client, all_profiles)
-                            st.caption(f"Saved {bulk_result['saved']}/{loaded_count} to database")
+                            if not db_client:
+                                st.caption("DB save skipped: no database connection")
+                            else:
+                                bulk_result = save_enriched_profiles_bulk(db_client, all_profiles)
+                                st.caption(f"Saved {bulk_result['saved']}/{loaded_count} to database")
                         except Exception as db_err:
                             st.caption(f"DB save skipped: {db_err}")
                     else:
@@ -5372,6 +5375,10 @@ with tab_search:
             results = st.session_state['crustdata_search_results']
             total_count = st.session_state.get('crustdata_search_total', len(results))
             credits_used = st.session_state.get('crustdata_search_credits_used', 0)
+
+            # Show deferred Load More save result (stored before st.rerun())
+            if '_load_more_save_msg' in st.session_state:
+                st.caption(st.session_state.pop('_load_more_save_msg'))
 
             # Results header
             res_col1, res_col2 = st.columns([2, 1])
@@ -5544,14 +5551,16 @@ with tab_search:
                                     new_indices = list(range(len(current_results), len(current_results) + len(new_profiles)))
                                     st.session_state['crustdata_search_selected'] = current_selected + new_indices
 
-                                    # Auto-save new page to Supabase
+                                    # Auto-save new page to Supabase (store result for display after rerun)
                                     try:
                                         db_client = _get_db_client()
-                                        bulk_result = save_enriched_profiles_bulk(db_client, new_profiles)
-                                        st.success(f"Loaded {len(new_profiles)} more profiles — saved {bulk_result['saved']}/{len(new_profiles)} to database")
+                                        if not db_client:
+                                            st.session_state['_load_more_save_msg'] = "DB save skipped: no database connection"
+                                        else:
+                                            bulk_result = save_enriched_profiles_bulk(db_client, new_profiles)
+                                            st.session_state['_load_more_save_msg'] = f"Saved {bulk_result['saved']}/{len(new_profiles)} to database"
                                     except Exception as db_err:
-                                        st.success(f"Loaded {len(new_profiles)} more profiles")
-                                        st.caption(f"DB save skipped: {db_err}")
+                                        st.session_state['_load_more_save_msg'] = f"DB save skipped: {db_err}"
                                     _get_crustdata_credits_cached.clear()
                                     st.rerun()
                                 else:

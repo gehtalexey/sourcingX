@@ -5147,9 +5147,9 @@ with tab_search:
             )
         with col1b3:
             search_geo_city = st.text_input(
-                "Geo radius: City",
+                "City (radius center)",
                 key="crust_search_geo_city",
-                placeholder="e.g., Tel Aviv"
+                placeholder="e.g., Tel Aviv, London"
             )
         with col1b4:
             search_geo_radius = st.number_input(
@@ -5590,6 +5590,66 @@ with tab_search:
 
             # Selection count
             st.caption(f"**{len(selected_indices)}** profiles selected")
+
+            # Profile preview
+            _preview_names = ["— select a profile to preview —"] + [
+                p.get("name", f"#{i+1}") for i, p in enumerate(results)
+            ]
+            _preview_pick = st.selectbox("Preview profile", _preview_names, key="crust_preview_pick")
+            if _preview_pick != _preview_names[0]:
+                _prev = next((p for p in results if p.get("name") == _preview_pick), None)
+                if _prev:
+                    _prev_url = (
+                        _prev.get("flagship_profile_url") or
+                        _prev.get("linkedin_flagship_url") or
+                        _prev.get("linkedin_profile_url", "")
+                    )
+                    with st.container(border=True):
+                        _hdr = f"[{_preview_pick}]({_prev_url})" if _prev_url else _preview_pick
+                        st.markdown(f"#### {_hdr}")
+                        if _prev.get("headline"):
+                            st.markdown(f"*{_prev['headline']}*")
+                        _meta = []
+                        if _prev.get("region"):
+                            _meta.append(_prev["region"])
+                        if _prev.get("num_of_connections"):
+                            _meta.append(f"{_prev['num_of_connections']:,} connections")
+                        if _prev.get("years_of_experience_raw"):
+                            _meta.append(f"{_prev['years_of_experience_raw']}y exp")
+                        if _meta:
+                            st.caption(" · ".join(str(m) for m in _meta))
+                        if _prev.get("summary"):
+                            st.markdown("**About**")
+                            _sum = _prev["summary"]
+                            st.markdown(_sum[:600] + "..." if len(_sum) > 600 else _sum)
+                        _curr_emps = _prev.get("current_employers") or []
+                        if _curr_emps:
+                            st.markdown("**Current**")
+                            for _e in _curr_emps:
+                                _t = _e.get("employee_title") or _e.get("title", "")
+                                _c = _e.get("employer_name") or _e.get("name", "")
+                                st.markdown(f"- {_t} at **{_c}**")
+                        _past_emps = _prev.get("past_employers") or []
+                        if _past_emps:
+                            st.markdown("**Experience**")
+                            for _e in _past_emps[:6]:
+                                _t = _e.get("employee_title") or _e.get("title", "")
+                                _c = _e.get("employer_name") or _e.get("name", "")
+                                _s = _e.get("start_date") or _e.get("from_date") or ""
+                                _en = _e.get("end_date") or _e.get("to_date") or ""
+                                _dates = f" ({_s}–{_en})" if _s else ""
+                                st.markdown(f"- {_t} at **{_c}**{_dates}")
+                        _edu = _prev.get("education_background") or []
+                        if _edu:
+                            st.markdown("**Education**")
+                            for _ed in _edu:
+                                _school = _ed.get("institute_name", "")
+                                _deg = _ed.get("degree") or _ed.get("field_of_study") or ""
+                                st.markdown(f"- **{_school}**" + (f": {_deg}" if _deg else ""))
+                        _skills = _prev.get("skills") or []
+                        if _skills:
+                            st.markdown(f"**Skills** ({len(_skills)})")
+                            st.markdown(", ".join(_skills))
 
             # Action buttons
             st.divider()

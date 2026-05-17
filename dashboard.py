@@ -5115,6 +5115,37 @@ with tab_search:
         _render_ai_field(col3, "Location", "crust_search_location", "expanded_locations", "location",
                          "e.g., west coast usa")
 
+        # Row 1b: Country, Continent (structured alternatives to the Location text box)
+        _COUNTRIES = [
+            "", "Argentina", "Australia", "Bangladesh", "Belgium", "Brazil",
+            "Canada", "Chile", "China", "Colombia", "Denmark", "Ecuador",
+            "Egypt", "France", "Germany", "India", "Indonesia", "Iran",
+            "Ireland", "Israel", "Italy", "Japan", "Kenya", "Malaysia",
+            "Mexico", "Morocco", "Netherlands", "New Zealand", "Nigeria",
+            "Norway", "Pakistan", "Peru", "Philippines", "Poland", "Portugal",
+            "Romania", "Russia", "Saudi Arabia", "Singapore", "South Africa",
+            "South Korea", "Spain", "Sweden", "Switzerland", "Thailand",
+            "Turkey", "Ukraine", "United Arab Emirates", "United Kingdom",
+            "United States", "Venezuela",
+        ]
+        _CONTINENTS = ["", "Africa", "Asia", "Europe", "North America", "Oceania", "South America"]
+        col1b1, col1b2 = st.columns(2)
+        with col1b1:
+            search_country = st.selectbox(
+                "Country",
+                options=_COUNTRIES,
+                index=0,
+                key="crust_search_country",
+                help="Structured country filter — more reliable than the Location text box above."
+            )
+        with col1b2:
+            search_continent = st.selectbox(
+                "Continent",
+                options=_CONTINENTS,
+                index=0,
+                key="crust_search_continent"
+            )
+
         # Row 2: Seniority, Company Size
         col4, col5 = st.columns(2)
         with col4:
@@ -5233,38 +5264,6 @@ with tab_search:
                 )
 
             st.divider()
-
-            # Country / Continent structured location filters
-            _COUNTRIES = [
-                "", "Argentina", "Australia", "Bangladesh", "Belgium", "Brazil",
-                "Canada", "Chile", "China", "Colombia", "Denmark", "Ecuador",
-                "Egypt", "France", "Germany", "India", "Indonesia", "Iran",
-                "Ireland", "Israel", "Italy", "Japan", "Kenya", "Malaysia",
-                "Mexico", "Morocco", "Netherlands", "New Zealand", "Nigeria",
-                "Norway", "Pakistan", "Peru", "Philippines", "Poland", "Portugal",
-                "Romania", "Russia", "Saudi Arabia", "Singapore", "South Africa",
-                "South Korea", "Spain", "Sweden", "Switzerland", "Thailand",
-                "Turkey", "Ukraine", "United Arab Emirates", "United Kingdom",
-                "United States", "Venezuela",
-            ]
-            _CONTINENTS = ["", "Africa", "Asia", "Europe", "North America", "Oceania", "South America"]
-
-            adv_loc_col1, adv_loc_col2 = st.columns(2)
-            with adv_loc_col1:
-                search_country = st.selectbox(
-                    "Country",
-                    options=_COUNTRIES,
-                    index=0,
-                    key="crust_search_country",
-                    help="Filter to people located in a specific country. More reliable than the Location text box."
-                )
-            with adv_loc_col2:
-                search_continent = st.selectbox(
-                    "Continent",
-                    options=_CONTINENTS,
-                    index=0,
-                    key="crust_search_continent"
-                )
 
             # Geo radius + min connections
             adv_geo_col1, adv_geo_col2, adv_conn_col = st.columns(3)
@@ -5452,25 +5451,15 @@ with tab_search:
                             else:
                                 break
 
-                        progress_placeholder.empty()
                         loaded_count = len(all_profiles)
                         st.session_state['crustdata_search_results'] = all_profiles
                         st.session_state['crustdata_search_cursor'] = cursor
                         st.session_state['crustdata_search_total'] = total_count
                         st.session_state['crustdata_search_credits_used'] = total_credits
                         st.session_state['crustdata_search_selected'] = list(range(loaded_count))
-                        st.success(f"Loaded **{loaded_count:,}** profiles (of {total_count:,} total matching)")
-
-                        # Auto-save to Supabase
-                        try:
-                            db_client = _get_db_client()
-                            if not db_client:
-                                st.caption("DB save skipped: no database connection")
-                            else:
-                                bulk_result = save_enriched_profiles_bulk(db_client, all_profiles)
-                                st.caption(f"Saved {bulk_result['saved']}/{loaded_count} to database")
-                        except Exception as db_err:
-                            st.caption(f"DB save skipped: {db_err}")
+                        # Defer DB save to after rerun so results render immediately
+                        st.session_state['_pending_initial_save'] = True
+                        st.session_state['_search_loaded_msg'] = f"Loaded **{loaded_count:,}** profiles (of {total_count:,} total matching)"
                     else:
                         progress_placeholder.empty()
                         st.session_state['crustdata_search_results'] = []
@@ -5478,6 +5467,8 @@ with tab_search:
                         st.info("No profiles found matching your criteria. Try adjusting your filters.")
 
                     _get_crustdata_credits_cached.clear()
+                    progress_placeholder.empty()
+                    st.rerun()
 
                 except Exception as e:
                     st.error(f"Search failed: {str(e)}")
@@ -5489,9 +5480,27 @@ with tab_search:
             total_count = st.session_state.get('crustdata_search_total', len(results))
             credits_used = st.session_state.get('crustdata_search_credits_used', 0)
 
+            # Show search success message (deferred from search rerun)
+            if '_search_loaded_msg' in st.session_state:
+                st.success(st.session_state.pop('_search_loaded_msg'))
+
             # Show deferred Load More save result (stored before st.rerun())
             if '_load_more_save_msg' in st.session_state:
                 st.caption(st.session_state.pop('_load_more_save_msg'))
+
+            # Deferred DB save — runs after results are already on screen
+            if st.session_state.get('_pending_initial_save'):
+                del st.session_state['_pending_initial_save']
+                try:
+                    db_client = _get_db_client()
+                    if not db_client:
+                        st.caption("DB save skipped: no database connection")
+                    else:
+                        with st.spinner("Saving to database..."):
+                            bulk_result = save_enriched_profiles_bulk(db_client, results)
+                        st.caption(f"Saved {bulk_result['saved']}/{len(results)} to database")
+                except Exception as db_err:
+                    st.caption(f"DB save skipped: {db_err}")
 
             # Results header
             res_col1, res_col2 = st.columns([2, 1])

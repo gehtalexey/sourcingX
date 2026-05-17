@@ -433,6 +433,7 @@ def _cb_toggle_exclude_preset(cat_keywords: list):
     else:
         st.session_state['exclude_title_presets'] = list(set(current + cat_keywords))
 
+
 def _cb_toggle_f2_exclude_preset(cat_keywords: list):
     """Toggle exclude title preset category for the Filter+ tab."""
     current = st.session_state.get('f2_exclude_title_presets', [])
@@ -4942,7 +4943,7 @@ st.info(f"📊 **{_profile_count}** profiles loaded" if _profile_count else "No 
 tab_search, tab_upload, tab_filter, tab_enrich, tab_screening, tab_emails, tab_database, tab_usage = st.tabs([
     "0. Search", "1. Load", "2. Filter", "3. Refresh from Crustdata", "4. AI Screen", "5. Emails", "6. Database", "7. Usage"
 ])
-tab_filter2 = tab_filter  # Advanced filtering merged into the Filter tab
+tab_filter2 = tab_filter  # Filter+ content rendered into the same tab
 
 # ========== TAB 0: Search (Crustdata People DB) ==========
 with tab_search:

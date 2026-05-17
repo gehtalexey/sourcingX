@@ -4938,7 +4938,7 @@ st.info(f"📊 **{_profile_count}** profiles loaded" if _profile_count else "No 
 
 # Create tabs
 tab_search, tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_emails, tab_database, tab_usage = st.tabs([
-    "0. Search", "1. Load", "2. Filter", "3. Enrich", "4. Filter+", "5. AI Screen", "6. Emails", "7. Database", "8. Usage"
+    "0. Search", "1. Load", "2. Filter", "3. Refresh from Crustdata", "4. Filter+", "5. AI Screen", "6. Emails", "7. Database", "8. Usage"
 ])
 
 # ========== TAB 0: Search (Crustdata People DB) ==========
@@ -5825,7 +5825,7 @@ with tab_upload:
                     st.rerun()
 
             st.divider()
-            st.info("**Next step:** Click on **2. Filter** tab to filter profiles (optional) or **3. Enrich** to enrich directly")
+            st.info("**Next step:** Click on **2. Filter** tab to filter profiles (optional) or **3. Refresh from Crustdata** to pull full profile data directly")
 
     st.divider()
 
@@ -7180,11 +7180,11 @@ with tab_filter:
 
     # Next button
     st.divider()
-    st.info("**Next step:** Click on **3. Enrich** tab to enrich profiles with full LinkedIn data")
+    st.info("**Next step:** Click on **3. Refresh from Crustdata** tab to pull full LinkedIn profile data")
 
-# ========== TAB 3: Enrich ==========
+# ========== TAB 3: Refresh from Crustdata ==========
 with tab_enrich:
-    st.markdown("### Enrich with Crust Data API")
+    st.markdown("### Refresh profiles from Crustdata")
     st.caption("Add full LinkedIn profile data: work history, education, skills, and more")
 
     # Show enrichment result message if stored
@@ -9175,7 +9175,7 @@ with tab_screening:
         st.warning("No AI API key configured. Add 'openai_api_key' or 'anthropic_api_key' to config.json")
     elif not is_enriched:
         st.warning("Profiles must be enriched before AI screening.")
-        st.info("Go to **tab 3 (Enrich)** to enrich profiles with full LinkedIn data, then come back here.")
+        st.info("Go to **tab 3 (Refresh from Crustdata)** to pull full LinkedIn profile data, then come back here.")
     else:
         # Use passed_candidates_df if available (filtered), otherwise use enriched_df
         if 'passed_candidates_df' in st.session_state and not st.session_state['passed_candidates_df'].empty:

@@ -5486,19 +5486,17 @@ with tab_search:
             if '_load_more_save_msg' in st.session_state:
                 st.caption(st.session_state.pop('_load_more_save_msg'))
 
-            # Deferred DB save — runs after results are already on screen
+            # Background DB save — fires in a daemon thread so results render immediately
             if st.session_state.get('_pending_initial_save'):
                 del st.session_state['_pending_initial_save']
-                try:
-                    db_client = _get_db_client()
-                    if not db_client:
-                        st.caption("DB save skipped: no database connection")
-                    else:
-                        with st.spinner("Saving to database..."):
-                            bulk_result = save_enriched_profiles_bulk(db_client, results)
-                        st.caption(f"Saved {bulk_result['saved']}/{len(results)} to database")
-                except Exception as db_err:
-                    st.caption(f"DB save skipped: {db_err}")
+                db_client = _get_db_client()
+                if db_client:
+                    def _bg_save(client, profiles):
+                        try:
+                            save_enriched_profiles_bulk(client, profiles)
+                        except Exception:
+                            pass
+                    threading.Thread(target=_bg_save, args=(db_client, list(results)), daemon=True).start()
 
             # Results header
             res_col1, res_col2 = st.columns([2, 1])

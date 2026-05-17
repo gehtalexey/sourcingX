@@ -4939,9 +4939,10 @@ _profile_count = get_profile_count()
 st.info(f"📊 **{_profile_count}** profiles loaded" if _profile_count else "No profiles loaded — start from the Load tab")
 
 # Create tabs
-tab_search, tab_upload, tab_filter, tab_enrich, tab_filter2, tab_screening, tab_emails, tab_database, tab_usage = st.tabs([
-    "0. Search", "1. Load", "2. Filter", "3. Refresh from Crustdata", "4. Filter+", "5. AI Screen", "6. Emails", "7. Database", "8. Usage"
+tab_search, tab_upload, tab_filter, tab_enrich, tab_screening, tab_emails, tab_database, tab_usage = st.tabs([
+    "0. Search", "1. Load", "2. Filter", "3. Refresh from Crustdata", "4. AI Screen", "5. Emails", "6. Database", "7. Usage"
 ])
+tab_filter2 = tab_filter  # Advanced filtering merged into the Filter tab
 
 # ========== TAB 0: Search (Crustdata People DB) ==========
 with tab_search:
@@ -7938,7 +7939,7 @@ with tab_enrich:
                                 st.write(f"  **DB matches by name:** {db_name_check[username]}")
                     # Show next step with correct count (only enriched profiles can be filtered/screened)
                     if skipped_urls:
-                        st.success(f"**{unique_profile_count}** profiles ready for Filter+ and AI Screen")
+                        st.success(f"**{unique_profile_count}** profiles ready — scroll down in Filter tab for advanced filtering, or go to AI Screen")
                         # Store for Filter+ tab to use
                         st.session_state['_enriched_loaded_urls'] = set(normalize_linkedin_url(u) for u in skipped_urls if u)
                 urls_for_enrichment = new_urls
@@ -8433,10 +8434,11 @@ with tab_enrich:
         # Next button (show only if enriched)
         if is_enriched:
             st.divider()
-            st.info("**Next step:** Click on **4. Filter+** tab to filter on enriched data, or **5. AI Screen** to screen candidates")
+            st.info("**Next step:** Scroll down in this **Filter** tab to filter on enriched data, or go to **4. AI Screen** to screen candidates")
 
-# ========== TAB 4: Filter+ (Post-Enrichment) ==========
+# ========== FILTER TAB: Advanced Filtering section (Post-Enrichment) ==========
 with tab_filter2:
+    st.divider()
     st.markdown("### Advanced Filtering (Enriched Data)")
     st.caption("Filter on full profile data: work history, education, skills")
 
@@ -11523,7 +11525,7 @@ with tab_database:
                                     st.warning("Could not load profiles with raw data")
                             # Show success message after rerun
                             if st.session_state.pop('db_send_success', None):
-                                st.success(f"Loaded {st.session_state.get('enriched_df', pd.DataFrame()).shape[0]} profiles. Go to **Filter+** tab to continue.")
+                                st.success(f"Loaded {st.session_state.get('enriched_df', pd.DataFrame()).shape[0]} profiles. Go to **Filter** tab → Advanced Filtering section to continue.")
                 elif search_executed:
                     # Search ran but returned zero rows before any client-side
                     # filtering. Tell the user explicitly and point at the most

@@ -6848,19 +6848,16 @@ with tab_filter:
             min_company_months = 0
             max_company_months = 0
 
-            if has_role_duration or has_company_duration:
-                st.markdown("**Duration Filters:**")
-                dur_col1, dur_col2 = st.columns(2)
-                with dur_col1:
-                    if has_role_duration:
-                        min_role_months = st.number_input("Min months in role", min_value=0, max_value=120, value=0, key="min_role_months")
-                    if has_company_duration:
-                        min_company_months = st.number_input("Min months at company", min_value=0, max_value=120, value=0, key="min_company_months")
-                with dur_col2:
-                    if has_role_duration:
-                        max_role_months = st.number_input("Max months in role", min_value=0, max_value=240, value=0, help="0 = no limit", key="max_role_months")
-                    if has_company_duration:
-                        max_company_months = st.number_input("Max months at company", min_value=0, max_value=240, value=0, help="0 = no limit", key="max_company_months")
+            st.markdown("**Tenure / Duration Filters:**")
+            if not has_role_duration and not has_company_duration:
+                st.caption("Tenure data not in current results — computed from employer start dates when profiles are saved to DB.")
+            dur_col1, dur_col2 = st.columns(2)
+            with dur_col1:
+                min_role_months = st.number_input("Min months in role", min_value=0, max_value=240, value=0, key="min_role_months", disabled=not has_role_duration)
+                min_company_months = st.number_input("Min months at company", min_value=0, max_value=240, value=0, key="min_company_months", disabled=not has_company_duration)
+            with dur_col2:
+                max_role_months = st.number_input("Max months in role", min_value=0, max_value=480, value=0, help="0 = no limit", key="max_role_months", disabled=not has_role_duration)
+                max_company_months = st.number_input("Max months at company", min_value=0, max_value=480, value=0, help="0 = no limit", key="max_company_months", disabled=not has_company_duration)
 
         st.markdown("**Keyword Search (searches full profile — skills, headline, summary, work history):**")
         bool_kw_col1, bool_kw_col2 = st.columns(2)

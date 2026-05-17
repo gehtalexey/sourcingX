@@ -5505,6 +5505,7 @@ with tab_search:
             with res_col1:
                 st.markdown(f"##### Results")
                 st.caption(f"Showing {len(results)} of {total_count:,} profiles | Credits used: {credits_used}")
+                show_all_cols = st.checkbox("Show all columns", key="crust_show_all_cols")
             with res_col2:
                 # Select/Deselect all
                 sel_col1, sel_col2 = st.columns(2)
@@ -5546,6 +5547,17 @@ with tab_search:
                 # Headline
                 headline = profile.get("headline", "")
 
+                # Extra fields for "show all columns" mode
+                all_skills = ", ".join(skills_list) if skills_list else ""
+                connections = profile.get("num_of_connections", "") or ""
+                country = profile.get("location_country", "") or ""
+                function_cat = (emp.get("function_category", "") if emp else "") or ""
+                industries_raw = (emp.get("company_industries") if emp else None) or []
+                if isinstance(industries_raw, str):
+                    industries_raw = [industries_raw]
+                industry = ", ".join(str(x) for x in industries_raw)
+                summary = profile.get("summary", "") or ""
+
                 display_data.append({
                     "idx": i,
                     "Select": i in st.session_state.get('crustdata_search_selected', []),
@@ -5556,16 +5568,26 @@ with tab_search:
                     "Seniority": seniority,
                     "Size": company_size,
                     "Location": profile.get("region", ""),
+                    "Country": country,
+                    "Function": function_cat,
+                    "Industry": industry,
                     "Exp": f"{profile.get('years_of_experience_raw', '')}y" if profile.get('years_of_experience_raw') else "",
+                    "Connections": connections,
                     "Skills": top_skills,
+                    "All Skills": all_skills,
+                    "Summary": summary,
                     "LinkedIn": linkedin_url,
                 })
 
             display_df = pd.DataFrame(display_data)
 
             # Display with data_editor for selection
+            _compact_cols = ["Select", "Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn"]
+            _all_cols = ["Select", "Name", "Title", "Headline", "Company", "Location", "Country", "Seniority", "Function", "Industry", "Size", "Exp", "Connections", "All Skills", "Summary", "LinkedIn"]
+            _show_cols = _all_cols if show_all_cols else _compact_cols
+
             edited_df = st.data_editor(
-                display_df[["Select", "Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn"]],
+                display_df[_show_cols],
                 hide_index=True,
                 use_container_width=True,
                 column_config={
@@ -5579,8 +5601,16 @@ with tab_search:
                     "Exp": st.column_config.TextColumn("Exp", width="small"),
                     "Skills": st.column_config.TextColumn("Skills", width="medium"),
                     "LinkedIn": st.column_config.LinkColumn("LinkedIn", width="small", display_text="View"),
+                    "Country": st.column_config.TextColumn("Country", width="small"),
+                    "Seniority": st.column_config.TextColumn("Seniority", width="small"),
+                    "Function": st.column_config.TextColumn("Function", width="small"),
+                    "Industry": st.column_config.TextColumn("Industry", width="medium"),
+                    "Connections": st.column_config.TextColumn("Connections", width="small"),
+                    "All Skills": st.column_config.TextColumn("All Skills", width="large"),
+                    "Summary": st.column_config.TextColumn("Summary", width="large"),
                 },
-                disabled=["Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn"],
+                disabled=["Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn",
+                          "Country", "Seniority", "Function", "Industry", "Connections", "All Skills", "Summary"],
                 key="crust_results_editor"
             )
 
@@ -5775,10 +5805,14 @@ with tab_search:
                 # Direct download button for selected profiles
                 if selected_indices:
                     selected_profiles = [results[i] for i in selected_indices]
-                    export_df = normalize_search_results_to_df(selected_profiles)
-                    # Apply consistent column order and remove internal columns
-                    export_df = prepare_df_for_export(export_df)
-                    export_data = export_df.to_csv(index=False).encode('utf-8-sig')
+                    if show_all_cols:
+                        _export_cols = [c for c in display_df.columns if c not in ("Select", "idx")]
+                        export_data = display_df.iloc[selected_indices][_export_cols].to_csv(index=False).encode('utf-8-sig')
+                    else:
+                        export_df = normalize_search_results_to_df(selected_profiles)
+                        # Apply consistent column order and remove internal columns
+                        export_df = prepare_df_for_export(export_df)
+                        export_data = export_df.to_csv(index=False).encode('utf-8-sig')
 
                     st.download_button(
                         f"Download CSV ({len(selected_indices)})",

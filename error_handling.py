@@ -146,7 +146,7 @@ class AuthenticationError(ExternalServiceError):
         super().__init__(
             service=service,
             message=message,
-            status_code=kwargs.get("status_code", 401),
+            status_code=kwargs.pop("status_code", 401),
             code=f"{service.upper()}_AUTH_ERROR",
             recoverable=False,
             **kwargs
@@ -162,7 +162,7 @@ class ServiceUnavailableError(ExternalServiceError):
         super().__init__(
             service=service,
             message=message,
-            status_code=kwargs.get("status_code", 503),
+            status_code=kwargs.pop("status_code", 503),
             code=f"{service.upper()}_UNAVAILABLE",
             recoverable=True,
             **kwargs

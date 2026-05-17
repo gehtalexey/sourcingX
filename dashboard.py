@@ -6718,6 +6718,13 @@ with tab_filter:
             else:
                 not_relevant_file = st.file_uploader("Not Relevant Companies CSV", type=['csv'], key="not_relevant")
 
+            nr_scope = st.radio(
+                "Not Relevant scope:",
+                ["Current company only", "All past employers"],
+                key="nr_scope", horizontal=True,
+                help="'All past employers' also checks every previous job — catches people who left a not-relevant company"
+            )
+
         with col2:
             st.markdown("**Title Keywords Filter:**")
             st.caption("Exclude profiles with these keywords in title")
@@ -6855,6 +6862,23 @@ with tab_filter:
                     if has_company_duration:
                         max_company_months = st.number_input("Max months at company", min_value=0, max_value=240, value=0, help="0 = no limit", key="max_company_months")
 
+        st.markdown("**Keyword Search (searches full profile — skills, headline, summary, work history):**")
+        bool_kw_col1, bool_kw_col2 = st.columns(2)
+        with bool_kw_col1:
+            keywords_full_profile = st.text_input(
+                "Full profile boolean search",
+                placeholder='e.g., python AND (aws OR gcp) NOT "data scientist"',
+                key="keywords_full_profile",
+                help="Supports AND / OR / NOT and quoted phrases. Searches skills, headline, summary, and all work history."
+            )
+        with bool_kw_col2:
+            keywords_skills_only = st.text_input(
+                "Skills only boolean search",
+                placeholder="e.g., react OR vue OR angular",
+                key="keywords_skills_only",
+                help="Same boolean syntax but searches only the Skills field."
+            )
+
         st.divider()
 
         btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
@@ -6953,6 +6977,48 @@ with tab_filter:
 
                 # Track which filters were enabled
                 stats['_filters_enabled'] = list(filters.keys())
+
+                # Not Relevant — all past employers scope
+                if nr_scope == "All past employers" and filters.get('not_relevant') and 'all_employers' in filtered_df.columns:
+                    _nr_list = [c.lower().strip() for c in filters['not_relevant']]
+                    def _has_nr_employer(employers_data):
+                        if employers_data is None: return False
+                        try:
+                            if pd.isna(employers_data): return False
+                        except (ValueError, TypeError): pass
+                        if not employers_data: return False
+                        emps = employers_data if isinstance(employers_data, (list, tuple)) else [e.strip() for e in str(employers_data).split(',')]
+                        return any(_company_matches_filter_list(e, _nr_list) for e in emps if e)
+                    _nr_all_mask = filtered_df['all_employers'].apply(_has_nr_employer)
+                    stats['not_relevant_all_employers'] = int(_nr_all_mask.sum())
+                    filtered_df = filtered_df[~_nr_all_mask]
+
+                # Boolean keyword search — full profile and/or skills only
+                try:
+                    from boolean_query import match_boolean_query as _mbq
+                    import json as _json_mod
+                    def _row_text(row, cols):
+                        parts = []
+                        for c in cols:
+                            if c not in row or row.get(c) is None: continue
+                            val = row[c]
+                            parts.append(_json_mod.dumps(val) if isinstance(val, dict) else str(val))
+                        return ' '.join(parts)
+
+                    if keywords_full_profile and keywords_full_profile.strip():
+                        _fp_cols = [c for c in ['skills', 'all_titles', 'all_employers', 'past_positions', 'summary', 'headline'] if c in filtered_df.columns]
+                        if _fp_cols:
+                            _fp_mask = filtered_df.apply(lambda r: _mbq(keywords_full_profile, _row_text(r, _fp_cols)), axis=1)
+                            stats['missing_keywords_full_profile'] = int((~_fp_mask).sum())
+                            filtered_df = filtered_df[_fp_mask]
+
+                    if keywords_skills_only and keywords_skills_only.strip() and 'skills' in filtered_df.columns:
+                        _sk_mask = filtered_df['skills'].fillna('').astype(str).apply(lambda t: _mbq(keywords_skills_only, t))
+                        stats['missing_keywords_skills'] = int((~_sk_mask).sum())
+                        filtered_df = filtered_df[_sk_mask]
+                except ImportError:
+                    if keywords_full_profile or keywords_skills_only:
+                        st.warning("Boolean keyword search unavailable — boolean_query module not found.")
 
                 st.session_state['passed_candidates_df'] = filtered_df  # Store filtered results separately
                 st.session_state['results_df'] = filtered_df
@@ -7151,10 +7217,16 @@ with tab_filter:
             load_tech_alerts = st.checkbox("Tech Alerts / Layoffs", value=False, key="load_tech_alerts")
         with prio_col3:
             load_client_wanted = st.checkbox("Client Wanted", value=False, key="load_client_wanted")
+            client_wanted_scope = st.radio(
+                "Client Wanted scope:",
+                ["Current company only", "All employers"],
+                key="client_wanted_scope", horizontal=True
+            )
         with prio_col4:
+            load_target_universities = st.checkbox("Target Universities", value=False, key="load_target_universities")
             apply_priority = st.button("Apply Priority Lists", type="secondary", key="apply_priority_lists")
 
-        if apply_priority and (load_target_companies or load_tech_alerts or load_client_wanted):
+        if apply_priority and (load_target_companies or load_tech_alerts or load_client_wanted or load_target_universities):
             with st.spinner("Loading priority lists..."):
                 priority_df = passed_df.copy()
                 sheet_url = filter_sheets.get('url', '')
@@ -7211,11 +7283,47 @@ with tab_filter:
                         client_list = [str(c).lower().strip() for c in client_wanted if c]
                         client_list = list(set(client_list))
                         if client_list:
-                            if 'current_company' in priority_df.columns:
-                                priority_df['is_client_wanted'] = priority_df['current_company'].apply(lambda x: matches_list(x, client_list))
-                                priority_loaded.append(f"Client Wanted: {len(client_list)} companies, {priority_df['is_client_wanted'].sum()} matches")
-                            else:
-                                st.warning("Cannot match client wanted companies: 'current_company' column not found in data")
+                            def _has_client_wanted(row):
+                                if matches_list(row.get('current_company'), client_list):
+                                    return True
+                                if client_wanted_scope == "All employers" and 'all_employers' in row.index:
+                                    emps_raw = row.get('all_employers')
+                                    if emps_raw is None: return False
+                                    try:
+                                        if pd.isna(emps_raw): return False
+                                    except (ValueError, TypeError): pass
+                                    emps = emps_raw if isinstance(emps_raw, (list, tuple)) else [e.strip() for e in str(emps_raw).split(',')]
+                                    return any(matches_list(e, client_list) for e in emps if e)
+                                return False
+                            priority_df['is_client_wanted'] = priority_df.apply(_has_client_wanted, axis=1)
+                            scope_label = "all employers" if client_wanted_scope == "All employers" else "current"
+                            priority_loaded.append(f"Client Wanted ({scope_label}): {len(client_list)} companies, {priority_df['is_client_wanted'].sum()} matches")
+
+                # Target Universities
+                if load_target_universities and filter_sheets.get('universities'):
+                    uni_df = load_sheet_as_df(sheet_url, filter_sheets['universities'])
+                    if uni_df is not None and not uni_df.empty:
+                        target_unis = set()
+                        for col in uni_df.columns:
+                            target_unis.update(uni_df[col].dropna().str.lower().str.strip().tolist())
+                        if target_unis and 'all_schools' in priority_df.columns:
+                            def _has_target_uni(schools_data):
+                                if schools_data is None: return False
+                                try:
+                                    if pd.isna(schools_data): return False
+                                except (ValueError, TypeError): pass
+                                if not schools_data: return False
+                                schools = schools_data if isinstance(schools_data, (list, tuple)) else [s.strip().lower() for s in str(schools_data).split(',')]
+                                for school in [str(s).strip().lower() for s in schools]:
+                                    for target in target_unis:
+                                        if not target: continue
+                                        if school == target or school.startswith(target) or target.startswith(school): return True
+                                        if len(target) > 8 and len(school) > 8:
+                                            tw = set(target.split()); sw = set(school.split())
+                                            if len(tw & sw) >= len(tw) * 0.7: return True
+                                return False
+                            priority_df['is_target_university'] = priority_df['all_schools'].apply(_has_target_uni)
+                            priority_loaded.append(f"Target Universities: {priority_df['is_target_university'].sum()} matches")
 
                 # Save with priority columns
                 st.session_state['passed_candidates_df'] = priority_df
@@ -7229,45 +7337,50 @@ with tab_filter:
     has_any_priority = passed_df is not None and len(passed_df) > 0 and (
         'is_target_company' in passed_df.columns or
         'is_layoff_company' in passed_df.columns or
-        'is_client_wanted' in passed_df.columns
+        'is_client_wanted' in passed_df.columns or
+        'is_target_university' in passed_df.columns
     )
 
     if has_any_priority:
 
         # Filter checkboxes at the top
         st.markdown("**Filter by category:**")
-        filter_cols = st.columns(4)
-
-        with filter_cols[0]:
-            show_all = st.checkbox("All", value=True, key="filter_all")
 
         has_target = 'is_target_company' in passed_df.columns
         has_layoff = 'is_layoff_company' in passed_df.columns
         has_client_wanted = 'is_client_wanted' in passed_df.columns
+        has_target_uni = 'is_target_university' in passed_df.columns
 
+        filter_cols = st.columns(5)
+        with filter_cols[0]:
+            show_all = st.checkbox("All", value=True, key="filter_all")
         with filter_cols[1]:
             if has_target:
                 count = int(passed_df['is_target_company'].fillna(False).sum())
                 show_target = st.checkbox(f"Target ({count})", value=False, key="filter_target")
             else:
                 show_target = False
-
         with filter_cols[2]:
             if has_layoff:
                 count = int(passed_df['is_layoff_company'].fillna(False).sum())
                 show_layoff = st.checkbox(f"Layoff ({count})", value=False, key="filter_layoff")
             else:
                 show_layoff = False
-
         with filter_cols[3]:
             if has_client_wanted:
                 count = int(passed_df['is_client_wanted'].fillna(False).sum())
                 show_client_wanted = st.checkbox(f"Client Wanted ({count})", value=False, key="filter_client_wanted")
             else:
                 show_client_wanted = False
+        with filter_cols[4]:
+            if has_target_uni:
+                count = int(passed_df['is_target_university'].fillna(False).sum())
+                show_target_uni = st.checkbox(f"University ({count})", value=False, key="filter_target_uni")
+            else:
+                show_target_uni = False
 
         # Filter based on checkboxes
-        if show_all or (not show_target and not show_layoff and not show_client_wanted):
+        if show_all or (not show_target and not show_layoff and not show_client_wanted and not show_target_uni):
             view_df = passed_df.copy()
         else:
             # Combine selected filters with OR
@@ -7278,6 +7391,8 @@ with tab_filter:
                 mask = mask | passed_df['is_layoff_company'].fillna(False)
             if show_client_wanted and has_client_wanted:
                 mask = mask | passed_df['is_client_wanted'].fillna(False)
+            if show_target_uni and has_target_uni:
+                mask = mask | passed_df['is_target_university'].fillna(False)
             view_df = passed_df[mask].copy()
 
         st.success(f"**{len(view_df)}** candidates")

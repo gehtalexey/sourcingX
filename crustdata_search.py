@@ -84,6 +84,53 @@ HEADCOUNT_RANGES = [
     "10,001+",
 ]
 
+# Job function categories (current_employers.function_category).
+# Values verified via crustdata_autocomplete_person on 2026-05-17.
+FUNCTION_CATEGORIES = [
+    "Engineering",
+    "Product Management",
+    "Sales",
+    "Marketing",
+    "Operations",
+    "Finance",
+    "Consulting",
+    "Human Resources",
+    "Research",
+    "Legal",
+    "Customer Success and Support",
+    "Arts and Design",
+]
+
+# Industry values for current_employers.company_industries (curated top values).
+# Verified via crustdata_autocomplete_person on 2026-05-17.
+COMPANY_INDUSTRIES = [
+    "Software Development",
+    "Technology, Information and Internet",
+    "Technology, Information and Media",
+    "IT Services and IT Consulting",
+    "Financial Services",
+    "Capital Markets",
+    "Business Consulting and Services",
+    "Professional Services",
+    "Manufacturing",
+    "Hospitals and Health Care",
+    "Retail",
+    "Education",
+    "Real Estate",
+    "Advertising Services",
+    "Marketing Services",
+    "Media and Telecommunications",
+    "Government Administration",
+    "Non-profit Organizations",
+    "Construction",
+    "Transportation, Logistics, Supply Chain and Storage",
+    "Legal Services",
+    "Accounting",
+    "Architecture and Planning",
+    "Design Services",
+    "Consumer Services",
+]
+
 # Credits per 100 results
 CREDITS_PER_100_RESULTS = 3
 
@@ -206,6 +253,14 @@ def build_filters(
     school: str = None,
     recently_changed_jobs: bool = None,
     has_verified_email: bool = None,
+    function_categories: List[str] = None,
+    industries: List[str] = None,
+    country: str = None,
+    continent: str = None,
+    geo_city: str = None,
+    geo_radius_km: int = None,
+    min_connections: int = None,
+    exact_company: bool = False,
 ) -> Dict[str, Any]:
     """
     Build Crustdata filter object from UI inputs.
@@ -278,15 +333,16 @@ def build_filters(
     # Current company filter (comma-separated for OR logic)
     if company and company.strip():
         company_values = [c.strip() for c in company.split(",") if c.strip()]
+        match_type = "=" if exact_company else "[.]"
         if len(company_values) == 1:
             conditions.append({
                 "column": "current_employers.name",
-                "type": "[.]",
+                "type": match_type,
                 "value": company_values[0]
             })
         elif len(company_values) > 1:
             company_conditions = [
-                {"column": "current_employers.name", "type": "[.]", "value": c}
+                {"column": "current_employers.name", "type": match_type, "value": c}
                 for c in company_values
             ]
             conditions.append({
@@ -505,6 +561,56 @@ def build_filters(
             "column": "current_employers.business_email_verified",
             "type": "=",
             "value": True
+        })
+
+    # Function category filter (set membership on current job function)
+    if function_categories:
+        valid_functions = [f for f in function_categories if f in FUNCTION_CATEGORIES]
+        if valid_functions:
+            conditions.append({
+                "column": "current_employers.function_category",
+                "type": "in",
+                "value": valid_functions
+            })
+
+    # Industry filter (set membership on company industries)
+    if industries:
+        conditions.append({
+            "column": "current_employers.company_industries",
+            "type": "in",
+            "value": list(industries)
+        })
+
+    # Country filter (exact match — values are case-sensitive)
+    if country and country.strip():
+        conditions.append({
+            "column": "location_country",
+            "type": "=",
+            "value": country.strip()
+        })
+
+    # Continent filter (exact match)
+    if continent and continent.strip():
+        conditions.append({
+            "column": "location_continent",
+            "type": "=",
+            "value": continent.strip()
+        })
+
+    # Geo radius filter ("within N km of CITY")
+    if geo_city and geo_city.strip() and geo_radius_km and geo_radius_km > 0:
+        conditions.append({
+            "column": "region",
+            "type": "geo_distance",
+            "value": {"location": geo_city.strip(), "distance": geo_radius_km, "unit": "km"}
+        })
+
+    # Min connections filter (=> is Crustdata's "greater than or equal to" operator)
+    if min_connections and min_connections > 0:
+        conditions.append({
+            "column": "num_of_connections",
+            "type": "=>",
+            "value": min_connections
         })
 
     # Return combined filter

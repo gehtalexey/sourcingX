@@ -295,7 +295,7 @@ def check_leadership_years(profile: Dict, requirement: Requirement) -> CheckResu
     leadership_months = 0
 
     for emp in profile.get("current_employers", []) + profile.get("past_employers", []):
-        title = (emp.get("employee_title") or "").lower()
+        title = (emp.get("employee_title") or emp.get("title") or "").lower()
         if any(kw in title for kw in leadership_keywords):
             # Estimate months from dates
             start = emp.get("start_date", "")
@@ -345,37 +345,30 @@ def check_company_type(profile: Dict, requirement: Requirement, is_reject: bool 
             reason = f"Company '{company}' matches: {found}" if found else f"Company '{company}' no match (no AI)"
         return CheckResult(requirement=requirement, passed=passed, reason=reason, evidence=[company])
 
+    reject_values = ", ".join(f'"{v}"' for v in requirement.values) if requirement.values else ""
     if is_reject:
-        prompt = f"""Is this company a BAD fit for a fullstack team lead role?
+        prompt = f"""Does this company match the rejection criterion below?
+
+Criterion: {requirement.description}
+Values to reject: {reject_values}
 
 Company: {company}
 Description: {description[:500]}
 
-REJECT (return passed=false) if company is:
-- E-commerce/retail (selling products online, not building software)
-- Ticketing/travel/events (selling tickets, not software products)
-- Banking/insurance/financial services (traditional, not fintech)
-- Telecom operator (Bezeq, Cellcom, etc.)
-- IT consulting/outsourcing/body shop (Ness, Matrix, Malam Team)
-- Hardware company
-- Marketing/creative agency
-
-ACCEPT (return passed=true) if company is:
-- Software product company (SaaS, B2B software)
-- Tech startup
-- Cybersecurity, DevTools, Developer platforms
-- Fintech (software-focused)
-- Top tech (Google, Microsoft, Wix, Monday, etc.)
+Return passed=false (reject) if the company matches the criterion.
+Return passed=true (accept) if it does not.
 
 Return JSON: {{"passed": true/false, "reason": "brief explanation"}}"""
     else:
-        prompt = f"""Is this company a GOOD fit for a fullstack team lead role?
+        prompt = f"""Does this company satisfy the requirement below?
+
+Requirement: {requirement.description}
+Values to match: {reject_values}
 
 Company: {company}
 Description: {description[:500]}
 
-ACCEPT if software product company, tech startup, cybersecurity, DevTools, fintech.
-REJECT if consulting, outsourcing, retail, banking, telecom, hardware.
+Return passed=true if the company satisfies the requirement, passed=false if not.
 
 Return JSON: {{"passed": true/false, "reason": "brief explanation"}}"""
 
@@ -481,7 +474,7 @@ def check_custom(profile: Dict, requirement: Requirement, client: anthropic.Anth
 Values to look for: {requirement.values}
 
 Profile skills: {profile.get('skills', [])}
-Current title: {profile.get('current_employers', [{}])[0].get('employee_title', 'N/A')}
+Current title: {(profile.get('current_employers') or [{}])[0].get('employee_title') or (profile.get('current_employers') or [{}])[0].get('title', 'N/A')}
 Current company: {profile.get('current_employers', [{}])[0].get('employer_name', 'N/A')}
 Past companies: {[e.get('employer_name') for e in profile.get('past_employers', [])[:5]]}
 

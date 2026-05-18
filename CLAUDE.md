@@ -246,6 +246,21 @@ These skills are NOT user-invocable. Claude should automatically read them when 
 - `db.py:match_prompt_by_keywords()` finds the best prompt for a JD based on keyword matching
 - Prompts can also be stored/customized in Supabase via `screening_prompts` table
 
+## Shared Supabase database — write/read consistency (CRITICAL)
+
+This Supabase database is shared by THREE projects:
+- **SourcingX** (this project) — the interactive sourcing app. **This is the canonical reference** for how profiles get written and read.
+- **daily-sourcing-autopilot-e2e** — automated pipeline, pushes to GEM.
+- **smartlead-sourcing-autopilot** — automated pipeline, pushes to SmartLead.
+
+**The rule:** all three projects MUST write profiles to the `profiles` table the exact same way, and search/read them the exact same way. If they drift apart, one project silently corrupts or misreads another's data.
+
+- The two autopilot projects' profile-saving code (`core/db.py`: `save_enriched_profile`, `_prepare_profile_row`, `_bulk_fetch_existing_original_urls`, `save_enriched_profiles_bulk`, `SupabaseClient.upsert` / `upsert_batch`; `core/normalizers.py`: `normalize_linkedin_url`, `pick_current_employer`, `_parse_start_date_sort_key`) is a **direct port of this project's** `db.py` / `normalizers.py`.
+- **Before changing how SourcingX writes or searches profiles** (the `profiles` table — columns written, field extraction from the Crustdata response, timestamp format, URL normalization, `original_urls` array handling, search/filter query patterns), remember the change must be mirrored into both autopilot projects. Flag it so the ports stay in sync.
+- SourcingX wins ties — it is the reference implementation. But a change here is not "done" until the autopilots match.
+
+The global `~/.claude/CLAUDE.md` and each project's `CLAUDE.md` repeat this rule — keep all four copies in agreement.
+
 ## Database Schema (Supabase)
 
 ### `profiles` table (enrichment data only)

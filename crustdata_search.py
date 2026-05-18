@@ -966,10 +966,9 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
     else:
         skills_str = ''
 
-    # All employers / titles / schools (for Filter tab matching)
-    # compact=false returns these as lists of dicts — extract name/title fields
-    # rather than str(dict) which produces unreadable Python repr strings.
-    def _extract_emp_names_titles(raw):
+    # All employers / titles / schools — handle both flat strings (enrich endpoint)
+    # and objects (compact=false search endpoint, mirrors db._prepare_profile_row logic)
+    def _extract_names_titles(raw):
         names, titles = [], []
         for item in (raw or []):
             if isinstance(item, dict):
@@ -981,7 +980,7 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
                 names.append(item)
         return names, titles
 
-    def _extract_school_names(raw):
+    def _extract_schools(raw):
         schools = []
         for item in (raw or []):
             if isinstance(item, dict):
@@ -991,19 +990,19 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
                 schools.append(item)
         return schools
 
-    _emp_names, _emp_titles_from_emp = _extract_emp_names_titles(profile.get('all_employers'))
+    _emp_names, _emp_titles = _extract_names_titles(profile.get('all_employers'))
     if not _emp_names:
-        _fb_names, _fb_titles = _extract_emp_names_titles(profile.get('past_employers'))
+        _fb_names, _fb_titles = _extract_names_titles(profile.get('past_employers'))
         _emp_names = _fb_names
-        _emp_titles_from_emp = _emp_titles_from_emp or _fb_titles
+        _emp_titles = _emp_titles or _fb_titles
 
-    _raw_all_titles = profile.get('all_titles') or []
-    _titles_list = [str(x) for x in _raw_all_titles if x] if _raw_all_titles else _emp_titles_from_emp
+    _raw_titles = profile.get('all_titles') or []
+    _titles = [str(x) for x in _raw_titles if x] if _raw_titles else _emp_titles
+    _schools = _extract_schools(profile.get('all_schools')) or _extract_schools(profile.get('education_background'))
 
     all_employers_str = ', '.join(_emp_names)
-    all_titles_str = ', '.join(_titles_list)
-    all_schools_str = ', '.join(_extract_school_names(profile.get('all_schools')) or
-                                _extract_school_names(profile.get('education_background')))
+    all_titles_str = ', '.join(_titles)
+    all_schools_str = ', '.join(_schools)
 
     # Connections
     connections_count = profile.get('num_of_connections') or profile.get('connections_count')

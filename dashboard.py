@@ -6088,7 +6088,12 @@ with tab_upload:
                 elif not has_crust_key:
                     st.warning("Crustdata API key not configured. Add 'api_key' to config.json")
                 else:
-                    _enrich_urls = extract_urls_from_phantombuster(results_df)
+                    # Only enrich rows that aren't already complete (excludes Crustdata search rows)
+                    if '_needs_enrichment' in results_df.columns:
+                        _enrich_source_df = results_df[results_df['_needs_enrichment'] != False]
+                    else:
+                        _enrich_source_df = results_df
+                    _enrich_urls = extract_urls_from_phantombuster(_enrich_source_df)
                     if _enrich_urls:
                         col_enrich1, col_enrich2 = st.columns(2)
                         with col_enrich1:
@@ -6341,8 +6346,9 @@ with tab_upload:
                                     if not pb_df.empty:
                                         pb_df = normalize_phantombuster_columns(pb_df)
 
-                                        # PhantomBuster data stays in session state only (not saved to DB)
-                                        # DB save happens after Crustdata enrichment
+                                        # Clear derived state (enriched_df etc.) so stale search
+                                        # results don't shadow the new PB data in get_profiles_df()
+                                        clear_results_derived_state(st.session_state)
                                         st.session_state['results_df'] = pb_df
                                         st.session_state['original_results_df'] = pb_df.copy()
                                         st.session_state['preview_page'] = 0  # Reset pagination
@@ -6392,6 +6398,8 @@ with tab_upload:
 
                                         st.session_state['preview_page'] = 0
                                         st.session_state['_data_source'] = 'phantombuster'
+                                        # Clear derived state so stale enriched_df doesn't shadow combined results
+                                        clear_results_derived_state(st.session_state)
                                         save_session_state()  # Save for restore
                                         st.rerun()
                                     else:
@@ -6404,6 +6412,7 @@ with tab_upload:
                             pb_df = fetch_phantombuster_result_csv(pb_key, selected_agent['id'], debug=False)
                             if not pb_df.empty:
                                 pb_df = normalize_phantombuster_columns(pb_df)
+                                clear_results_derived_state(st.session_state)
                                 st.session_state['results_df'] = pb_df
                                 st.session_state['original_results_df'] = pb_df.copy()
                                 st.session_state['preview_page'] = 0

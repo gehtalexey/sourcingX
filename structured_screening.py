@@ -16,6 +16,18 @@ from dataclasses import dataclass, field
 from enum import Enum
 import anthropic
 
+
+def _parse_json_response(text: str) -> dict:
+    """Extract and parse the first JSON object from an AI response.
+    Handles markdown code fences and truncated responses gracefully.
+    """
+    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    cleaned = re.sub(r'```(?:json)?\s*|\s*```', '', text).strip()
+    match = re.search(r'\{.*\}', cleaned, re.DOTALL)
+    if not match:
+        raise ValueError(f"No JSON found in AI response: {text[:120]!r}")
+    return json.loads(match.group())
+
 from normalizers import pick_current_employer
 
 
@@ -119,12 +131,7 @@ def parse_requirements(job_description: str, client: anthropic.Anthropic) -> Dic
 
     text = response.content[0].text
 
-    # Extract JSON from response
-    json_match = re.search(r'\{.*\}', text, re.DOTALL)
-    if not json_match:
-        raise ValueError(f"Could not parse requirements from response: {text[:200]}")
-
-    data = json.loads(json_match.group())
+    data = _parse_json_response(text)
 
     result = {
         "must_have": [],
@@ -199,11 +206,11 @@ Return JSON: {{"passed": true/false, "reason": "brief explanation", "evidence": 
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=150,
+            max_tokens=250,
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
-        result = json.loads(re.search(r'\{.*\}', response.content[0].text, re.DOTALL).group())
+        result = _parse_json_response(response.content[0].text)
         return CheckResult(
             requirement=requirement,
             passed=result.get("passed", False),
@@ -243,11 +250,11 @@ Return JSON: {{"passed": true/false, "reason": "brief explanation", "evidence": 
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=150,
+            max_tokens=250,
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
-        result = json.loads(re.search(r'\{.*\}', response.content[0].text, re.DOTALL).group())
+        result = _parse_json_response(response.content[0].text)
         return CheckResult(
             requirement=requirement,
             passed=result.get("passed", False),
@@ -288,7 +295,7 @@ def check_leadership_years(profile: Dict, requirement: Requirement) -> CheckResu
     leadership_months = 0
 
     for emp in profile.get("current_employers", []) + profile.get("past_employers", []):
-        title = (emp.get("employee_title") or "").lower()
+        title = (emp.get("employee_title") or emp.get("title") or "").lower()
         if any(kw in title for kw in leadership_keywords):
             # Estimate months from dates
             start = emp.get("start_date", "")
@@ -338,48 +345,41 @@ def check_company_type(profile: Dict, requirement: Requirement, is_reject: bool 
             reason = f"Company '{company}' matches: {found}" if found else f"Company '{company}' no match (no AI)"
         return CheckResult(requirement=requirement, passed=passed, reason=reason, evidence=[company])
 
+    reject_values = ", ".join(f'"{v}"' for v in requirement.values) if requirement.values else ""
     if is_reject:
-        prompt = f"""Is this company a BAD fit for a fullstack team lead role?
+        prompt = f"""Does this company match the rejection criterion below?
+
+Criterion: {requirement.description}
+Values to reject: {reject_values}
 
 Company: {company}
 Description: {description[:500]}
 
-REJECT (return passed=false) if company is:
-- E-commerce/retail (selling products online, not building software)
-- Ticketing/travel/events (selling tickets, not software products)
-- Banking/insurance/financial services (traditional, not fintech)
-- Telecom operator (Bezeq, Cellcom, etc.)
-- IT consulting/outsourcing/body shop (Ness, Matrix, Malam Team)
-- Hardware company
-- Marketing/creative agency
-
-ACCEPT (return passed=true) if company is:
-- Software product company (SaaS, B2B software)
-- Tech startup
-- Cybersecurity, DevTools, Developer platforms
-- Fintech (software-focused)
-- Top tech (Google, Microsoft, Wix, Monday, etc.)
+Return passed=false (reject) if the company matches the criterion.
+Return passed=true (accept) if it does not.
 
 Return JSON: {{"passed": true/false, "reason": "brief explanation"}}"""
     else:
-        prompt = f"""Is this company a GOOD fit for a fullstack team lead role?
+        prompt = f"""Does this company satisfy the requirement below?
+
+Requirement: {requirement.description}
+Values to match: {reject_values}
 
 Company: {company}
 Description: {description[:500]}
 
-ACCEPT if software product company, tech startup, cybersecurity, DevTools, fintech.
-REJECT if consulting, outsourcing, retail, banking, telecom, hardware.
+Return passed=true if the company satisfies the requirement, passed=false if not.
 
 Return JSON: {{"passed": true/false, "reason": "brief explanation"}}"""
 
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=150,
+            max_tokens=250,
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
-        result = json.loads(re.search(r'\{.*\}', response.content[0].text, re.DOTALL).group())
+        result = _parse_json_response(response.content[0].text)
         return CheckResult(
             requirement=requirement,
             passed=result.get("passed", False),
@@ -396,7 +396,7 @@ def check_title_reject(profile: Dict, requirement: Requirement, client=None) -> 
     if not emp:
         return CheckResult(requirement=requirement, passed=True, reason="No current title info", evidence=[])
 
-    title = emp.get("employee_title") or ""
+    title = emp.get("employee_title") or emp.get("title") or ""
 
     if not client:
         # Fallback to simple check
@@ -410,32 +410,24 @@ def check_title_reject(profile: Dict, requirement: Requirement, client=None) -> 
             evidence=[title]
         )
 
-    prompt = f"""Is this job title appropriate for a FULLSTACK TEAM LEAD role?
+    reject_values = ", ".join(f'"{v}"' for v in requirement.values) if requirement.values else "DevOps, Backend-only, Frontend-only, Data/ML, Overqualified"
+    prompt = f"""Does this candidate's job title match the requirement below?
+
+Requirement: {requirement.description}
+Values to reject: {reject_values}
 
 Current title: "{title}"
 
-REJECT if title indicates:
-- Backend-only focus: "Backend Team Lead", "Backend Engineer", "Backend Infra"
-- Frontend-only focus: "Frontend Team Lead", "Frontend Engineer"
-- DevOps/Platform/Infra: "DevOps Lead", "Platform Team Lead", "Infrastructure Lead", "SRE"
-- Data/ML/AI: "Data Team Lead", "ML Engineer", "AI Lead"
-- Overqualified: "VP", "Director", "CTO", "Chief", "Head of"
-
-ACCEPT titles like:
-- "Team Lead", "Tech Lead", "Engineering Team Lead", "Software Team Lead"
-- "Full Stack Team Lead", "Development Team Lead"
-- "Engineering Manager" (if still hands-on)
-
-Return JSON: {{"passed": true/false, "reason": "brief explanation"}}"""
+Return JSON: {{"passed": true/false, "reason": "brief explanation (one sentence)"}}"""
 
     try:
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=150,
+            max_tokens=250,
             messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
-        result = json.loads(re.search(r'\{.*\}', response.content[0].text, re.DOTALL).group())
+        result = _parse_json_response(response.content[0].text)
         return CheckResult(
             requirement=requirement,
             passed=result.get("passed", False),
@@ -482,7 +474,7 @@ def check_custom(profile: Dict, requirement: Requirement, client: anthropic.Anth
 Values to look for: {requirement.values}
 
 Profile skills: {profile.get('skills', [])}
-Current title: {profile.get('current_employers', [{}])[0].get('employee_title', 'N/A')}
+Current title: {(profile.get('current_employers') or [{}])[0].get('employee_title') or (profile.get('current_employers') or [{}])[0].get('title', 'N/A')}
 Current company: {profile.get('current_employers', [{}])[0].get('employer_name', 'N/A')}
 Past companies: {[e.get('employer_name') for e in profile.get('past_employers', [])[:5]]}
 
@@ -495,7 +487,7 @@ Return JSON: {{"passed": true/false, "reason": "brief explanation"}}"""
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1
         )
-        result = json.loads(re.search(r'\{.*\}', response.content[0].text, re.DOTALL).group())
+        result = _parse_json_response(response.content[0].text)
         return CheckResult(
             requirement=requirement,
             passed=result.get("passed", False),

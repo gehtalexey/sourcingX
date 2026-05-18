@@ -5618,6 +5618,13 @@ with tab_search:
                         _hist_parts.append(_line)
                 work_history = "\n\n".join(_hist_parts)
 
+                _all_emp_raw = profile.get('all_employers') or profile.get('past_employers') or []
+                _all_emp_names = []
+                for _ae in _all_emp_raw:
+                    _n = (_ae.get('name') or _ae.get('employer_name') or '') if isinstance(_ae, dict) else str(_ae)
+                    if _n: _all_emp_names.append(_n)
+                all_employers_display = ', '.join(_all_emp_names)
+
                 display_data.append({
                     "idx": i,
                     "Select": i in st.session_state.get('crustdata_search_selected', []),
@@ -5635,6 +5642,7 @@ with tab_search:
                     "Connections": connections,
                     "Skills": top_skills,
                     "All Skills": all_skills,
+                    "All Employers": all_employers_display,
                     "Summary": summary,
                     "Work History": work_history,
                     "LinkedIn": linkedin_url,
@@ -5644,7 +5652,7 @@ with tab_search:
 
             # Display with data_editor for selection
             _compact_cols = ["Select", "Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn"]
-            _all_cols = ["Select", "Name", "Title", "Headline", "Company", "Location", "Country", "Seniority", "Function", "Industry", "Size", "Exp", "Connections", "All Skills", "Summary", "Work History", "LinkedIn"]
+            _all_cols = ["Select", "Name", "Title", "Headline", "Company", "All Employers", "Location", "Country", "Seniority", "Function", "Industry", "Size", "Exp", "Connections", "All Skills", "Summary", "Work History", "LinkedIn"]
             _show_cols = _all_cols if show_all_cols else _compact_cols
 
             edited_df = st.data_editor(
@@ -5668,11 +5676,12 @@ with tab_search:
                     "Industry": st.column_config.TextColumn("Industry", width="medium"),
                     "Connections": st.column_config.TextColumn("Connections", width="small"),
                     "All Skills": st.column_config.TextColumn("All Skills", width="large"),
+                    "All Employers": st.column_config.TextColumn("All Employers", width="large"),
                     "Summary": st.column_config.TextColumn("Summary", width="large"),
                     "Work History": st.column_config.TextColumn("Work History", width="large"),
                 },
                 disabled=["Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn",
-                          "Country", "Seniority", "Function", "Industry", "Connections", "All Skills", "Summary", "Work History"],
+                          "Country", "Seniority", "Function", "Industry", "Connections", "All Skills", "All Employers", "Summary", "Work History"],
                 key="crust_results_editor"
             )
 

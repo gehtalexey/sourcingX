@@ -542,25 +542,39 @@ def normalize_crustdata_profile(raw: dict, original_url: str = None) -> Optional
 
     emp = pick_current_employer(raw.get('current_employers'))
     current_start_date = None
+    current_years_in_role = None
     current_years_at_company = None
     if emp:
         current_title = emp.get('employee_title') or emp.get('title')
         current_company = emp.get('employer_name') or emp.get('company_name')
-        # Capture tenure at the current company so post-enrichment filters
-        # (Filter+, DB search) can filter on "minimum X months at current
-        # company" without re-loading raw_crustdata. start_date is preserved
-        # as the raw string; current_years_at_company is computed against
-        # today using the same parser pick_current_employer uses for sorting,
-        # so unparseable "Present" / "May 2025" strings leave it None instead
-        # of producing nonsensical multi-millennium values. Field name matches
-        # normalize_phantombuster_profile so Filter+ can read both data
-        # sources from the same column.
+
+        # current_years_in_role: how long in the CURRENT ROLE (most recent entry's start_date)
         raw_start = emp.get('start_date')
         if raw_start is not None and str(raw_start).strip():
             current_start_date = str(raw_start).strip()
             parseable, dt = _parse_start_date_sort_key(raw_start)
             if parseable:
-                current_years_at_company = round((datetime.now() - dt).days / 365.25, 1)
+                current_years_in_role = round((datetime.now() - dt).days / 365.25, 1)
+
+        # current_years_at_company: how long at the COMPANY — find the earliest
+        # start_date across all current_employers entries for the same company.
+        # Handles people who changed roles at the same company (multiple entries).
+        current_years_at_company = current_years_in_role  # default: same as role
+        all_current = raw.get('current_employers', [])
+        if current_company and isinstance(all_current, list) and len(all_current) > 1:
+            company_lower = current_company.lower().strip()
+            earliest_dt = None
+            for entry in all_current:
+                if not isinstance(entry, dict):
+                    continue
+                name = (entry.get('employer_name') or entry.get('company_name') or '').lower().strip()
+                if name != company_lower:
+                    continue
+                parseable, dt = _parse_start_date_sort_key(entry.get('start_date'))
+                if parseable and (earliest_dt is None or dt < earliest_dt):
+                    earliest_dt = dt
+            if earliest_dt is not None:
+                current_years_at_company = round((datetime.now() - earliest_dt).days / 365.25, 1)
 
     # Fallback to top-level fields
     if not current_title:
@@ -625,6 +639,7 @@ def normalize_crustdata_profile(raw: dict, original_url: str = None) -> Optional
         'past_positions': past_positions_str,
         'connections_count': connections,
         'current_start_date': current_start_date,
+        'current_years_in_role': current_years_in_role,
         'current_years_at_company': current_years_at_company,
         # Note: raw_crustdata NOT stored here to save memory - fetch from DB when needed
     }
@@ -699,6 +714,8 @@ def profile_to_display_dict(profile: dict) -> dict:
         'past_positions': past_positions,
         'summary': profile.get('summary') or '',
         'connections_count': profile.get('connections_count'),
+        'current_years_in_role': profile.get('current_years_in_role'),
+        'current_years_at_company': profile.get('current_years_at_company'),
     }
 
 

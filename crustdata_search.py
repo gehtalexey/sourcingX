@@ -52,19 +52,27 @@ from normalizers import normalize_linkedin_url, clean_value, is_nan_or_none, pic
 CRUSTDATA_SEARCH_ENDPOINT = "https://api.crustdata.com/screener/persondb/search"
 CRUSTDATA_CREDITS_ENDPOINT = "https://api.crustdata.com/account/credits"
 
-# Seniority levels supported by Crustdata
+# Seniority levels supported by Crustdata.
+# Canonical values verified via crustdata_autocomplete_person on 2026-05-17.
+# Previously this list used "Manager", "Senior", "Entry", "Training" which
+# Crustdata silently does not recognize, so those filters returned zero matches.
 SENIORITY_LEVELS = [
-    "CXO",
-    "Vice President",
-    "Director",
-    "Manager",
+    "Entry Level",
+    "Entry Level Manager",
     "Senior",
-    "Entry",
-    "Training",
+    "Experienced Manager",
+    "Director",
+    "Vice President",
+    "CXO",
     "Owner / Partner",
+    "In Training",
+    "Strategic",
 ]
 
-# Company headcount ranges supported by Crustdata
+# Company headcount ranges supported by Crustdata.
+# Note the comma in "10,001+" — Crustdata writes the top bucket that way and
+# the value sent in filters must match exactly. Previously this list used
+# "10001+" (no comma), so the largest-company filter silently missed matches.
 HEADCOUNT_RANGES = [
     "1-10",
     "11-50",
@@ -73,7 +81,54 @@ HEADCOUNT_RANGES = [
     "501-1000",
     "1001-5000",
     "5001-10000",
-    "10001+",
+    "10,001+",
+]
+
+# Job function categories (current_employers.function_category).
+# Values verified via crustdata_autocomplete_person on 2026-05-17.
+FUNCTION_CATEGORIES = [
+    "Engineering",
+    "Product Management",
+    "Sales",
+    "Marketing",
+    "Operations",
+    "Finance",
+    "Consulting",
+    "Human Resources",
+    "Research",
+    "Legal",
+    "Customer Success and Support",
+    "Arts and Design",
+]
+
+# Industry values for current_employers.company_industries (curated top values).
+# Verified via crustdata_autocomplete_person on 2026-05-17.
+COMPANY_INDUSTRIES = [
+    "Software Development",
+    "Technology, Information and Internet",
+    "Technology, Information and Media",
+    "IT Services and IT Consulting",
+    "Financial Services",
+    "Capital Markets",
+    "Business Consulting and Services",
+    "Professional Services",
+    "Manufacturing",
+    "Hospitals and Health Care",
+    "Retail",
+    "Education",
+    "Real Estate",
+    "Advertising Services",
+    "Marketing Services",
+    "Media and Telecommunications",
+    "Government Administration",
+    "Non-profit Organizations",
+    "Construction",
+    "Transportation, Logistics, Supply Chain and Storage",
+    "Legal Services",
+    "Accounting",
+    "Architecture and Planning",
+    "Design Services",
+    "Consumer Services",
 ]
 
 # Credits per 100 results
@@ -198,6 +253,14 @@ def build_filters(
     school: str = None,
     recently_changed_jobs: bool = None,
     has_verified_email: bool = None,
+    function_categories: List[str] = None,
+    industries: List[str] = None,
+    country: str = None,
+    continent: str = None,
+    geo_city: str = None,
+    geo_radius_km: int = None,
+    min_connections: int = None,
+    exact_company: bool = False,
 ) -> Dict[str, Any]:
     """
     Build Crustdata filter object from UI inputs.
@@ -270,15 +333,16 @@ def build_filters(
     # Current company filter (comma-separated for OR logic)
     if company and company.strip():
         company_values = [c.strip() for c in company.split(",") if c.strip()]
+        match_type = "=" if exact_company else "[.]"
         if len(company_values) == 1:
             conditions.append({
                 "column": "current_employers.name",
-                "type": "[.]",
+                "type": match_type,
                 "value": company_values[0]
             })
         elif len(company_values) > 1:
             company_conditions = [
-                {"column": "current_employers.name", "type": "[.]", "value": c}
+                {"column": "current_employers.name", "type": match_type, "value": c}
                 for c in company_values
             ]
             conditions.append({
@@ -499,6 +563,56 @@ def build_filters(
             "value": True
         })
 
+    # Function category filter (set membership on current job function)
+    if function_categories:
+        valid_functions = [f for f in function_categories if f in FUNCTION_CATEGORIES]
+        if valid_functions:
+            conditions.append({
+                "column": "current_employers.function_category",
+                "type": "in",
+                "value": valid_functions
+            })
+
+    # Industry filter (set membership on company industries)
+    if industries:
+        conditions.append({
+            "column": "current_employers.company_industries",
+            "type": "in",
+            "value": list(industries)
+        })
+
+    # Country filter (exact match — values are case-sensitive)
+    if country and country.strip():
+        conditions.append({
+            "column": "location_country",
+            "type": "=",
+            "value": country.strip()
+        })
+
+    # Continent filter (exact match)
+    if continent and continent.strip():
+        conditions.append({
+            "column": "location_continent",
+            "type": "=",
+            "value": continent.strip()
+        })
+
+    # Geo radius filter ("within N km of CITY")
+    if geo_city and geo_city.strip() and geo_radius_km and geo_radius_km > 0:
+        conditions.append({
+            "column": "region",
+            "type": "geo_distance",
+            "value": {"location": geo_city.strip(), "distance": geo_radius_km, "unit": "km"}
+        })
+
+    # Min connections filter (=> is Crustdata's "greater than or equal to" operator)
+    if min_connections and min_connections > 0:
+        conditions.append({
+            "column": "num_of_connections",
+            "type": "=>",
+            "value": min_connections
+        })
+
     # Return combined filter
     if not conditions:
         # Return empty filter that matches everything
@@ -560,9 +674,17 @@ def search_people_db(
         api_key = _load_api_key()
     limiter = get_rate_limiter('crustdata')
 
-    # Build request body
+    # Build request body.
+    # compact=false is the load-bearing parameter that makes search return the
+    # FULL profile (past_employers with descriptions, certifications, summary,
+    # flagship_profile_url, etc.). Crustdata's default is compact=true which
+    # silently strips nested data — that's what created the original (incorrect)
+    # assumption that enrichment was needed after every search.
+    # Verified via Crustdata founder call + live test against Ami Blonder
+    # on 2026-05-15. See .planning equivalent docs / GitHub issue #68.
     body = {
         "limit": min(limit, 1000),  # Cap at 1000
+        "compact": False,
     }
 
     # Add filters if provided
@@ -734,8 +856,13 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalize a Crustdata search result to pipeline DataFrame format.
 
-    Search results have partial data (no full employment history).
-    Enrichment is recommended for full details.
+    With ``compact=false`` (now the default in ``search_people_db``), Crustdata
+    search returns the FULL profile: flagship_profile_url, past_employers with
+    full descriptions and dates, education, certifications, summary, skills,
+    languages, etc. The only field NOT returned by search is ``emails`` (SourcingX
+    uses SalesQL for emails separately). A follow-up enrichment call is no
+    longer needed in the default pipeline — see GitHub issue #68 / the
+    Crustdata-founder call notes.
 
     Args:
         profile: Raw profile dict from search results
@@ -749,7 +876,7 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
             - skills (comma-separated string)
             - years_experience
             - _source = 'crustdata_search'
-            - _needs_enrichment = True
+            - _needs_enrichment = False  (search response is complete with compact=false)
     """
     if not profile:
         return None
@@ -786,12 +913,43 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
     current_title = ''
     seniority = ''
     company_size = ''
-    emp = pick_current_employer(profile.get('current_employers'))
+    current_years_in_role = None
+    current_years_at_company = None
+    all_current = profile.get('current_employers') or []
+    emp = pick_current_employer(all_current)
     if emp:
         current_company = emp.get('employer_name') or emp.get('name') or ''
         current_title = emp.get('employee_title') or emp.get('title') or ''
         seniority = emp.get('seniority_level') or emp.get('seniority') or ''
         company_size = emp.get('company_headcount_range') or emp.get('headcount') or ''
+
+        # Tenure in current ROLE (most recent entry's start_date)
+        raw_start = emp.get('start_date')
+        if raw_start:
+            from normalizers import _parse_start_date_sort_key
+            parseable, dt = _parse_start_date_sort_key(raw_start)
+            if parseable:
+                from datetime import datetime
+                current_years_in_role = round((datetime.now() - dt).days / 365.25, 1)
+
+        # Tenure at COMPANY — find earliest start_date for the same company
+        current_years_at_company = current_years_in_role
+        if current_company and isinstance(all_current, list) and len(all_current) > 1:
+            from normalizers import _parse_start_date_sort_key as _psd
+            from datetime import datetime as _dt
+            company_lower = current_company.lower().strip()
+            earliest = None
+            for entry in all_current:
+                if not isinstance(entry, dict):
+                    continue
+                name = (entry.get('employer_name') or entry.get('name') or '').lower().strip()
+                if name != company_lower:
+                    continue
+                ok, d = _psd(entry.get('start_date'))
+                if ok and (earliest is None or d < earliest):
+                    earliest = d
+            if earliest:
+                current_years_at_company = round((_dt.now() - earliest).days / 365.25, 1)
 
     # Fallback to top-level fields
     if not current_title:
@@ -807,6 +965,47 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
         skills_str = str(skills)
     else:
         skills_str = ''
+
+    # All employers / titles / schools — handle both flat strings (enrich endpoint)
+    # and objects (compact=false search endpoint, mirrors db._prepare_profile_row logic)
+    def _extract_names_titles(raw):
+        names, titles = [], []
+        for item in (raw or []):
+            if isinstance(item, dict):
+                n = item.get('name') or item.get('employer_name') or ''
+                t = item.get('title') or item.get('employee_title') or ''
+                if n: names.append(n)
+                if t: titles.append(t)
+            elif isinstance(item, str) and item:
+                names.append(item)
+        return names, titles
+
+    def _extract_schools(raw):
+        schools = []
+        for item in (raw or []):
+            if isinstance(item, dict):
+                s = item.get('institute_name') or item.get('school') or item.get('name') or ''
+                if s: schools.append(s)
+            elif isinstance(item, str) and item:
+                schools.append(item)
+        return schools
+
+    _emp_names, _emp_titles = _extract_names_titles(profile.get('all_employers'))
+    if not _emp_names:
+        _fb_names, _fb_titles = _extract_names_titles(profile.get('past_employers'))
+        _emp_names = _fb_names
+        _emp_titles = _emp_titles or _fb_titles
+
+    _raw_titles = profile.get('all_titles') or []
+    _titles = [str(x) for x in _raw_titles if x] if _raw_titles else _emp_titles
+    _schools = _extract_schools(profile.get('all_schools')) or _extract_schools(profile.get('education_background'))
+
+    all_employers_str = ', '.join(_emp_names)
+    all_titles_str = ', '.join(_titles)
+    all_schools_str = ', '.join(_schools)
+
+    # Connections
+    connections_count = profile.get('num_of_connections') or profile.get('connections_count')
 
     # Experience
     years_exp = profile.get('years_of_experience_raw')
@@ -828,12 +1027,20 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
         'current_title': clean_value(current_title) or '',
         'seniority': clean_value(seniority) or '',
         'company_size': clean_value(company_size) or '',
+        # Tenure
+        'current_years_in_role': current_years_in_role,
+        'current_years_at_company': current_years_at_company,
         # Skills and experience
         'skills': skills_str,
         'years_experience': years_exp,
+        # Filter tab fields
+        'all_employers': all_employers_str,
+        'all_titles': all_titles_str,
+        'all_schools': all_schools_str,
+        'connections_count': connections_count,
         # Metadata
         '_source': 'crustdata_search',
-        '_needs_enrichment': True,
+        '_needs_enrichment': False,  # compact=false returns full profile
         '_raw_search_result': profile,  # Keep raw for debugging
     }
 

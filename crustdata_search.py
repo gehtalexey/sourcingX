@@ -967,14 +967,43 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
         skills_str = ''
 
     # All employers / titles / schools (for Filter tab matching)
-    raw_all_emp = profile.get('all_employers', [])
-    all_employers_str = ', '.join(str(x) for x in raw_all_emp if x) if isinstance(raw_all_emp, list) else ''
+    # compact=false returns these as lists of dicts — extract name/title fields
+    # rather than str(dict) which produces unreadable Python repr strings.
+    def _extract_emp_names_titles(raw):
+        names, titles = [], []
+        for item in (raw or []):
+            if isinstance(item, dict):
+                n = item.get('name') or item.get('employer_name') or ''
+                t = item.get('title') or item.get('employee_title') or ''
+                if n: names.append(n)
+                if t: titles.append(t)
+            elif isinstance(item, str) and item:
+                names.append(item)
+        return names, titles
 
-    raw_all_titles = profile.get('all_titles', [])
-    all_titles_str = ', '.join(str(x) for x in raw_all_titles if x) if isinstance(raw_all_titles, list) else ''
+    def _extract_school_names(raw):
+        schools = []
+        for item in (raw or []):
+            if isinstance(item, dict):
+                s = item.get('institute_name') or item.get('school') or item.get('name') or ''
+                if s: schools.append(s)
+            elif isinstance(item, str) and item:
+                schools.append(item)
+        return schools
 
-    raw_all_schools = profile.get('all_schools', [])
-    all_schools_str = ', '.join(str(x) for x in raw_all_schools if x) if isinstance(raw_all_schools, list) else ''
+    _emp_names, _emp_titles_from_emp = _extract_emp_names_titles(profile.get('all_employers'))
+    if not _emp_names:
+        _fb_names, _fb_titles = _extract_emp_names_titles(profile.get('past_employers'))
+        _emp_names = _fb_names
+        _emp_titles_from_emp = _emp_titles_from_emp or _fb_titles
+
+    _raw_all_titles = profile.get('all_titles') or []
+    _titles_list = [str(x) for x in _raw_all_titles if x] if _raw_all_titles else _emp_titles_from_emp
+
+    all_employers_str = ', '.join(_emp_names)
+    all_titles_str = ', '.join(_titles_list)
+    all_schools_str = ', '.join(_extract_school_names(profile.get('all_schools')) or
+                                _extract_school_names(profile.get('education_background')))
 
     # Connections
     connections_count = profile.get('num_of_connections') or profile.get('connections_count')

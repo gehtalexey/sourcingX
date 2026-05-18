@@ -5457,6 +5457,33 @@ with tab_search:
                         st.session_state['crustdata_search_total'] = total_count
                         st.session_state['crustdata_search_credits_used'] = total_credits
                         st.session_state['crustdata_search_selected'] = list(range(loaded_count))
+                        # Persist effective filter values so Load More uses the same payload
+                        st.session_state['_last_search_params'] = {
+                            'title': effective_title,
+                            'company': effective_company,
+                            'location': effective_location,
+                            'seniority': search_seniority,
+                            'headcount': search_headcount,
+                            'experience_min': search_exp_min if search_exp_min > 0 else None,
+                            'experience_max': search_exp_max if search_exp_max > 0 else None,
+                            'skill_groups': skill_groups if skill_groups else None,
+                            'keywords': effective_keywords,
+                            'past_companies': effective_past_companies,
+                            'past_titles': effective_past_titles,
+                            'school': effective_school,
+                            'recently_changed_jobs': search_recently_changed if search_recently_changed else None,
+                            'has_verified_email': search_has_email if search_has_email else None,
+                            'function_categories': search_function if search_function else None,
+                            'industries': search_industry if search_industry else None,
+                            'country': search_country if search_country else None,
+                            'continent': search_continent if search_continent else None,
+                            'geo_city': search_geo_city if search_geo_city else None,
+                            'geo_radius_km': int(search_geo_radius) if search_geo_radius > 0 else None,
+                            'min_connections': int(search_min_connections) if search_min_connections > 0 else None,
+                            'exact_company': search_exact_company,
+                            'limit': search_limit,
+                            'sorts': search_sorts,
+                        }
                         # Defer DB save to after rerun so results render immediately
                         st.session_state['_pending_initial_save'] = True
                         st.session_state['_search_loaded_msg'] = f"Loaded **{loaded_count:,}** profiles (of {total_count:,} total matching)"
@@ -5673,9 +5700,10 @@ with tab_search:
                         normalized_df = normalize_search_results_to_df(selected_profiles)
 
                         if not normalized_df.empty:
-                            # Set session state for Filter tab
+                            clear_results_derived_state(st.session_state)
                             st.session_state['results_df'] = normalized_df
                             st.session_state['original_results_df'] = normalized_df.copy()
+                            st.session_state['enriched_df'] = normalized_df.copy()
                             st.session_state['_data_source'] = 'crustdata_search'
 
                             st.success(f"Sent **{len(normalized_df)}** profiles to Filter tab!")
@@ -5690,53 +5718,39 @@ with tab_search:
                     if st.button("Load More", use_container_width=True, key="crust_load_more"):
                         with st.spinner("Loading more results..."):
                             try:
-                                # Reconstruct skill_groups from session state
-                                load_more_skill_groups = []
-                                for i in range(st.session_state.get('crust_skill_groups_count', 2)):
-                                    group_val = st.session_state.get(f'crust_skill_group_{i}', '')
-                                    if group_val and group_val.strip():
-                                        load_more_skill_groups.append(group_val.strip())
-
-                                _lm_sort_raw = st.session_state.get('crust_search_sort', 'Connections (most first)')
-                                _lm_sort_map = {
-                                    "Connections (most first)": [{"column": "num_of_connections", "order": "desc"}],
-                                    "Experience (most first)": [{"column": "years_of_experience_raw", "order": "desc"}],
-                                    "No sort": None,
-                                }
-                                _lm_geo_city = st.session_state.get('crust_search_geo_city', '') or None
-                                _lm_geo_radius = st.session_state.get('crust_search_geo_radius', 0) or 0
-                                _lm_min_conn = st.session_state.get('crust_search_min_connections', 0) or 0
-
+                                # Use persisted effective params from initial search so pagination
+                                # uses the same filters including AI-expanded values, not raw widgets.
+                                _lm_p = st.session_state.get('_last_search_params', {})
                                 filters = build_search_filters(
-                                    title=st.session_state.get('crust_search_title'),
-                                    company=st.session_state.get('crust_search_company'),
-                                    location=st.session_state.get('crust_search_location'),
-                                    seniority=st.session_state.get('crust_search_seniority'),
-                                    headcount=st.session_state.get('crust_search_headcount'),
-                                    experience_min=st.session_state.get('crust_search_exp_min', 0) or None,
-                                    experience_max=st.session_state.get('crust_search_exp_max', 0) or None,
-                                    skill_groups=load_more_skill_groups if load_more_skill_groups else None,
-                                    keywords=st.session_state.get('crust_search_keywords'),
-                                    past_companies=st.session_state.get('crust_search_past_companies'),
-                                    past_titles=st.session_state.get('crust_search_past_titles'),
-                                    school=st.session_state.get('crust_search_school'),
-                                    recently_changed_jobs=st.session_state.get('crust_search_recently_changed'),
-                                    has_verified_email=st.session_state.get('crust_search_has_email'),
-                                    function_categories=st.session_state.get('crust_search_function') or None,
-                                    industries=st.session_state.get('crust_search_industry') or None,
-                                    country=st.session_state.get('crust_search_country') or None,
-                                    continent=st.session_state.get('crust_search_continent') or None,
-                                    geo_city=_lm_geo_city,
-                                    geo_radius_km=int(_lm_geo_radius) if _lm_geo_radius > 0 else None,
-                                    min_connections=int(_lm_min_conn) if _lm_min_conn > 0 else None,
-                                    exact_company=bool(st.session_state.get('crust_search_exact_company', False)),
+                                    title=_lm_p.get('title'),
+                                    company=_lm_p.get('company'),
+                                    location=_lm_p.get('location'),
+                                    seniority=_lm_p.get('seniority'),
+                                    headcount=_lm_p.get('headcount'),
+                                    experience_min=_lm_p.get('experience_min'),
+                                    experience_max=_lm_p.get('experience_max'),
+                                    skill_groups=_lm_p.get('skill_groups'),
+                                    keywords=_lm_p.get('keywords'),
+                                    past_companies=_lm_p.get('past_companies'),
+                                    past_titles=_lm_p.get('past_titles'),
+                                    school=_lm_p.get('school'),
+                                    recently_changed_jobs=_lm_p.get('recently_changed_jobs'),
+                                    has_verified_email=_lm_p.get('has_verified_email'),
+                                    function_categories=_lm_p.get('function_categories'),
+                                    industries=_lm_p.get('industries'),
+                                    country=_lm_p.get('country'),
+                                    continent=_lm_p.get('continent'),
+                                    geo_city=_lm_p.get('geo_city'),
+                                    geo_radius_km=_lm_p.get('geo_radius_km'),
+                                    min_connections=_lm_p.get('min_connections'),
+                                    exact_company=_lm_p.get('exact_company', False),
                                 )
 
                                 more_results = search_people_db(
                                     filters,
-                                    limit=st.session_state.get('crust_search_limit', 100),
+                                    limit=_lm_p.get('limit', 100),
                                     cursor=cursor,
-                                    sorts=_lm_sort_map.get(_lm_sort_raw),
+                                    sorts=_lm_p.get('sorts'),
                                     api_key=api_key
                                 )
 

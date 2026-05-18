@@ -55,6 +55,10 @@ from company_matching import (
 from screening_policy import (
     get_system_prompt as _policy_system_prompt,
     build_user_prompt as _policy_user_prompt,
+    get_structured_system_prompt as _structured_system_prompt,
+    build_structured_user_prompt as _structured_user_prompt,
+    build_nice_to_have_prompt as _nice_to_have_prompt,
+    NICE_TO_HAVE_SYSTEM_PROMPT as _NICE_TO_HAVE_SYSTEM,
 )
 
 
@@ -4342,46 +4346,130 @@ def _extract_json_from_text(text):
     return text
 
 
-MAYBE_SCORE_THRESHOLD = 6
+GO_CONFIDENCE_THRESHOLD = 7  # GO-decision at/above this score = confident GO; below = Maybe
 
 
 def _decision_to_fit_label(decision: str, score: int) -> str:
-    """Map unified-policy {decision, score} to recruiter-facing buckets.
-    GO → Good Fit; NO GO with score ≥ MAYBE_SCORE_THRESHOLD → Maybe
-    (borderline — worth a human glance); otherwise Not a Fit."""
+    """Map a screening {decision, score} to one recruiter-facing bucket.
+
+    The decision is structural — a NO GO means a must-have failed or an
+    exclusion matched. The score then splits the GO-decisions into confident
+    GOs vs. fence-sitters worth a human glance:
+      - NO GO decision           → "Not a Fit"  (skip)
+      - GO decision, score >= 7  → "Good Fit"   (act — confident GO)
+      - GO decision, score <= 6  → "Maybe"      (glance — cleared the bar, low confidence)
+
+    A failed must-have can never be a "Maybe": if the decision is NO GO the
+    bucket is "Not a Fit" regardless of score. The internal label strings
+    ("Good Fit"/"Maybe"/"Not a Fit") are unchanged so existing filters keep
+    working; the recruiter-facing display maps them to GO/MAYBE/NO GO."""
     is_go = str(decision).upper().strip() == "GO"
-    if is_go:
-        return "Good Fit"
+    if not is_go:
+        return "Not a Fit"
     try:
         s = int(score or 0)
     except (TypeError, ValueError):
         s = 0
-    if s >= MAYBE_SCORE_THRESHOLD:
-        return "Maybe"
-    return "Not a Fit"
+    return "Good Fit" if s >= GO_CONFIDENCE_THRESHOLD else "Maybe"
 
 
 _DEFAULT_USER_REQUEST = "Senior software engineering candidate. Apply the standard policy."
 
 
+def _screening_api_call(client, ai_provider, ai_model, system_prompt, user_prompt,
+                        max_tokens, tracker, start_time, profiles_screened=1):
+    """One screening AI call. Handles OpenAI and Anthropic (Anthropic gets
+    prompt caching on the system prompt + 429 retry with exponential backoff).
+    Returns the parsed JSON dict; raises on failure.
+
+    Pass profiles_screened=0 for a secondary call on the same profile (e.g. the
+    nice-to-have bonus pass) so the profile isn't double-counted in usage stats
+    while its tokens are still logged for cost tracking.
+    """
+    if ai_provider == "anthropic":
+        # System prompt is identical for every profile in a run, so caching it
+        # cuts cost dramatically for all calls after the first.
+        _anthropic_delay = 2
+        for _attempt in range(3):
+            try:
+                response = client.messages.create(
+                    model=ai_model,
+                    max_tokens=max(max_tokens, 400),
+                    system=[{
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                    messages=[{"role": "user", "content": user_prompt}],
+                    temperature=0.3,
+                )
+                break  # success
+            except Exception as _e:
+                if '429' in str(_e) and _attempt < 2:
+                    time.sleep(_anthropic_delay)
+                    _anthropic_delay *= 2  # 2s → 4s → give up
+                else:
+                    raise
+        if tracker and hasattr(response, 'usage') and response.usage:
+            usage = response.usage
+            tracker.log_openai(
+                tokens_input=usage.input_tokens,  # Anthropic bills net of cache
+                tokens_output=usage.output_tokens,
+                model=ai_model,
+                profiles_screened=profiles_screened,
+                status='success',
+                response_time_ms=int((time.time() - start_time) * 1000),
+            )
+        return json.loads(_extract_json_from_text(response.content[0].text))
+
+    # OpenAI
+    response = client.chat.completions.create(
+        model=ai_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+        max_tokens=max_tokens,
+        response_format={"type": "json_object"},
+    )
+    if tracker and hasattr(response, 'usage') and response.usage:
+        tracker.log_openai(
+            tokens_input=response.usage.prompt_tokens,
+            tokens_output=response.usage.completion_tokens,
+            model=ai_model,
+            profiles_screened=profiles_screened,
+            status='success',
+            response_time_ms=int((time.time() - start_time) * 1000),
+        )
+    return json.loads(_extract_json_from_text(response.choices[0].message.content))
+
+
 def screen_profile(profile: dict, job_description: str, client,
                    tracker: 'UsageTracker' = None, mode: str = "detailed",
-                   ai_model: str = "gpt-4o-mini",
-                   ai_provider: str = "openai", user_request: str = None) -> dict:
-    """Screen a profile against a job description using OpenAI or Anthropic.
+                   ai_model: str = "gpt-4.1-mini",
+                   ai_provider: str = "openai", user_request: str = None,
+                   screening_brief: dict = None) -> dict:
+    """Screen a profile against a job's requirements using OpenAI or Anthropic.
 
     Args:
         profile: Profile dict (must have raw_crustdata or raw_data for best results)
-        job_description: The job requirements to screen against
+        job_description: Legacy freeform job requirements text
         client: OpenAI or Anthropic client instance
         tracker: Optional usage tracker
         mode: "quick" for cheaper/faster or "detailed" for full analysis
-        ai_model: Model to use (e.g. gpt-4o-mini, claude-haiku-4-5-20251001)
+        ai_model: Model to use (e.g. gpt-4.1-mini, claude-haiku-4-5-20251001)
         ai_provider: "openai" or "anthropic"
-        user_request: Recruiter request text (role, must-haves, exclusions).
-            If empty/None, a sensible default is used. This always routes
-            through the unified ``screening_policy`` rubric — there is no
-            longer a role-specific or legacy SCREENING_PROMPT branch.
+        user_request: Legacy freeform recruiter request text. Used only when
+            ``screening_brief`` is not supplied.
+        screening_brief: Structured brief dict with keys:
+            ``role_context`` (str), ``must_haves`` (list[str]),
+            ``nice_to_haves`` (list[str]), ``exclusions`` (list[str]).
+            When provided, screening uses the structured per-criterion path:
+            a screening call that returns an explicit verdict on each must-have
+            and exclusion, plus a SEPARATE nice-to-have bonus pass (so a
+            nice-to-have can never cause a NO GO). When None, falls back to the
+            legacy freeform path for non-UI callers.
     """
     start_time = time.time()
 
@@ -4416,102 +4504,82 @@ def screen_profile(profile: dict, job_description: str, client,
     durations_text = compute_role_durations_cached(raw)
     trimmed_raw = trim_raw_profile(raw)
 
-    # Single prompt path: unified screening_policy.py rubric.
-    # When user_request is empty (legacy callers or admin Test Single button),
-    # fall back to a sensible default so the policy still applies.
-    effective_user_request = user_request or job_description or _DEFAULT_USER_REQUEST
-    system_prompt = _policy_system_prompt()
-    user_prompt = _policy_user_prompt(effective_user_request, durations_text, trimmed_raw)
-    max_tokens = 400  # room for decision + score + reasoning
-
     try:
-        if ai_provider == "anthropic":
-            # Anthropic API: system prompt as list with cache_control for prompt caching.
-            # The system prompt (~2,300 tokens) is identical for every profile in a run,
-            # so caching it cuts cost from $0.80/1M → $0.08/1M for all calls after the first.
-            # Requires model support + prompt must be >1024 tokens (ours is ~2,300).
-            # Retry up to 3 times on 429 rate limit with exponential backoff.
-            _anthropic_delay = 2
-            for _attempt in range(3):
-                try:
-                    response = client.messages.create(
-                        model=ai_model,
-                        max_tokens=max(max_tokens, 400),  # Ensure enough tokens for Haiku's JSON response
-                        system=[{
-                            "type": "text",
-                            "text": system_prompt,
-                            "cache_control": {"type": "ephemeral"}
-                        }],
-                        messages=[{"role": "user", "content": user_prompt}],
-                        temperature=0.3
-                    )
-                    break  # success
-                except Exception as _e:
-                    if '429' in str(_e) and _attempt < 2:
-                        time.sleep(_anthropic_delay)
-                        _anthropic_delay *= 2  # 2s → 4s → give up
-                    else:
-                        raise
-            elapsed_ms = int((time.time() - start_time) * 1000)
+        if screening_brief:
+            # ---- Structured per-criterion path ----
+            role_context = screening_brief.get("role_context", "") or ""
+            must_haves = screening_brief.get("must_haves", []) or []
+            nice_to_haves = screening_brief.get("nice_to_haves", []) or []
+            exclusions = screening_brief.get("exclusions", []) or []
 
-            # Log usage (include cache read/write tokens for cost tracking)
-            if tracker and hasattr(response, 'usage') and response.usage:
-                usage = response.usage
-                cache_read   = getattr(usage, 'cache_read_input_tokens', 0) or 0
-                cache_write  = getattr(usage, 'cache_creation_input_tokens', 0) or 0
-                billed_input = usage.input_tokens  # Anthropic bills input_tokens net of cache savings
-                tracker.log_openai(
-                    tokens_input=billed_input,
-                    tokens_output=usage.output_tokens,
-                    model=ai_model,
-                    profiles_screened=1,
-                    status='success',
-                    response_time_ms=elapsed_ms
-                )
-
-            raw_text = response.content[0].text
-            json_text = _extract_json_from_text(raw_text)
-            result = json.loads(json_text)
-        else:
-            # OpenAI API
-            response = client.chat.completions.create(
-                model=ai_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.3,
-                max_tokens=max_tokens,
-                response_format={"type": "json_object"}
+            # Screening call: per-criterion verdicts + decision + score.
+            scr = _screening_api_call(
+                client, ai_provider, ai_model,
+                _structured_system_prompt(),
+                _structured_user_prompt(role_context, must_haves, exclusions,
+                                        durations_text, trimmed_raw),
+                max_tokens=800, tracker=tracker, start_time=start_time,
+                profiles_screened=1,
             )
-            elapsed_ms = int((time.time() - start_time) * 1000)
 
-            # Log usage
-            if tracker and hasattr(response, 'usage') and response.usage:
-                tracker.log_openai(
-                    tokens_input=response.usage.prompt_tokens,
-                    tokens_output=response.usage.completion_tokens,
-                    model=ai_model,
-                    profiles_screened=1,
-                    status='success',
-                    response_time_ms=elapsed_ms
-                )
+            # Separate nice-to-have bonus pass — isolated so any failure here
+            # cannot affect the GO/NO GO result already stored in `scr`.
+            bonus_tags = []
+            if any(str(n).strip() for n in nice_to_haves):
+                try:
+                    nice = _screening_api_call(
+                        client, ai_provider, ai_model,
+                        _NICE_TO_HAVE_SYSTEM,
+                        _nice_to_have_prompt(nice_to_haves, trimmed_raw),
+                        max_tokens=400, tracker=tracker, start_time=start_time,
+                        profiles_screened=0,  # same profile — don't double-count
+                    )
+                    bonus_tags = [
+                        str(n.get("text", "")).strip()
+                        for n in nice.get("nice_to_haves", [])
+                        if n.get("met") is True and str(n.get("text", "")).strip()
+                    ]
+                except Exception:
+                    bonus_tags = []  # bonus pass failed — preserve main result
 
-            result = json.loads(response.choices[0].message.content)
-
-        # Unified policy returns {decision, score, reasoning}.
-        # Map to legacy {score, fit, summary} so downstream UI keeps working,
-        # and keep the raw decision/reasoning fields for the new display.
-        decision = str(result.get("decision", "NO GO")).upper().strip()
-        score = int(result.get("score", 0) or 0)
-        reasoning = str(result.get("reasoning", "") or "")
-        result = {
-            "score": score,
-            "fit": _decision_to_fit_label(decision, score),
-            "summary": reasoning,
-            "decision": decision,
-            "reasoning": reasoning,
-        }
+            decision = str(scr.get("decision", "NO GO")).upper().strip()
+            score = int(scr.get("score", 0) or 0)
+            reasoning = str(scr.get("reasoning", "") or "")
+            result = {
+                "score": score,
+                "fit": _decision_to_fit_label(decision, score),
+                "summary": reasoning,
+                "decision": decision,
+                "reasoning": reasoning,
+                "must_have_verdicts": scr.get("must_haves", []),
+                "exclusion_verdicts": scr.get("exclusions", []),
+                "bonus_tags": bonus_tags,
+            }
+            constraint_text = "\n".join(
+                [str(m) for m in must_haves] + [str(e) for e in exclusions]
+            )
+        else:
+            # ---- Legacy freeform path (non-UI callers) ----
+            effective_user_request = user_request or job_description or _DEFAULT_USER_REQUEST
+            result = _screening_api_call(
+                client, ai_provider, ai_model,
+                _policy_system_prompt(),
+                _policy_user_prompt(effective_user_request, durations_text, trimmed_raw),
+                max_tokens=400, tracker=tracker, start_time=start_time,
+            )
+            decision = str(result.get("decision", "NO GO")).upper().strip()
+            score = int(result.get("score", 0) or 0)
+            reasoning = str(result.get("reasoning", "") or "")
+            result = {
+                "score": score,
+                "fit": _decision_to_fit_label(decision, score),
+                "summary": reasoning,
+                "decision": decision,
+                "reasoning": reasoning,
+            }
+            constraint_text = "\n".join(
+                t for t in (user_request, job_description) if t
+            )
 
         # Deterministic post-screening: tenure hard-constraint override.
         # Strengthening the prompt is not enough — the model can still trade
@@ -4520,8 +4588,6 @@ def screen_profile(profile: dict, job_description: str, client,
         # See tenure_constraint_validator.py (Issue 7, Chen).
         try:
             from tenure_constraint_validator import enforce_tenure_constraint
-            constraint_text_parts = [t for t in (user_request, job_description) if t]
-            constraint_text = "\n".join(constraint_text_parts)
             result = enforce_tenure_constraint(result, constraint_text, raw)
         except Exception:
             # Validator must NEVER crash screening. On any error, fall
@@ -4657,9 +4723,9 @@ def fetch_raw_data_for_batch(profiles: list, raw_index: dict = None, db_client =
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
                           max_workers: int = 15,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
-                          ai_model: str = "gpt-4o-mini",
+                          ai_model: str = "gpt-4.1-mini",
                           ai_provider: str = "openai", api_key: str = None,
-                          user_request: str = None) -> list:
+                          user_request: str = None, screening_brief: dict = None) -> list:
     """Screen multiple profiles in parallel using ThreadPoolExecutor.
 
     Args:
@@ -4673,7 +4739,10 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
         ai_model: Model to use
         ai_provider: "openai" or "anthropic"
         api_key: API key for the selected provider (overrides openai_api_key)
-        user_request: Recruiter request text routed to ``screen_profile``.
+        user_request: Legacy freeform recruiter request text routed to ``screen_profile``.
+        screening_brief: Structured brief dict (role_context / must_haves /
+            nice_to_haves / exclusions). When provided, every profile is screened
+            via the structured per-criterion path. See ``screen_profile``.
 
     Returns:
         List of screening results with profile info included
@@ -4711,7 +4780,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                     if cancel_flag and cancel_flag.get('cancelled'):
                         return None
 
-                    result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, ai_provider=ai_provider, user_request=user_request)
+                    result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, ai_provider=ai_provider, user_request=user_request, screening_brief=screening_brief)
                     break  # Success, exit retry loop
 
                 except Exception as e:
@@ -8691,22 +8760,60 @@ with tab_screening:
 
         num_profiles = len(profiles_df)
 
-        # ===== STEP 1: Role + requirements (single textbox, unified policy) =====
-        # Regular users only see this field. Their text becomes $ARGUMENTS for
-        # the unified screening_policy.py rubric — no role dropdown, no JD split.
-        # Admins additionally see the legacy role dropdown below (expander).
-        st.markdown("### 1. Role, must-haves, exclusions")
-        st.caption("Describe the role you're screening for: title, must-haves, nice-to-haves, and any exclusions. This is the only input — the screening rubric is the same for every role.")
-        job_description = st.text_area(
-            "Role, must-haves, exclusions",
-            height=220,
-            key="jd_screening",
-            placeholder="Example: Senior Backend Engineer, Node.js + Postgres, 5+ years at a product startup. Must have: production API ownership, microservices. Exclude: team leads without recent hands-on, >8 years at a single non-progressing role..."
+        # ===== STEP 1: Structured screening criteria =====
+        # Four labelled fields instead of one freeform box. The recruiter fills
+        # the boxes directly — no prompt-engineering skill needed, and the AI
+        # never has to guess what's a must-have vs a nice-to-have vs an
+        # exclusion. The screening_brief dict flows through screen_profile /
+        # screen_profiles_batch to the structured per-criterion path.
+        st.markdown("### 1. Screening criteria")
+        st.caption("Fill the boxes the way you'd brief a colleague. Must-haves are dealbreakers (all required); nice-to-haves appear as informational bonus tags (they cannot cause a rejection); exclusions are instant disqualifiers. One item per line.")
+
+        role_context = st.text_input(
+            "Role & context",
+            key="screen_role_context",
+            placeholder="e.g. Senior Backend Engineer for an early-stage fintech startup in Tel Aviv",
+        )
+        _col_mh, _col_nh = st.columns(2)
+        with _col_mh:
+            must_haves_text = st.text_area(
+                "Must-haves — all required (one per line)",
+                height=160,
+                key="screen_must_haves",
+                placeholder="5+ years of backend engineering experience\nStrong Python or Node.js\nWorked at a startup or product company",
+            )
+        with _col_nh:
+            nice_to_haves_text = st.text_area(
+                "Nice-to-haves — bonus only (one per line)",
+                height=160,
+                key="screen_nice_to_haves",
+                placeholder="Microservices / REST API experience\nDocker and Kubernetes\nFintech or payments background",
+            )
+        exclusions_text = st.text_area(
+            "Exclusions / deal-breakers (one per line)",
+            height=90,
+            key="screen_exclusions",
+            placeholder="Pure team leads / managers, not hands-on recently\nCurrently at a large enterprise with no startup background",
         )
 
-        # Single screening path: the unified screening_policy rubric is used
-        # for every run. The legacy admin role-prompt dropdown was removed
-        # — every recruiter, admin or not, now goes through one prompt path.
+        def _brief_lines(txt):
+            return [ln.strip() for ln in (txt or "").splitlines() if ln.strip()]
+
+        screening_brief = {
+            "role_context": (role_context or "").strip(),
+            "must_haves": _brief_lines(must_haves_text),
+            "nice_to_haves": _brief_lines(nice_to_haves_text),
+            "exclusions": _brief_lines(exclusions_text),
+        }
+        # Freeform rendering kept for display, jd hashing, and legacy callers.
+        job_description = "\n".join(p for p in [
+            f"Role: {screening_brief['role_context']}" if screening_brief['role_context'] else "",
+            ("Must-haves:\n" + "\n".join(f"- {m}" for m in screening_brief['must_haves'])) if screening_brief['must_haves'] else "",
+            ("Nice-to-haves:\n" + "\n".join(f"- {n}" for n in screening_brief['nice_to_haves'])) if screening_brief['nice_to_haves'] else "",
+            ("Exclusions:\n" + "\n".join(f"- {e}" for e in screening_brief['exclusions'])) if screening_brief['exclusions'] else "",
+        ] if p)
+        # Ready to screen once there's a role or at least one must-have.
+        has_screening_input = bool(screening_brief['role_context'] or screening_brief['must_haves'])
 
         # Screening Configuration
         screen_count = st.number_input(
@@ -8718,16 +8825,16 @@ with tab_screening:
             key="screen_count"
         )
 
-        # Fixed settings - gpt-4o-mini detailed mode (best cost/quality)
+        # Fixed settings - gpt-4.1-mini detailed mode (stronger instruction-following)
         screening_mode = "Detailed"
-        ai_model = "gpt-4o-mini"
+        ai_model = "gpt-4.1-mini"
         ai_provider = "openai"
-        model_input_cost = 0.15   # $0.15/1M input tokens
-        model_output_cost = 0.60  # $0.60/1M output tokens
+        model_input_cost = 0.40   # $0.40/1M input tokens
+        model_output_cost = 1.60  # $1.60/1M output tokens
         output_tokens = 150
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
-        st.info(f"Rubric: **Unified policy** | Model: **gpt-4o-mini** | Est. cost: **${est_cost:.3f}**")
+        st.info(f"Rubric: **Unified policy** | Model: **gpt-4.1-mini** | Est. cost: **${est_cost:.3f}**")
 
         # Debug: Show available fields and test single profile (admin-only)
         if is_admin_user():
@@ -8737,21 +8844,21 @@ with tab_screening:
                     sample = {k: str(v)[:100] for k, v in profiles_df.iloc[0].to_dict().items()}
                     st.write("Sample profile:", sample)
 
-                    if job_description and st.button("Test Single Profile", key="test_single"):
+                    if has_screening_input and st.button("Test Single Profile", key="test_single"):
                         try:
                             if ai_provider == "anthropic":
                                 client = anthropic.Anthropic(api_key=anthropic_key)
                             else:
                                 client = OpenAI(api_key=openai_key)
                             test_mode = 'detailed'
-                            st.write(f"Testing with first profile ({test_mode} mode, unified policy, model: {ai_model})...")
+                            st.write(f"Testing with first profile ({test_mode} mode, structured per-criterion path, model: {ai_model})...")
                             test_profile = profiles_df.iloc[0].to_dict()
                             # Clean NaN
                             import math
                             for k, v in test_profile.items():
                                 if isinstance(v, float) and math.isnan(v):
                                     test_profile[k] = ''
-                            result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, ai_provider=ai_provider, user_request=job_description)
+                            result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, ai_provider=ai_provider, screening_brief=screening_brief)
                             st.write("Result:", result)
                         except Exception as e:
                             import traceback
@@ -8759,7 +8866,7 @@ with tab_screening:
                             st.code(traceback.format_exc())
 
         # Screen Button
-        if job_description:
+        if has_screening_input:
             # Initialize cancel flag in session state
             if 'screening_cancel_flag' not in st.session_state:
                 st.session_state['screening_cancel_flag'] = {'cancelled': False}
@@ -8921,7 +9028,7 @@ with tab_screening:
                 profiles_to_screen = batch_state.get('profiles', [])
                 job_desc = batch_state.get('job_description', '')
                 screen_mode = batch_state.get('mode', 'detailed')
-                batch_ai_model = batch_state.get('ai_model', 'gpt-4o-mini')
+                batch_ai_model = batch_state.get('ai_model', 'gpt-4.1-mini')
                 batch_ai_provider = batch_state.get('ai_provider', 'openai')
                 batch_api_key = batch_state.get('api_key', openai_key)
                 max_workers = batch_state.get('max_workers', 10)  # Reduced from 15 to avoid rate limits
@@ -8931,6 +9038,7 @@ with tab_screening:
                 elif batch_ai_provider == "openai":
                     max_workers = min(max_workers, 10)  # Cap OpenAI at 10 concurrent
                 batch_user_request = batch_state.get('user_request')
+                batch_screening_brief = batch_state.get('screening_brief')
                 batch_size = 50  # Tier 3: 50 parallel requests, 50 × 15KB = ~750KB memory
                 current_batch = batch_state.get('current_batch', 0)
                 all_results = batch_state.get('results', [])
@@ -8994,8 +9102,9 @@ with tab_screening:
                                     batch_progress['partial'] += 1
 
                         # Screen this batch - use dynamic workers (scales with concurrent users).
-                        # Every batch goes through the unified screening_policy rubric;
-                        # ``user_request`` carries the recruiter's text.
+                        # When a structured brief is present every profile goes
+                        # through the structured per-criterion path; otherwise the
+                        # legacy freeform ``user_request`` path is used.
                         batch_results = screen_profiles_batch(
                             batch_profiles,
                             job_desc,
@@ -9006,7 +9115,8 @@ with tab_screening:
                             progress_callback=_on_profile_screened,
                             ai_provider=batch_ai_provider,
                             api_key=batch_api_key,
-                            user_request=batch_user_request
+                            user_request=batch_user_request,
+                            screening_brief=batch_screening_brief
                         )
                         all_results.extend(batch_results)
 
@@ -9206,7 +9316,8 @@ with tab_screening:
                     'ai_model': ai_model,
                     'ai_provider': ai_provider,
                     'api_key': anthropic_key if ai_provider == "anthropic" else openai_key,
-                    'user_request': job_description,  # Unified policy path (single source of truth)
+                    'user_request': job_description,  # Legacy freeform fallback
+                    'screening_brief': screening_brief,  # Structured per-criterion path
                     'current_batch': 0,
                     'results': initial_results,  # Start with existing results if re-screening selected
                     'is_continue': False,  # Always fresh screening
@@ -9237,7 +9348,7 @@ with tab_screening:
             not_fit = sum(1 for r in screening_results if r.get('fit') == 'Not a Fit')
 
             stats_col1.metric("GO", good_fit, delta=None)
-            stats_col2.metric("Maybe", maybe_fit, delta=None)
+            stats_col2.metric("MAYBE", maybe_fit, delta=None)
             stats_col3.metric("NO GO", not_fit, delta=None)
 
             # Filter by fit level
@@ -9310,7 +9421,7 @@ with tab_screening:
                         )
 
                 # Reorder columns to put important ones first (linkedin_url next to name for easy click)
-                priority_cols = ['score', 'decision', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
+                priority_cols = ['score', 'fit', 'name', 'linkedin_url', 'current_title', 'current_company', 'summary', 'skills', 'all_employers', 'all_titles', 'all_schools', 'location']
                 ordered_cols = [c for c in priority_cols if c in df_display.columns]
                 other_cols = [c for c in df_display.columns if c not in priority_cols and c != 'index']
                 df_display = df_display[ordered_cols + other_cols]
@@ -9328,16 +9439,45 @@ with tab_screening:
                 st.caption(f"Showing {len(df_display.columns)} columns")
             else:
                 # Show summary view
+                def _format_criteria_summary(r):
+                    """Compact per-criterion breakdown for the results table.
+                    Structured-path results carry must_have_verdicts /
+                    exclusion_verdicts; legacy results don't (return '')."""
+                    mh = r.get('must_have_verdicts') or []
+                    ex = r.get('exclusion_verdicts') or []
+                    if not mh and not ex:
+                        return ''
+                    parts = []
+                    if mh:
+                        met = sum(1 for m in mh if m.get('met') is True)
+                        parts.append(f"Must-haves {met}/{len(mh)}")
+                        missing = [str(m.get('text', ''))[:32]
+                                   for m in mh if m.get('met') is not True]
+                        if missing:
+                            parts.append("missing: " + "; ".join(missing))
+                    matched = [str(e.get('text', ''))[:32]
+                               for e in ex if e.get('matched') is True]
+                    if matched:
+                        parts.append("EXCLUDED: " + "; ".join(matched))
+                    elif ex:
+                        parts.append("exclusions clear")
+                    return " · ".join(parts)
+
+                # One recruiter-facing verdict column (GO / MAYBE / NO GO),
+                # not the old redundant Decision + Fit pair.
+                _verdict_label = {"Good Fit": "GO", "Maybe": "MAYBE", "Not a Fit": "NO GO"}
                 display_data = []
                 for r in sorted_results:
+                    fit_val = r.get('fit', '') or ''
                     display_data.append({
-                        'Decision': r.get('decision', '') or '',
+                        'Verdict': _verdict_label.get(fit_val, fit_val),  # Error/Skipped pass through
                         'Score': r.get('score', 0),
-                        'Fit': r.get('fit', ''),
                         'Name': r.get('name', '') or '',
                         'LinkedIn': r.get('linkedin_url', ''),
                         'Title': str(r.get('current_title', '') or '')[:40],
                         'Company': str(r.get('current_company', '') or '')[:30],
+                        'Why': _format_criteria_summary(r),
+                        'Bonus': ", ".join(r.get('bonus_tags') or []),
                         'Summary': str(r.get('summary', '') or '')[:100]
                     })
 
@@ -9348,13 +9488,14 @@ with tab_screening:
                     width="stretch",
                     hide_index=True,
                     column_config={
-                        "Decision": st.column_config.TextColumn("Decision", width="small", help="GO / NO GO (unified policy only)"),
+                        "Verdict": st.column_config.TextColumn("Verdict", width="small", help="GO = reach out · MAYBE = cleared every must-have but the AI scored it 5-6, worth a glance · NO GO = failed a must-have or hit an exclusion"),
                         "Score": st.column_config.NumberColumn("Score", format="%d/10", width="small"),
-                        "Fit": st.column_config.TextColumn("Fit", width="medium"),
                         "Name": st.column_config.TextColumn("Name", width="medium"),
                         "LinkedIn": st.column_config.LinkColumn("🔗", width="small", display_text="Open"),
                         "Title": st.column_config.TextColumn("Title", width="medium"),
-                        "Company": st.column_config.TextColumn("Company", width="medium"),
+                        "Company": st.column_config.TextColumn("Company", width="small"),
+                        "Why": st.column_config.TextColumn("Why", width="large", help="Per-criterion verdict: how many must-haves were met, which were missing, and whether any exclusion matched"),
+                        "Bonus": st.column_config.TextColumn("Bonus", width="medium", help="Nice-to-haves the candidate has (informational only — never affects the verdict)"),
                         "Summary": st.column_config.TextColumn("Summary", width="large")
                     }
                 )
@@ -11186,7 +11327,7 @@ with tab_usage:
                         st.metric(
                             "OpenAI",
                             f"${cost:.4f}",
-                            help="gpt-4o-mini: $0.15/1M input, $0.60/1M output"
+                            help="gpt-4.1-mini: $0.40/1M input, $1.60/1M output"
                         )
                         tokens_in = openai.get('tokens_input', 0)
                         tokens_out = openai.get('tokens_output', 0)

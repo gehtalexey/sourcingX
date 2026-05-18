@@ -18,8 +18,12 @@ CRUSTDATA_PRICING = {
     'credits_per_profile': 3,
 }
 
-# OpenAI pricing (per 1M tokens) - gpt-4o-mini
+# OpenAI pricing (per 1M tokens)
 OPENAI_PRICING = {
+    'gpt-4.1-mini': {
+        'input': 0.40,   # $0.40 per 1M input tokens
+        'output': 1.60,  # $1.60 per 1M output tokens
+    },
     'gpt-4o-mini': {
         'input': 0.15,   # $0.15 per 1M input tokens
         'output': 0.60,  # $0.60 per 1M output tokens

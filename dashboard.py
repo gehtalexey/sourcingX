@@ -5677,6 +5677,9 @@ with tab_search:
                             st.session_state['results_df'] = normalized_df
                             st.session_state['original_results_df'] = normalized_df.copy()
                             st.session_state['_data_source'] = 'crustdata_search'
+                            # Search results are complete (compact=false) — treat as enriched
+                            # so AI Screen can use them without a separate enrichment step.
+                            st.session_state['enriched_df'] = normalized_df.copy()
 
                             st.success(f"Sent **{len(normalized_df)}** profiles to Filter tab!")
                             st.info("Navigate to **1. Load** or **2. Filter** tab to continue processing.")
@@ -5921,6 +5924,7 @@ with tab_upload:
                     st.session_state['last_load_file'] = pre_enriched_file.name
                     st.session_state['last_load_mode'] = 'added'
                     st.session_state['last_load_total'] = len(combined_df)
+                    st.session_state['_data_source'] = 'csv'
 
                 def _reset_uploader():
                     st.session_state['pre_enriched_upload_nonce'] = _csv_uploader_nonce + 1

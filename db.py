@@ -632,6 +632,18 @@ def save_enriched_profiles_bulk(client: SupabaseClient, profiles: list,
     # Step 4: Batch upsert in chunks
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i+batch_size]
+        # PostgREST batch upsert requires every row in a batch to have the
+        # SAME set of keys (PGRST102 "All object keys must match"). Rows
+        # built by _prepare_profile_row strip None values, so different
+        # profiles end up with different key sets and the batch is rejected
+        # — forcing fallback to per-row saves, which is 100x slower. Pad
+        # each row to the union of keys across the batch (None for missing)
+        # so the batch path actually fires.
+        if batch:
+            all_keys = set()
+            for r in batch:
+                all_keys.update(r.keys())
+            batch = [{k: r.get(k) for k in all_keys} for r in batch]
         try:
             if has_original_urls_column:
                 client.upsert_batch('profiles', batch, on_conflict='linkedin_url')

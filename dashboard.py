@@ -4333,23 +4333,25 @@ def screen_profile(profile: dict, job_description: str, client,
                 profiles_screened=1,
             )
 
-            # Separate nice-to-have bonus pass — only when there are any to
-            # check. Nice-to-haves are NOT in the screening call above, so they
-            # cannot influence GO/NO GO; they only produce informational tags.
+            # Separate nice-to-have bonus pass — isolated so any failure here
+            # cannot affect the GO/NO GO result already stored in `scr`.
             bonus_tags = []
             if any(str(n).strip() for n in nice_to_haves):
-                nice = _screening_api_call(
-                    client, ai_provider, ai_model,
-                    _NICE_TO_HAVE_SYSTEM,
-                    _nice_to_have_prompt(nice_to_haves, trimmed_raw),
-                    max_tokens=400, tracker=tracker, start_time=start_time,
-                    profiles_screened=0,  # same profile — don't double-count
-                )
-                bonus_tags = [
-                    str(n.get("text", "")).strip()
-                    for n in nice.get("nice_to_haves", [])
-                    if n.get("met") is True and str(n.get("text", "")).strip()
-                ]
+                try:
+                    nice = _screening_api_call(
+                        client, ai_provider, ai_model,
+                        _NICE_TO_HAVE_SYSTEM,
+                        _nice_to_have_prompt(nice_to_haves, trimmed_raw),
+                        max_tokens=400, tracker=tracker, start_time=start_time,
+                        profiles_screened=0,  # same profile — don't double-count
+                    )
+                    bonus_tags = [
+                        str(n.get("text", "")).strip()
+                        for n in nice.get("nice_to_haves", [])
+                        if n.get("met") is True and str(n.get("text", "")).strip()
+                    ]
+                except Exception:
+                    bonus_tags = []  # bonus pass failed — preserve main result
 
             decision = str(scr.get("decision", "NO GO")).upper().strip()
             score = int(scr.get("score", 0) or 0)
@@ -9077,7 +9079,7 @@ with tab_screening:
         # exclusion. The screening_brief dict flows through screen_profile /
         # screen_profiles_batch to the structured per-criterion path.
         st.markdown("### 1. Screening criteria")
-        st.caption("Fill the boxes the way you'd brief a colleague. Must-haves are dealbreakers (all required); nice-to-haves only raise the score; exclusions are instant disqualifiers. One item per line.")
+        st.caption("Fill the boxes the way you'd brief a colleague. Must-haves are dealbreakers (all required); nice-to-haves appear as informational bonus tags (they cannot cause a rejection); exclusions are instant disqualifiers. One item per line.")
 
         role_context = st.text_input(
             "Role & context",

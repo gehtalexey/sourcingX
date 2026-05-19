@@ -5879,14 +5879,9 @@ with tab_search:
                 # Direct download button for selected profiles
                 if selected_indices:
                     selected_profiles = [results[i] for i in selected_indices]
-                    if show_all_cols:
-                        _export_cols = [c for c in display_df.columns if c not in ("Select", "idx")]
-                        export_data = display_df.iloc[selected_indices][_export_cols].to_csv(index=False).encode('utf-8-sig')
-                    else:
-                        export_df = normalize_search_results_to_df(selected_profiles)
-                        # Apply consistent column order and remove internal columns
-                        export_df = prepare_df_for_export(export_df)
-                        export_data = export_df.to_csv(index=False).encode('utf-8-sig')
+                    export_df = normalize_search_results_to_df(selected_profiles)
+                    export_df = prepare_df_for_export(export_df)
+                    export_data = export_df.to_csv(index=False).encode('utf-8-sig')
 
                     st.download_button(
                         f"Download CSV ({len(selected_indices)})",
@@ -10215,13 +10210,14 @@ with tab_emails:
                 with email_export_col1:
                     # Full export with all fields
                     export_df = pd.DataFrame(email_results)
-                    export_cols = ['first_name', 'last_name', 'name', 'email', 'linkedin_url',
-                                  'location', 'university', 'current_title', 'current_company',
-                                  'subject_line', 'email_opener', 'subject_angle', 'opener_angle']
-                    export_cols = [c for c in export_cols if c in export_df.columns]
+                    priority_email_cols = ['first_name', 'last_name', 'name', 'email', 'linkedin_url',
+                                          'location', 'university', 'current_title', 'current_company',
+                                          'subject_line', 'email_opener', 'subject_angle', 'opener_angle']
+                    ordered_cols = [c for c in priority_email_cols if c in export_df.columns]
+                    remaining_cols = [c for c in export_df.columns if c not in priority_email_cols and c != 'index']
                     st.download_button(
                         f"Export All ({len(email_results)})",
-                        export_df[export_cols].to_csv(index=False),
+                        export_df[ordered_cols + remaining_cols].to_csv(index=False),
                         "email_openers.csv",
                         "text/csv",
                         type="primary"
@@ -10232,9 +10228,11 @@ with tab_emails:
                     with_email = [r for r in email_results if r.get('email')]
                     if with_email:
                         email_export_df = pd.DataFrame(with_email)
+                        ordered_cols_email = [c for c in priority_email_cols if c in email_export_df.columns]
+                        remaining_cols_email = [c for c in email_export_df.columns if c not in priority_email_cols and c != 'index']
                         st.download_button(
                             f"With Email ({len(with_email)})",
-                            email_export_df[export_cols].to_csv(index=False),
+                            email_export_df[ordered_cols_email + remaining_cols_email].to_csv(index=False),
                             "email_openers_with_email.csv",
                             "text/csv"
                         )

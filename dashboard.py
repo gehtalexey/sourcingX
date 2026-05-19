@@ -6607,7 +6607,7 @@ with tab_upload:
                     try:
                         profiles = status_result.get('profiles_count', 0)
                         msg = f"Extracted {profiles} profiles" if profiles else "Ready to load results"
-                        st.toast(f"**PhantomBuster Finished** — {msg}", icon="✅")
+                        st.session_state['_pb_pending_toast'] = ("✅", f"**PhantomBuster Finished** — {msg}")
                         if HAS_PLYER:
                             notification.notify(
                                 title="PhantomBuster Finished",
@@ -6633,7 +6633,7 @@ with tab_upload:
                     # Desktop notification for error
                     try:
                         err_msg = status_result.get('exitMessage', 'Phantom failed')
-                        st.toast(f"**PhantomBuster Error** — {err_msg}", icon="❌")
+                        st.session_state['_pb_pending_toast'] = ("❌", f"**PhantomBuster Error** — {err_msg}")
                         if HAS_PLYER:
                             notification.notify(
                                 title="PhantomBuster Error",
@@ -6706,6 +6706,9 @@ with tab_upload:
             st.rerun()
 
         elif current_status == 'finished':
+            if '_pb_pending_toast' in st.session_state:
+                _icon, _tmsg = st.session_state.pop('_pb_pending_toast')
+                st.toast(_tmsg, icon=_icon)
             progress_info = st.session_state.get('pb_progress_info', {})
             profiles_count = progress_info.get('profiles_count', 0)
             csv_name = st.session_state.get('pb_launch_csv_name')
@@ -6760,6 +6763,9 @@ with tab_upload:
                         st.error("Could not load results.")
 
         elif current_status == 'error':
+            if '_pb_pending_toast' in st.session_state:
+                _icon, _tmsg = st.session_state.pop('_pb_pending_toast')
+                st.toast(_tmsg, icon=_icon)
             error_msg = st.session_state['pb_launch_error'] or 'Unknown error'
             st.error(f"Error: {error_msg}")
 

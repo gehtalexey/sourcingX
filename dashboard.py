@@ -7433,7 +7433,7 @@ with tab_filter:
         if passed_preview_df is not None and not passed_preview_df.empty:
             with st.expander(f"View Passed Candidates ({len(passed_preview_df)})", expanded=True):
                 # Determine display columns - include priority columns if they exist
-                preview_cols = ['name', 'current_title', 'current_company']
+                preview_cols = ['name', 'current_title', 'current_company', 'location']
                 # Add priority columns if present
                 for prio_col in ['is_target_company', 'is_layoff_company', 'is_client_wanted']:
                     if prio_col in passed_preview_df.columns:
@@ -7476,6 +7476,20 @@ with tab_filter:
                 )
                 if len(passed_preview_df) > 100:
                     st.caption(f"Showing first 100 of {len(passed_preview_df)} passed candidates")
+
+            # Export button always visible after filtering (outside expander)
+            _exp_col1, _exp_col2 = st.columns([1, 3])
+            with _exp_col1:
+                _export_filtered = prepare_df_for_export(passed_preview_df)
+                _csv_filtered = _export_filtered.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(
+                    f"Export Filtered ({len(passed_preview_df)}) CSV",
+                    _csv_filtered,
+                    f"filtered_candidates_{len(passed_preview_df)}.csv",
+                    "text/csv",
+                    key="filter_tab_export_filtered",
+                    type="primary"
+                )
 
     # Priority Lists Section (Step 2 - after filtering)
     st.divider()

@@ -7716,7 +7716,7 @@ with tab_filter:
                 enrich_df = view_df.copy()
                 st.session_state['results_df'] = enrich_df
                 st.session_state['passed_candidates_df'] = enrich_df
-                st.success(f"✓ {len(view_df)} profiles ready for enrichment. Go to **3. Enrich** tab.")
+                st.success(f"✓ {len(view_df)} profiles ready. Go to **3. AI Screen** tab.")
                 save_session_state()
 
     # Review filtered candidates section - MEMORY OPTIMIZED: only show counts
@@ -7795,7 +7795,7 @@ with tab_filter:
 
     # Next button
     st.divider()
-    st.info("**Next step:** Go back to **1. Load** tab to enrich profiles with Crustdata, or proceed to **3. AI Screen**")
+    st.info("**Next step:** Proceed to **3. AI Screen** to screen candidates with AI.")
 
 # ========== FILTER TAB: Advanced Filtering section (Post-Enrichment) ==========
 with tab_filter2:
@@ -8740,23 +8740,28 @@ with tab_screening:
     openai_key = load_openai_key()
     anthropic_key = load_anthropic_key()
 
-    # Check if data is enriched
+    # Resolve profiles: filtered > enriched > raw search results
     enriched_df = st.session_state.get('enriched_df')
-    is_enriched = enriched_df is not None and not enriched_df.empty
+    results_df = st.session_state.get('results_df')
+    profiles_df = None
 
     if not openai_key and not anthropic_key:
         st.warning("No AI API key configured. Add 'openai_api_key' or 'anthropic_api_key' to config.json")
-    elif not is_enriched:
-        st.warning("Profiles must be enriched before AI screening.")
-        st.info("Go to **1. Load** tab and use the Enrich section to pull full LinkedIn profile data, then come back here.")
     else:
-        # Use passed_candidates_df if available (filtered), otherwise use enriched_df
+        # Use passed_candidates_df if available (filtered), otherwise enriched, otherwise raw results
         if 'passed_candidates_df' in st.session_state and not st.session_state['passed_candidates_df'].empty:
             profiles_df = st.session_state['passed_candidates_df']
             st.success(f"**{len(profiles_df)}** filtered candidates ready for screening")
-        else:
+        elif enriched_df is not None and not enriched_df.empty:
             profiles_df = enriched_df
-            st.info(f"**{len(profiles_df)}** enriched profiles ready for screening")
+            st.info(f"**{len(profiles_df)}** profiles ready for screening")
+        elif results_df is not None and not results_df.empty:
+            profiles_df = results_df
+            st.info(f"**{len(profiles_df)}** profiles ready for screening")
+        else:
+            st.warning("No profiles loaded. Run a search or upload candidates first.")
+
+    if profiles_df is not None:
 
         num_profiles = len(profiles_df)
 
@@ -10958,8 +10963,7 @@ with tab_database:
                         )
                     else:
                         st.caption(
-                            "No profiles in the database yet. Enrich some profiles first "
-                            "via the Enrich tab."
+                            "No profiles in the database yet. Run a search or load profiles first."
                         )
                 else:
                     st.info("No profiles in database yet")

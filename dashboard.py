@@ -9648,15 +9648,14 @@ with tab_screening:
             # Export options
             st.markdown("### Export Results")
 
-            # Helper to prepare screening results for export with consistent columns
+            # Helper to prepare screening results for export — always all columns
             def prepare_screening_export(results_list):
-                """Prepare screening results for CSV export with consistent column order."""
+                """Prepare screening results for CSV export with all enriched profile columns."""
                 if not results_list:
                     return ""
                 df = pd.DataFrame(results_list)
 
-                # Populate missing fields from available data
-                # 1. Split name into first_name/last_name if missing
+                # Split name into first_name/last_name if missing
                 if 'first_name' not in df.columns:
                     df['first_name'] = ''
                 if 'last_name' not in df.columns:
@@ -9668,48 +9667,32 @@ with tab_screening:
                             df.at[idx, 'first_name'] = parts[0]
                             df.at[idx, 'last_name'] = parts[1] if len(parts) > 1 else ''
 
-                # 2. Try to get location/university from enriched profiles in session
-                enriched_raw = st.session_state.get('enriched_profiles_raw', {})
-                if 'location' not in df.columns:
-                    df['location'] = ''
-                if 'university' not in df.columns:
-                    df['university'] = ''
+                # Merge all enriched profile columns (skills, work history, location, etc.)
+                exclude_from_merge = {
+                    'score', 'fit', 'summary', 'screening_score', 'screening_fit_level',
+                    'screening_summary', 'screening_reasoning', 'screened_at',
+                    'screening_fit', 'screening_status', 'fit_level'
+                }
+                enriched_df_merge = st.session_state.get('enriched_df')
+                if enriched_df_merge is not None and not enriched_df_merge.empty and 'linkedin_url' in df.columns and 'linkedin_url' in enriched_df_merge.columns:
+                    merge_cols = [c for c in enriched_df_merge.columns
+                                  if c not in df.columns and c not in exclude_from_merge]
+                    if merge_cols:
+                        df = df.merge(
+                            enriched_df_merge[['linkedin_url'] + merge_cols],
+                            on='linkedin_url', how='left'
+                        )
 
-                for idx, row in df.iterrows():
-                    url = row.get('linkedin_url', '')
-                    if url and url in enriched_raw:
-                        raw = enriched_raw[url]
-                        raw_data = raw.get('raw_data') or raw
-                        if isinstance(raw_data, str):
-                            try:
-                                import json
-                                raw_data = json.loads(raw_data)
-                            except:
-                                raw_data = {}
-                        # Location
-                        if not df.at[idx, 'location']:
-                            df.at[idx, 'location'] = raw_data.get('location', '') or raw.get('location', '')
-                        # University
-                        if not df.at[idx, 'university']:
-                            edu = raw_data.get('education_background', []) or []
-                            if edu:
-                                school = edu[0].get('institute_name') or edu[0].get('school_name') or ''
-                                df.at[idx, 'university'] = school
-                            elif raw_data.get('all_schools'):
-                                df.at[idx, 'university'] = raw_data['all_schools'][0] if raw_data['all_schools'] else ''
-
-                # Define preferred column order
-                export_cols = [
+                # Preferred column order: identity first, then screening verdict, then profile detail
+                priority_cols = [
                     'first_name', 'last_name', 'name', 'email', 'salesql_email', 'linkedin_url',
                     'location', 'university', 'current_title', 'current_company',
-                    'score', 'fit', 'summary', 'reasoning'
+                    'score', 'fit', 'summary', 'reasoning',
+                    'skills', 'all_employers', 'all_titles', 'all_schools', 'headline'
                 ]
-                # Use only columns that exist
-                available_cols = [c for c in export_cols if c in df.columns]
-                # Add any remaining columns not in preferred order
-                remaining = [c for c in df.columns if c not in export_cols and c != 'index']
-                final_cols = available_cols + remaining
-                return df[final_cols].to_csv(index=False)
+                ordered = [c for c in priority_cols if c in df.columns]
+                remaining = [c for c in df.columns if c not in priority_cols and c != 'index']
+                return blank_tenure_sentinel(df[ordered + remaining]).to_csv(index=False)
 
             # Unified-policy buckets
             go_list = [r for r in screening_results if r.get('fit') == 'Good Fit']

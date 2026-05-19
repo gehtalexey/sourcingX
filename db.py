@@ -2529,6 +2529,103 @@ def delete_search_history_entry(client: SupabaseClient, agent_id: str, csv_name:
 
 
 # ============================================================================
+# SEMANTIC SEARCH (embeddings) — migration 019
+# ============================================================================
+
+def update_profile_embedding(
+    client: SupabaseClient,
+    linkedin_url: str,
+    embedding: list,
+    model: str,
+    input_hash: str,
+) -> bool:
+    """Store an embedding vector for a single profile.
+
+    Used by the enrichment pipeline (right after a Crustdata save) and by
+    the standalone backfill script. Failures here are logged but never
+    raised — embeddings are a *secondary* artefact, the enriched profile
+    itself must not be rolled back if embedding generation fails.
+    """
+    try:
+        client.update(
+            'profiles',
+            {
+                'embedding': embedding,
+                'embedded_at': datetime.utcnow().isoformat(),
+                'embedding_model': model,
+                'embedding_input_hash': input_hash,
+            },
+            {'linkedin_url': linkedin_url},
+        )
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to update embedding for {linkedin_url}: {e}")
+        return False
+
+
+class SimilarityRPCError(Exception):
+    """Raised when the match_profiles_by_embedding RPC fails.
+
+    A bare ``return []`` would let the UI report "no similar profiles"
+    even when the real cause is "migration 019 isn't applied" or "the
+    embedding payload is the wrong shape". Callers can catch this and
+    surface the real message to the user.
+    """
+
+
+def find_similar_profiles_rpc(
+    client: SupabaseClient,
+    query_embedding: list,
+    match_count: int = 20,
+    min_similarity: float = 0.0,
+) -> list:
+    """Return profiles ranked by cosine similarity to ``query_embedding``.
+
+    Wraps the ``match_profiles_by_embedding`` Postgres function defined in
+    migration 019. Returns a list of dicts with the lightweight profile
+    columns plus a ``similarity`` float in [0, 1] (1 = identical).
+
+    Raises ``SimilarityRPCError`` on transport errors, HTTP failures, or
+    unexpected response shapes. An empty list is reserved for the genuine
+    "RPC succeeded, zero matches" case.
+    """
+    try:
+        response = requests.post(
+            f"{client.url}/rest/v1/rpc/match_profiles_by_embedding",
+            headers=client.headers,
+            json={
+                "query_embedding": query_embedding,
+                "match_count": match_count,
+                "min_similarity": min_similarity,
+            },
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        raise SimilarityRPCError(f"Network error calling similarity RPC: {e}") from e
+
+    if response.status_code >= 400:
+        # Surface the Postgres error verbatim — it tells you whether the
+        # column/index/function exists.
+        body = response.text[:500] if response.text else "<empty>"
+        raise SimilarityRPCError(
+            f"Similarity RPC failed ({response.status_code}): {body}"
+        )
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        raise SimilarityRPCError(f"Similarity RPC returned non-JSON body: {e}") from e
+
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise SimilarityRPCError(
+            f"Similarity RPC returned unexpected shape: {type(data).__name__}"
+        )
+    return data
+
+
+# ============================================================================
 # BACKWARDS COMPATIBILITY - Deprecated functions
 # ============================================================================
 

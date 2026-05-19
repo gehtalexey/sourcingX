@@ -5013,8 +5013,8 @@ _profile_count = get_profile_count()
 st.info(f"📊 **{_profile_count}** profiles loaded" if _profile_count else "No profiles loaded — start from the Load tab")
 
 # Create tabs
-tab_search, tab_upload, tab_filter, tab_screening, tab_emails, tab_database, tab_usage = st.tabs([
-    "0. Search", "1. Load", "2. Filter", "3. AI Screen", "4. Emails", "5. Database", "6. Usage"
+tab_search, tab_upload, tab_filter, tab_screening, tab_emails, tab_database, tab_similar, tab_usage = st.tabs([
+    "0. Search", "1. Load", "2. Filter", "3. AI Screen", "4. Emails", "5. Database", "6. Find Similar", "7. Usage"
 ])
 tab_filter2 = tab_filter  # Filter+ content rendered into the same tab
 
@@ -11057,6 +11057,115 @@ with tab_database:
 
         except Exception as e:
             st.error(f"Database error: {e}")
+
+# ========== TAB 7: Find Similar Profiles (semantic search via embeddings) ==========
+with tab_similar:
+    st.markdown("### Find Similar Profiles")
+    st.caption(
+        "Paste a LinkedIn URL. We'll find profiles in our database whose "
+        "career, skills and background are semantically close — even if "
+        "the exact keywords differ."
+    )
+
+    if not HAS_DATABASE:
+        st.warning("Supabase not configured — semantic search needs the profiles database.")
+    else:
+        sim_url = st.text_input(
+            "LinkedIn URL",
+            key="similar_input_url",
+            placeholder="https://www.linkedin.com/in/jane-doe/",
+        )
+        c1, c2, c3 = st.columns([1, 1, 1])
+        with c1:
+            sim_top_n = st.number_input(
+                "How many matches", min_value=5, max_value=100, value=20, step=5,
+                key="similar_top_n",
+            )
+        with c2:
+            sim_min_score = st.slider(
+                "Minimum similarity", min_value=0.0, max_value=1.0,
+                value=0.30, step=0.05,
+                key="similar_min_score",
+                help="0 = show everything ranked; 0.5 = clearly related; 0.8 = near-duplicates",
+            )
+        with c3:
+            sim_button = st.button("Find similar", type="primary", key="similar_run_btn")
+
+        if sim_button:
+            if not sim_url.strip():
+                st.warning("Paste a LinkedIn URL first.")
+            else:
+                try:
+                    from similar_profiles import search_similar, SimilarProfileError
+                    from openai import OpenAI as _OpenAIClient
+
+                    _openai_key = load_openai_key()
+                    if not _openai_key:
+                        st.error("OpenAI API key not configured. Add 'openai_api_key' to config.json.")
+                    else:
+                        with st.spinner("Embedding your profile and searching…"):
+                            result = search_similar(
+                                db_client=get_supabase_client(),
+                                openai_client=_OpenAIClient(api_key=_openai_key),
+                                linkedin_url=sim_url.strip(),
+                                match_count=int(sim_top_n),
+                                min_similarity=float(sim_min_score),
+                                exclude_self=True,
+                            )
+
+                        st.session_state["similar_last_result"] = result
+                        if result.get("freshly_embedded"):
+                            st.info("This profile didn't have an embedding yet — we generated and stored one. Future searches will be instant.")
+
+                except SimilarProfileError as e:
+                    st.warning(str(e))
+                except Exception as e:
+                    st.error(f"Similar search failed: {e}")
+
+        # Render the most recent result (survives reruns)
+        result = st.session_state.get("similar_last_result")
+        if result:
+            qp = result.get("query_profile") or {}
+            matches = result.get("matches") or []
+            st.markdown("---")
+            st.markdown(
+                f"**Searching from:** {qp.get('name') or qp.get('linkedin_url')} "
+                f"— {qp.get('current_title') or '?'} @ {qp.get('current_company') or '?'}"
+            )
+
+            if not matches:
+                st.info("No similar profiles found above the minimum-similarity threshold. Try lowering the slider.")
+            else:
+                import pandas as _pd
+                df = _pd.DataFrame([
+                    {
+                        "Similarity": round(m.get("similarity", 0.0), 3),
+                        "Name": m.get("name"),
+                        "Current Title": m.get("current_title"),
+                        "Current Company": m.get("current_company"),
+                        "Location": m.get("location"),
+                        "Email": m.get("email"),
+                        "LinkedIn": m.get("linkedin_url"),
+                    }
+                    for m in matches
+                ])
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "LinkedIn": st.column_config.LinkColumn("LinkedIn"),
+                        "Similarity": st.column_config.ProgressColumn(
+                            "Similarity", min_value=0.0, max_value=1.0, format="%.3f"
+                        ),
+                    },
+                )
+                st.download_button(
+                    "Download as CSV",
+                    df.to_csv(index=False).encode("utf-8"),
+                    file_name="similar_profiles.csv",
+                    mime="text/csv",
+                )
 
 # ========== TAB 8: Usage ==========
 with tab_usage:

@@ -60,10 +60,11 @@ from embeddings import (
 # Columns we fetch from Supabase. Includes raw_data so the embedding text
 # can pull headline/summary/education detail. raw_data is heavy (~20-50KB)
 # but we only need it during embedding, so we drop it before write-back.
+# ``enriched_at`` is included so the drift-check keyset cursor can advance.
 FETCH_COLUMNS = (
     "linkedin_url,name,current_title,current_company,location,"
     "all_titles,all_employers,all_schools,skills,raw_data,"
-    "embedding_input_hash"
+    "embedding_input_hash,enriched_at"
 )
 
 
@@ -98,14 +99,17 @@ def load_openai_key() -> str:
 def fetch_missing_batch(
     client: SupabaseClient,
     batch_size: int,
-    re_embed_changed: bool,
+    offset: int = 0,
 ) -> list[dict]:
     """Fetch the next batch of profiles needing embeddings.
 
-    Always includes rows with ``embedding IS NULL``. When
-    ``re_embed_changed`` is True, callers handle drift via the hash check
-    after building the text — this function still selects only NULL rows
-    (drift is rare and that path is opt-in below).
+    Selects rows with ``embedding IS NULL`` and a populated ``raw_data``.
+
+    Live mode (the normal run) doesn't need ``offset`` because writes
+    remove rows from the ``embedding IS NULL`` set, so the next call
+    naturally returns fresh rows. Dry-run mode never writes, so it must
+    pass an increasing offset to make progress — otherwise it scans the
+    same first page forever.
     """
     # PostgREST: `is.null` matches NULL. We restrict to enriched rows so we
     # don't waste tokens embedding rows that never received Crustdata data.
@@ -114,6 +118,25 @@ def fetch_missing_batch(
         "enrichment_status": "eq.enriched",
         "raw_data": "not.is.null",
     }
+    # Call client.select with cursor-style offset via PostgREST's `offset` param.
+    # We can't use the helper's `cursor_column` here because rows with
+    # ``embedding IS NULL`` have no meaningful keyset key — `enriched_at`
+    # can repeat across millions of rows, so offset is the safer choice
+    # for the dry-run sample.
+    params_filters = dict(filters)
+    if offset > 0:
+        # PostgREST treats the literal column "offset" specially when set
+        # via params, but `client.select` only forwards `filters`; route
+        # offset through the helper's own offset pagination by requesting
+        # a window past the offset boundary.
+        return _select_with_offset(
+            client,
+            columns=FETCH_COLUMNS,
+            filters=filters,
+            limit=batch_size,
+            offset=offset,
+            order_by="enriched_at.desc",
+        )
     return client.select(
         table="profiles",
         columns=FETCH_COLUMNS,
@@ -121,6 +144,21 @@ def fetch_missing_batch(
         limit=batch_size,
         order_by="enriched_at.desc",
     )
+
+
+def _select_with_offset(
+    client: SupabaseClient,
+    columns: str,
+    filters: dict,
+    limit: int,
+    offset: int,
+    order_by: str,
+) -> list[dict]:
+    """Single-page SELECT with explicit OFFSET. Used by dry-run only."""
+    params = {"select": columns, "order": order_by, "limit": limit, "offset": offset}
+    for k, v in filters.items():
+        params[k] = v
+    return client._request("GET", "profiles", params=params)
 
 
 def fetch_all_for_drift_check(
@@ -197,6 +235,9 @@ def run_backfill(
     total_written = 0
     total_tokens_est = 0
     cursor: str | None = None
+    # Dry-run can't rely on writes to advance the "still missing" set, so
+    # it tracks an explicit offset into the result window.
+    dry_run_offset = 0
     start = time.time()
 
     while True:
@@ -209,8 +250,10 @@ def run_backfill(
 
         if re_embed_changed:
             batch = fetch_all_for_drift_check(client, page_target, cursor)
+        elif dry_run:
+            batch = fetch_missing_batch(client, page_target, offset=dry_run_offset)
         else:
-            batch = fetch_missing_batch(client, page_target, re_embed_changed=False)
+            batch = fetch_missing_batch(client, page_target)
 
         if not batch:
             break
@@ -238,9 +281,14 @@ def run_backfill(
             total_tokens_est += estimate_token_count(text)
 
         if not rows_to_embed:
-            # Advance the cursor for the drift path even when nothing matched.
+            # Advance whichever pagination cursor this mode uses, so a page
+            # full of skip-worthy rows doesn't stall the loop.
             if re_embed_changed and batch:
                 cursor = batch[-1].get("enriched_at") or cursor
+                total_processed += len(batch)
+                continue
+            if dry_run and batch:
+                dry_run_offset += len(batch)
                 total_processed += len(batch)
                 continue
             break
@@ -255,6 +303,11 @@ def run_backfill(
             )
             if re_embed_changed and batch:
                 cursor = batch[-1].get("enriched_at") or cursor
+            else:
+                # Live-path filter (embedding IS NULL) doesn't change in
+                # dry-run because we don't write; advance via offset so the
+                # next iteration sees a fresh window.
+                dry_run_offset += len(batch)
             continue
 
         # Embed in OpenAI-sized chunks (96) to keep payloads small.

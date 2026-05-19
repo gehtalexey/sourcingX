@@ -2563,6 +2563,16 @@ def update_profile_embedding(
         return False
 
 
+class SimilarityRPCError(Exception):
+    """Raised when the match_profiles_by_embedding RPC fails.
+
+    A bare ``return []`` would let the UI report "no similar profiles"
+    even when the real cause is "migration 019 isn't applied" or "the
+    embedding payload is the wrong shape". Callers can catch this and
+    surface the real message to the user.
+    """
+
+
 def find_similar_profiles_rpc(
     client: SupabaseClient,
     query_embedding: list,
@@ -2574,6 +2584,10 @@ def find_similar_profiles_rpc(
     Wraps the ``match_profiles_by_embedding`` Postgres function defined in
     migration 019. Returns a list of dicts with the lightweight profile
     columns plus a ``similarity`` float in [0, 1] (1 = identical).
+
+    Raises ``SimilarityRPCError`` on transport errors, HTTP failures, or
+    unexpected response shapes. An empty list is reserved for the genuine
+    "RPC succeeded, zero matches" case.
     """
     try:
         response = requests.post(
@@ -2586,11 +2600,29 @@ def find_similar_profiles_rpc(
             },
             timeout=30,
         )
-        response.raise_for_status()
-        return response.json() or []
-    except Exception as e:
-        print(f"[DB] Similarity search failed: {e}")
+    except requests.RequestException as e:
+        raise SimilarityRPCError(f"Network error calling similarity RPC: {e}") from e
+
+    if response.status_code >= 400:
+        # Surface the Postgres error verbatim — it tells you whether the
+        # column/index/function exists.
+        body = response.text[:500] if response.text else "<empty>"
+        raise SimilarityRPCError(
+            f"Similarity RPC failed ({response.status_code}): {body}"
+        )
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        raise SimilarityRPCError(f"Similarity RPC returned non-JSON body: {e}") from e
+
+    if data is None:
         return []
+    if not isinstance(data, list):
+        raise SimilarityRPCError(
+            f"Similarity RPC returned unexpected shape: {type(data).__name__}"
+        )
+    return data
 
 
 # ============================================================================

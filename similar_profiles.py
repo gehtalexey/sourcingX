@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Optional
 
 from db import (
+    SimilarityRPCError,
     SupabaseClient,
     find_similar_profiles_rpc,
     get_profile,
@@ -118,12 +119,19 @@ def search_similar(
     # Ask for one extra so we can drop the self-match without coming up short.
     rpc_count = match_count + 1 if exclude_self else match_count
 
-    raw_matches = find_similar_profiles_rpc(
-        db_client,
-        query_embedding=embedding,
-        match_count=rpc_count,
-        min_similarity=min_similarity,
-    )
+    try:
+        raw_matches = find_similar_profiles_rpc(
+            db_client,
+            query_embedding=embedding,
+            match_count=rpc_count,
+            min_similarity=min_similarity,
+        )
+    except SimilarityRPCError as e:
+        # Re-raise as SimilarProfileError so the dashboard treats it as a
+        # known, displayable failure (warning) rather than a generic crash.
+        # The original message — usually a Postgres complaint about a
+        # missing column, function, or extension — is the actionable bit.
+        raise SimilarProfileError(str(e)) from e
 
     if exclude_self:
         target_url = (query_profile or {}).get("linkedin_url")

@@ -7699,7 +7699,7 @@ with tab_filter:
                     }
                 )
 
-        # Download and Send to Enrich buttons
+        # Download and Send to AI Screen buttons
         col1, col2, col3 = st.columns([1, 1, 2])
         with col1:
             export_view_df = prepare_df_for_export(view_df)
@@ -7711,7 +7711,7 @@ with tab_filter:
                 mime="text/csv"
             )
         with col2:
-            if st.button(f"📤 Send {len(view_df)} to Enrich", type="primary", key="send_to_enrich"):
+            if st.button(f"📤 Send {len(view_df)} to AI Screen", type="primary", key="send_to_enrich"):
                 # MEMORY: Single copy shared by both (they're always used together)
                 enrich_df = view_df.copy()
                 st.session_state['results_df'] = enrich_df

@@ -3347,7 +3347,11 @@ def get_filter_sheets_config():
 
 
 def send_notification(title, message):
-    """Send desktop notification with sound."""
+    """Send desktop notification with sound, plus in-browser toast."""
+    try:
+        st.toast(f"**{title}** — {message}", icon="✅")
+    except Exception:
+        pass
     try:
         if HAS_WINSOUND:
             winsound.PlaySound("SystemExclamation", winsound.SND_ALIAS)
@@ -6603,6 +6607,7 @@ with tab_upload:
                     try:
                         profiles = status_result.get('profiles_count', 0)
                         msg = f"Extracted {profiles} profiles" if profiles else "Ready to load results"
+                        st.toast(f"**PhantomBuster Finished** — {msg}", icon="✅")
                         if HAS_PLYER:
                             notification.notify(
                                 title="PhantomBuster Finished",
@@ -6627,10 +6632,12 @@ with tab_upload:
                         pb_agent_unlock(st.session_state['pb_launch_agent_id'])
                     # Desktop notification for error
                     try:
+                        err_msg = status_result.get('exitMessage', 'Phantom failed')
+                        st.toast(f"**PhantomBuster Error** — {err_msg}", icon="❌")
                         if HAS_PLYER:
                             notification.notify(
                                 title="PhantomBuster Error",
-                                message=status_result.get('exitMessage', 'Phantom failed'),
+                                message=err_msg,
                                 app_name="SourcingX",
                                 timeout=10
                             )

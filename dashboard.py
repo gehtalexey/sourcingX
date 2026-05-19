@@ -10379,7 +10379,7 @@ with tab_database:
                     stats = st.session_state.get('db_pipeline_stats', {})
                     if stats:
                         stat_cols = st.columns(4)
-                        stat_cols[0].metric("Total Enriched", stats.get('total', 0))
+                        stat_cols[0].metric("Total Profiles", stats.get('total', 0))
                         stat_cols[1].metric("Fresh (<6mo)", stats.get('fresh', 0))
                         stat_cols[2].metric("Stale (>6mo)", stats.get('stale', 0))
                         stat_cols[3].metric("Has Email", stats.get('has_email', 0))
@@ -10884,7 +10884,7 @@ with tab_database:
                         )
                         st.caption(f"{len(display_df.columns)} columns")
                     else:
-                        preview_cols = ['name', 'current_title', 'current_company', 'freshness', 'location', 'linkedin_url']
+                        preview_cols = ['name', 'current_title', 'current_company', 'email', 'freshness', 'location', 'linkedin_url']
                         available_cols = [c for c in preview_cols if c in display_df.columns]
 
                         st.dataframe(
@@ -10897,6 +10897,7 @@ with tab_database:
                                 "current_company": st.column_config.TextColumn("Company"),
                                 "current_title": st.column_config.TextColumn("Title"),
                                 "location": st.column_config.TextColumn("Location"),
+                                "email": st.column_config.TextColumn("Email"),
                                 "freshness": st.column_config.TextColumn("Freshness"),
                             }
                         )
@@ -11045,221 +11046,6 @@ with tab_database:
                                 st.error("Request timed out. Try again.")
                             except Exception as e:
                                 st.error(f"Error: {e}")
-
-                # --- Import Enriched Profiles Section ---
-                st.divider()
-                st.markdown("#### Import Enriched Profiles")
-                st.caption("Upload fully enriched Crustdata profiles directly to database (data only, bypasses normal flow)")
-
-                import_file = st.file_uploader(
-                    "Upload Crustdata export",
-                    type=['csv', 'json'],
-                    key="db_import_file",
-                    help="CSV or JSON export from Crustdata with full profile data"
-                )
-
-                if import_file:
-                    # Parse the uploaded file
-                    try:
-                        if import_file.name.endswith('.json'):
-                            import_data = json.load(import_file)
-                            if isinstance(import_data, list):
-                                import_df = pd.DataFrame(import_data)
-                            else:
-                                import_df = pd.DataFrame([import_data])
-                        else:
-                            import_file.seek(0)
-                            import_df = pd.read_csv(import_file)
-
-                        # Validate Crustdata format
-                        url_candidates = ['linkedin_flagship_url', 'linkedin_url']
-                        # Core Crustdata columns (skills is optional - some profiles have none)
-                        enrichment_cols = ['first_name', 'last_name', 'headline', 'current_employers', 'past_employers', 'all_employers', 'all_titles']
-
-                        has_url = any(c in import_df.columns for c in url_candidates)
-                        enrichment_score = sum(1 for c in enrichment_cols if c in import_df.columns)
-
-                        # Detect URL column
-                        url_col = None
-                        for c in url_candidates:
-                            if c in import_df.columns:
-                                url_col = c
-                                break
-
-                        if not has_url:
-                            st.error("Invalid format: Missing LinkedIn URL column (linkedin_flagship_url or linkedin_url)")
-                        elif enrichment_score < 3:
-                            st.warning(f"This doesn't look like a Crustdata export. Found only {enrichment_score}/7 expected columns.")
-                            st.caption(f"Expected: {', '.join(enrichment_cols)}")
-                            st.caption(f"Found: {', '.join(import_df.columns[:15])}...")
-                        else:
-                            st.success(f"Loaded **{len(import_df)}** enriched profiles from {import_file.name}")
-                            st.caption(f"Detected {enrichment_score}/7 Crustdata fields")
-
-                            # Preview data
-                            with st.expander("Preview (first 5 rows)", expanded=True):
-                                preview_cols = []
-                                if url_col:
-                                    preview_cols.append(url_col)
-
-                                # Add key enrichment columns for preview
-                                for c in ['name', 'first_name', 'headline', 'all_employers', 'all_titles']:
-                                    if c in import_df.columns and c not in preview_cols:
-                                        preview_cols.append(c)
-
-                                st.dataframe(import_df[preview_cols].head(5), hide_index=True)
-
-                            # Check which profiles already exist in DB (batch check for speed)
-                            from db import get_enriched_urls
-                            csv_urls = import_df[url_col].dropna().tolist()
-                            normalized_urls = [normalize_linkedin_url(str(u)) for u in csv_urls if u]
-                            normalized_urls = [u for u in normalized_urls if u]  # Remove None
-
-                            with st.spinner("Checking for existing profiles..."):
-                                db_urls = get_enriched_urls(db_client)
-                                existing_urls = [u for u in normalized_urls if u in db_urls]
-                                new_urls = [u for u in normalized_urls if u not in db_urls]
-
-                            # Show summary
-                            if existing_urls:
-                                st.warning(f"**{len(existing_urls)}** profiles already in database (will be updated), **{len(new_urls)}** new")
-                                with st.expander(f"Show existing URLs ({len(existing_urls)})", expanded=False):
-                                    for url in existing_urls[:20]:
-                                        st.text(f"- {url}")
-                                    if len(existing_urls) > 20:
-                                        st.text(f"... and {len(existing_urls) - 20} more")
-                            else:
-                                st.info(f"All **{len(new_urls)}** profiles are new (not in database)")
-
-                            # Import button
-                            if st.button("Import to Database", key="db_import_btn", type="primary"):
-                                from datetime import datetime as dt
-
-                                def build_raw_data_from_row(row):
-                                    """Build raw_data dict from a Crustdata CSV row."""
-                                    raw = {}
-                                    for col in row.index:
-                                        val = row[col]
-                                        if pd.notna(val):
-                                            if isinstance(val, str) and (val.startswith('[') or val.startswith('{')):
-                                                try:
-                                                    val = json.loads(val.replace("'", '"'))
-                                                except:
-                                                    pass
-                                            raw[col] = val
-                                    return raw
-
-                                def prepare_profile_row(url, raw_data):
-                                    """Prepare a profile dict for batch upsert."""
-                                    cd = raw_data or {}
-
-                                    # Extract name
-                                    name = cd.get('name') or ''
-                                    if not name:
-                                        name = f"{cd.get('first_name', '')} {cd.get('last_name', '')}".strip()
-
-                                    # Extract title/company — most recent current employer
-                                    current_title, current_company = None, None
-                                    emp = pick_current_employer(cd.get('current_employers'))
-                                    if emp:
-                                        current_title = emp.get('employee_title') or emp.get('title')
-                                        current_company = emp.get('employer_name') or emp.get('company_name')
-
-                                    if not current_title or not current_company:
-                                        headline = cd.get('headline', '')
-                                        if headline and ' at ' in headline:
-                                            parts = headline.split(' at ', 1)
-                                            current_title = current_title or parts[0].strip()
-                                            if len(parts) > 1:
-                                                current_company = current_company or parts[1].split('/')[0].strip()
-
-                                    # Extract arrays
-                                    all_employers = [str(x) for x in (cd.get('all_employers') or []) if x]
-                                    all_titles = [str(x) for x in (cd.get('all_titles') or []) if x]
-                                    all_schools = [str(x) for x in (cd.get('all_schools') or []) if x]
-                                    skills = [str(x) for x in (cd.get('skills') or []) if x]
-
-                                    now = dt.utcnow().isoformat()
-                                    data = {
-                                        'linkedin_url': url,
-                                        'raw_data': raw_data,
-                                        'name': name or None,
-                                        'location': cd.get('location') or None,
-                                        'current_title': current_title,
-                                        'current_company': current_company,
-                                        'all_employers': all_employers or None,
-                                        'all_titles': all_titles or None,
-                                        'all_schools': all_schools or None,
-                                        'skills': skills or None,
-                                        'enriched_at': now,
-                                        'enrichment_status': 'enriched',
-                                        'enrichment_attempted_at': now,
-                                    }
-                                    return {k: v for k, v in data.items() if v is not None}
-
-                                # Prepare all profiles for batch upsert
-                                status_text = st.empty()
-                                status_text.text("Preparing profiles...")
-
-                                rows_to_upsert = []
-                                import_errors = []
-
-                                for idx, row in import_df.iterrows():
-                                    url = row.get(url_col)
-                                    if pd.isna(url) or not url:
-                                        import_errors.append((idx, "No LinkedIn URL"))
-                                        continue
-
-                                    url = normalize_linkedin_url(str(url))
-                                    if not url:
-                                        import_errors.append((idx, "Invalid LinkedIn URL"))
-                                        continue
-
-                                    raw_data = build_raw_data_from_row(row)
-                                    rows_to_upsert.append(prepare_profile_row(url, raw_data))
-
-                                if not rows_to_upsert:
-                                    status_text.empty()
-                                    st.error(f"No valid profiles to import. {len(import_errors)} errors.")
-                                else:
-                                    # Batch upsert in chunks of 500
-                                    BATCH_SIZE = 500
-                                    progress_bar = st.progress(0)
-                                    total_batches = (len(rows_to_upsert) + BATCH_SIZE - 1) // BATCH_SIZE
-
-                                    for batch_num in range(total_batches):
-                                        start_idx = batch_num * BATCH_SIZE
-                                        end_idx = min(start_idx + BATCH_SIZE, len(rows_to_upsert))
-                                        batch = rows_to_upsert[start_idx:end_idx]
-
-                                        status_text.text(f"Uploading batch {batch_num + 1}/{total_batches} ({len(batch)} profiles)...")
-                                        try:
-                                            db_client.upsert_batch('profiles', batch, on_conflict='linkedin_url')
-                                        except Exception as e:
-                                            import_errors.append((f"Batch {batch_num + 1}", str(e)))
-
-                                        progress_bar.progress((batch_num + 1) / total_batches)
-
-                                    progress_bar.empty()
-                                    status_text.empty()
-
-                                    # Show results (use pre-computed counts from duplicate check)
-                                    if import_errors:
-                                        st.warning(f"Imported **{len(rows_to_upsert)}** profiles with **{len(import_errors)}** errors")
-                                        with st.expander(f"Errors ({len(import_errors)})", expanded=False):
-                                            for err in import_errors[:20]:
-                                                st.text(f"{err[0]}: {err[1]}")
-                                            if len(import_errors) > 20:
-                                                st.text(f"... and {len(import_errors) - 20} more")
-                                    else:
-                                        st.success(f"Imported **{len(new_urls)}** new, updated **{len(existing_urls)}** existing")
-
-                                    # Clear the file uploader state
-                                    st.session_state.pop('db_import_file', None)
-                                    st.rerun()
-
-                    except Exception as e:
-                        st.error(f"Error parsing file: {e}")
 
         except Exception as e:
             st.error(f"Database error: {e}")

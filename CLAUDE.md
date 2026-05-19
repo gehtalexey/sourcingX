@@ -4,7 +4,7 @@
 
 - **Desktop (Claude Code CLI):** Before the **first** change on `master` in a session, confirm with Alexey once and offer a feature branch. After he confirms, treat subsequent edits, commits, and pushes to `master` in that same session as authorized — don't re-prompt for each one. The confirmation resets at the start of a new session.
 - **Mobile (Claude app):** Branches are created automatically - safe by default.
-- **Codex code review:** Codex (second AI coding agent) reviews all code Claude writes in this project. Flow: Claude opens a PR against `master` → Codex finds the latest open SourcingX PR and posts its review directly on GitHub → Claude reads the PR comments/reviews (via `gh pr view --comments`, `gh api`, or equivalent) and applies fixes on the same branch. Codex does not edit files; Alexey does not relay feedback by hand. Before applying Codex's fixes, re-read the file in case state has changed since the review.
+- **Codex code review:** Codex (second AI coding agent) reviews all code Claude writes in this project. Flow: Claude opens a PR against `master` → Codex finds the latest open SourcingX PR and posts its review directly on GitHub → Claude reads the PR comments/reviews (via `gh pr view --comments`, `gh api`, or equivalent) and applies fixes on the same branch. Codex ends every review with `@claude: lgtm` (all clear, proceed to merge) or `@claude: <feedback>` (specific fixes needed). The `codex-handoff.yml` GitHub Actions workflow picks up the tag immediately and either merges (lgtm + CI green) or applies fixes and pushes. Codex does not edit files; Alexey does not relay feedback by hand. Before applying Codex's fixes, re-read the file in case state has changed since the review.
 
 ## AI coding workflow
 
@@ -14,7 +14,7 @@ This repo uses GitHub PRs as the coordination layer between Claude (the code-wri
 2. **PR is the unit of review.** When a feature branch is ready, open a PR against `master`. The PR description states what changed, why, and what was tested. Codex reviews the PR, Claude applies fixes on the same branch, and Alexey merges.
 3. **Reference REVIEW.md.** Both Claude (self-review before pushing) and Codex (reviewing the PR) use the checklist in `REVIEW.md` as the criteria. New PRs that touch production code paths should pass that checklist before merge.
 4. **CI is required.** The GitHub Actions workflow under `.github/workflows/test.yml` runs focused tests on every push and PR targeting `master`. PRs do not merge until CI is green.
-5. **No auto-merge.** Merges are manual. Alexey reviews the final state and clicks merge himself.
+5. **No auto-merge.** Merges are manual by default. **Exception:** when Codex tags `@claude: lgtm` in its review and CI is green, the `codex-handoff.yml` workflow merges automatically — this is the intended fast path for the Codex→Claude loop.
 6. **No broad write permissions for CI.** The workflow declares `permissions: contents: read` explicitly. Any future job that needs write access must be added narrowly and reviewed.
 7. **No secrets in the repo.** Real API keys live in `config.json` (gitignored) or GitHub Actions secrets, never in source. Test code uses placeholder keys (`"test-key"`) which the workflow injects via env. Local agent state such as `.claude/settings.local.json`, `.claude/launch.json`, `.claude/scheduled_tasks.lock`, `.claude/worktrees/`, `.agent/`, `.agents/`, `.continue/`, and scratch JSON/CSV outputs is gitignored and must never be committed. Tracked project skill files under `.claude/skills/` are allowed only when intentionally maintained as repo instructions.
 
@@ -364,4 +364,3 @@ All knobs live in `.github/workflows/db-refresh.yml`'s `env:` block:
 gh workflow run db-refresh.yml
 ```
 Watch the tracking issue for the new comment, or open the run in the Actions tab for full logs.
-

@@ -11100,10 +11100,13 @@ with tab_similar:
                     from openai import OpenAI as _OpenAIClient
 
                     _openai_key = load_openai_key()
+                    _crustdata_key = api_key  # loaded at module top via load_api_key()
                     if not _openai_key:
                         st.error("OpenAI API key not configured. Add 'openai_api_key' to config.json.")
                     else:
-                        with st.spinner("Embedding your profile and searching…"):
+                        # Spinner copy depends on whether we *might* need to enrich.
+                        # The auto-enrich path only fires when the URL isn't in the DB.
+                        with st.spinner("Looking up profile, enriching if needed, then searching…"):
                             result = search_similar(
                                 db_client=get_supabase_client(),
                                 openai_client=_OpenAIClient(api_key=_openai_key),
@@ -11111,11 +11114,22 @@ with tab_similar:
                                 match_count=int(sim_top_n),
                                 min_similarity=float(sim_min_score),
                                 exclude_self=True,
+                                crustdata_key=_crustdata_key or None,
                             )
 
                         st.session_state["similar_last_result"] = result
-                        if result.get("freshly_embedded"):
-                            st.info("This profile didn't have an embedding yet — we generated and stored one. Future searches will be instant.")
+                        source = result.get("source")
+                        if source == "enriched":
+                            st.info(
+                                "This profile wasn't in our database. We enriched it via "
+                                "Crustdata (~3 credits), saved it, and embedded it. Future "
+                                "searches for the same URL are free."
+                            )
+                        elif source == "embedded":
+                            st.info(
+                                "This profile was in our database but had no embedding yet — "
+                                "we generated one. Future searches for it are instant."
+                            )
 
                 except SimilarProfileError as e:
                     st.warning(str(e))

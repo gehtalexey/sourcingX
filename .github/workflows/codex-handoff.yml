@@ -1,0 +1,67 @@
+name: Codex → Claude Handoff
+
+# Fires when a PR review is submitted that contains "@claude"
+# Codex (posting as Alexey) uses "@claude: lgtm" to approve+merge
+# or "@claude: <feedback>" to request specific fixes.
+on:
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  claude-handoff:
+    # Only run when the review body tags @claude
+    if: contains(github.event.review.body, '@claude')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.email "claude@added-value.co.il"
+          git config user.name "Claude Code"
+          git remote set-url origin \
+            https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: "--max-turns 20"
+          prompt: |
+            PR #${{ github.event.pull_request.number }} in ${{ github.repository }} was just reviewed by Codex (posted under Alexey's account). You must now act on that review.
+
+            --- REVIEW BODY ---
+            ${{ github.event.review.body }}
+            -------------------
+
+            Step 1 — read the full picture:
+              gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews
+              gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments
+
+            Step 2 — decide and act based on the @claude tag:
+
+            CASE A — review body contains "@claude: lgtm" (case-insensitive, no other actionable issues):
+              a. Check CI: gh pr checks ${{ github.event.pull_request.number }} --repo ${{ github.repository }}
+              b. All checks green → merge: gh pr merge ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --merge
+              c. Any check failing → post a PR comment: "@claude: CI is still red — not merging until checks pass." Do NOT merge.
+
+            CASE B — review body contains "@claude:" followed by specific feedback (anything other than "lgtm"):
+              a. Read every source file mentioned in the review before editing.
+              b. Apply the exact fixes Codex described.
+              c. git add -A
+              d. git commit -m "fix: apply Codex review feedback"
+              e. git push
+              f. Post a PR comment summarising what you changed.
+              g. Do NOT merge — wait for Codex to re-review.
+
+            CASE C — review body contains "@claude" but no colon:
+              Post a PR comment asking Codex to use the format "@claude: lgtm" or "@claude: <feedback>".
+
+            Always end with a short PR comment summarising what you did (one or two sentences).

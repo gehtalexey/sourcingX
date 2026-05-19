@@ -118,12 +118,10 @@ def fetch_missing_batch(
         "enrichment_status": "eq.enriched",
         "raw_data": "not.is.null",
     }
-    # Call client.select with cursor-style offset via PostgREST's `offset` param.
-    # We can't use the helper's `cursor_column` here because rows with
-    # ``embedding IS NULL`` have no meaningful keyset key — `enriched_at`
-    # can repeat across millions of rows, so offset is the safer choice
-    # for the dry-run sample.
-    params_filters = dict(filters)
+    # Plain offset pagination. We can't use the helper's `cursor_column`
+    # here because rows with ``embedding IS NULL`` have no meaningful keyset
+    # key — `enriched_at` repeats across rows, so offset is the safer
+    # choice for the dry-run sample.
     if offset > 0:
         # PostgREST treats the literal column "offset" specially when set
         # via params, but `client.select` only forwards `filters`; route

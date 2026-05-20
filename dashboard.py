@@ -9652,18 +9652,25 @@ with tab_database:
                             af = {k: v for k, v in af.items() if k not in ['past_titles', 'past_companies']}
 
                         if ft and ft.strip():
-                            # Full-text search (supports partial matching on all fields)
+                            # Full-text search (supports partial matching on all fields).
+                            # Cap at 5000 rows: broad queries like "senior" match 22K+ rows,
+                            # and OFFSET-based pagination past a few thousand rows is slow
+                            # enough to freeze the UI. Real-world flow is to narrow with
+                            # column filters (title, location, skills) inside this set.
                             from db import search_profiles_fulltext
-                            all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=50000)
+                            with st.spinner("Searching profiles..."):
+                                all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=5000)
                             st.caption(f"Full-text search: **{ft}**" + (" + column filters" if has_column_filters else ""))
                         elif has_column_filters:
                             # Column filters only (server-side)
                             from db import search_profiles_boolean
-                            all_profiles = search_profiles_boolean(db_client, af, limit=50000)
+                            with st.spinner("Searching profiles..."):
+                                all_profiles = search_profiles_boolean(db_client, af, limit=5000)
                             st.caption("Server-side filtered search")
                         else:
                             # No filters - load all (cached, 1-min TTL)
-                            all_profiles = _cached_all_profiles(limit=50000)
+                            with st.spinner("Loading profiles..."):
+                                all_profiles = _cached_all_profiles(limit=5000)
 
                         st.session_state['db_search_results'] = all_profiles
                 else:

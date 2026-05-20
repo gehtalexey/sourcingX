@@ -1,0 +1,168 @@
+"""
+Backfill search_text for profiles that have certifications in raw_data.
+
+Migration 019 added certifications to the search_text trigger, but existing
+profiles were not automatically updated (bulk backfill timed out via MCP).
+This script fetches those profiles and re-saves them, which fires the trigger.
+
+No Crustdata credits are spent — we re-save what's already in the DB.
+
+Usage:
+    # Dry-run (default) — shows count only:
+    python scripts/backfill_cert_search.py
+
+    # Actually run it:
+    python scripts/backfill_cert_search.py --execute
+
+    # Limit batch size (default 500):
+    python scripts/backfill_cert_search.py --execute --batch-size 200
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from db import SupabaseClient
+
+
+def load_config():
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.json')
+    with open(config_path) as f:
+        return json.load(f)
+
+
+def get_profiles_with_certs(client: SupabaseClient, limit: int = 10000) -> list:
+    """Fetch profiles that have certifications in raw_data."""
+    import requests
+    url = f"{client.url}/rest/v1/profiles"
+    params = {
+        'select': 'linkedin_url,raw_data',
+        'raw_data->certifications': 'not.eq.[]',
+        'limit': limit,
+    }
+    # Use a direct filter for non-empty certifications array
+    params = {
+        'select': 'linkedin_url',
+        'limit': limit,
+    }
+    response = requests.get(
+        url,
+        headers={**client.headers, 'Prefer': 'count=exact'},
+        params=params,
+        timeout=30
+    )
+    # Fall back to RPC approach — fetch all and filter client-side
+    return None
+
+
+def backfill(execute: bool, batch_size: int):
+    try:
+        config = load_config()
+        supabase_url = config.get('supabase_url', os.environ.get('SUPABASE_URL', ''))
+        supabase_key = config.get('supabase_key', os.environ.get('SUPABASE_KEY', ''))
+    except FileNotFoundError:
+        supabase_url = os.environ.get('SUPABASE_URL', '')
+        supabase_key = os.environ.get('SUPABASE_KEY', '')
+
+    if not supabase_url or not supabase_key:
+        print("ERROR: Missing SUPABASE_URL / SUPABASE_KEY")
+        sys.exit(1)
+
+    client = SupabaseClient(supabase_url, supabase_key)
+
+    import requests
+
+    # Count profiles with certifications
+    count_url = f"{client.url}/rest/v1/profiles"
+    print("Fetching profiles with certifications...")
+
+    # Fetch linkedin_urls of profiles with non-empty certifications
+    # We use a JSONB filter: raw_data->certifications is not null and not empty array
+    offset = 0
+    all_urls = []
+    while True:
+        resp = requests.get(
+            count_url,
+            headers=client.headers,
+            params={
+                'select': 'linkedin_url',
+                'limit': 1000,
+                'offset': offset,
+                # filter: certifications array has at least 1 element
+                # PostgREST doesn't support jsonb_array_length directly in filters,
+                # so we use a workaround: raw_data->certifications != 'null' and != '[]'
+                'raw_data->>certifications': 'not.is.null',
+            },
+            timeout=30
+        )
+        resp.raise_for_status()
+        batch = resp.json()
+        if not batch:
+            break
+        all_urls.extend([r['linkedin_url'] for r in batch])
+        if len(batch) < 1000:
+            break
+        offset += len(batch)
+
+    print(f"Found {len(all_urls)} profiles with certifications field set.")
+
+    if not execute:
+        print("DRY-RUN — pass --execute to actually update.")
+        return
+
+    # Re-save each profile by doing a no-op upsert that fires the trigger.
+    # We fetch the full row and upsert it back — no Crustdata credits, no data change.
+    updated = 0
+    errors = 0
+    total = len(all_urls)
+
+    for i in range(0, total, batch_size):
+        chunk = all_urls[i:i + batch_size]
+        print(f"  Batch {i // batch_size + 1}: rows {i+1}–{min(i+batch_size, total)} of {total}...")
+
+        # Fetch full rows
+        rows_resp = requests.get(
+            count_url,
+            headers=client.headers,
+            params={
+                'select': '*',
+                'linkedin_url': f"in.({','.join(chunk)})",
+                'limit': len(chunk),
+            },
+            timeout=60
+        )
+        rows_resp.raise_for_status()
+        rows = rows_resp.json()
+
+        if not rows:
+            continue
+
+        # Upsert back — this fires the BEFORE UPDATE trigger which rebuilds search_text
+        upsert_resp = requests.post(
+            count_url,
+            headers={**client.headers, 'Prefer': 'resolution=merge-duplicates'},
+            params={'on_conflict': 'linkedin_url'},
+            json=rows,
+            timeout=60
+        )
+        if upsert_resp.status_code in (200, 201):
+            updated += len(rows)
+        else:
+            print(f"    WARNING: batch failed ({upsert_resp.status_code}): {upsert_resp.text[:200]}")
+            errors += len(rows)
+
+        time.sleep(0.5)  # avoid overwhelming the DB
+
+    print(f"\nDone. Updated: {updated}, Errors: {errors}")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Backfill search_text for profiles with certifications')
+    parser.add_argument('--execute', action='store_true', help='Actually run the backfill (default: dry-run)')
+    parser.add_argument('--batch-size', type=int, default=500, help='Rows per batch (default: 500)')
+    args = parser.parse_args()
+    backfill(execute=args.execute, batch_size=args.batch_size)

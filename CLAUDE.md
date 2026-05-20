@@ -32,7 +32,7 @@ SourcingX is a Streamlit-based recruiting automation platform that screens Linke
 - **Database**: Supabase (PostgreSQL via REST API) — stores enriched profiles, NOT screening results
 - **AI Screening**: OpenAI `gpt-4o-mini` (default), `gpt-4o`, or Claude Haiku (`anthropic`)
 - **Profile Data**: Crustdata API (enrichment), PhantomBuster (scraping)
-- **Email Lookup**: SalesQL API
+- **Email Lookup**: SalesQL API — **before touching SalesQL code or debugging email hit-rate, read `.claude/skills/salesql-api/SKILL.md`** (URL format rules — hash-suffix URLs are valid, don't strip them; coverage-vs-URL-bug distinction; credit accounting; gotchas)
 - **Config**: Google Sheets (company lists, universities, blacklists) + local CSV filters
 
 ## Project Structure

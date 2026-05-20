@@ -1904,24 +1904,30 @@ def search_profiles_boolean(client: SupabaseClient, filters: dict, limit: int = 
     elif filters.get('date_before'):
         params['enriched_at'] = f"lte.{filters['date_before']}"
 
-    # Combine all AND conditions
-    if and_conditions:
-        if len(and_conditions) == 1:
-            # Single condition - check if it's already wrapped
-            cond = and_conditions[0]
-            if cond.startswith('or('):
-                params['or'] = f"({cond[3:-1]})"  # Extract inner, wrap in parens
-            elif cond.startswith('and('):
-                params['and'] = f"({cond[4:-1]})"
-            else:
-                # Single term condition - add directly as column filter
-                # Format: column.ilike.*value* -> column=ilike.*value*
-                parts = cond.split('.', 1)
-                if len(parts) == 2:
-                    params[parts[0]] = parts[1]
+    # Combine all AND conditions.
+    # Simple col.op.val conditions (ilike, imatch, not.ilike, etc.) go as direct
+    # URL params — PostgREST ANDs multiple params automatically, and this is more
+    # reliable than wrapping them in and() which can silently fail in some
+    # PostgREST versions when mixed with ilike/imatch operators.
+    # Complex or()/and() expressions are collected and put in an and() group.
+    complex_conditions = []
+    for cond in and_conditions:
+        if cond.startswith('or(') or cond.startswith('and('):
+            complex_conditions.append(cond)
         else:
-            # Multiple conditions - wrap in and()
-            params['and'] = f"({','.join(and_conditions)})"
+            parts = cond.split('.', 1)
+            if len(parts) == 2:
+                params[parts[0]] = parts[1]
+
+    if complex_conditions:
+        if len(complex_conditions) == 1:
+            cond = complex_conditions[0]
+            if cond.startswith('or('):
+                params['or'] = f"({cond[3:-1]})"
+            else:  # and(
+                params['and'] = f"({cond[4:-1]})"
+        else:
+            params['and'] = f"({','.join(complex_conditions)})"
 
     # Select without raw_data for performance
     columns = 'linkedin_url,name,current_title,current_company,all_employers,all_titles,all_schools,skills,location,email,enriched_at'

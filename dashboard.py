@@ -10956,7 +10956,7 @@ with tab_database:
                         )
                     with btn_col2:
                         if len(filtered_df) > 0:
-                            if st.button(f"Send {len(filtered_df)} to Filter+", key="db_to_filter_btn", type="primary"):
+                            if st.button(f"Send {len(filtered_df)} to Filter", key="db_to_filter_btn", type="primary"):
                                 # Get URLs from filtered results
                                 urls = filtered_df['linkedin_url'].tolist()
 
@@ -10966,7 +10966,7 @@ with tab_database:
                                     profiles_with_raw = get_profiles_by_urls(db_client, urls, include_raw_data=True)
 
                                 if profiles_with_raw:
-                                    # Convert to DataFrame for Filter+ tab
+                                    # Convert to DataFrame for the Filter tab's Advanced Filtering section
                                     result_df = profiles_to_dataframe(profiles_with_raw)
                                     st.session_state['enriched_df'] = result_df
 

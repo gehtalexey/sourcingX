@@ -3741,76 +3741,109 @@ def apply_pre_filters(df: pd.DataFrame, filters: dict) -> tuple[pd.DataFrame, di
         past_df = filters['past_candidates_df']
         df['_is_past'] = False
 
-        # Helper to normalize LinkedIn URLs for comparison
+        # Helper to normalize LinkedIn URLs for comparison (slug-level)
         def normalize_linkedin_url(url):
             if pd.isna(url) or not url:
                 return ''
             url = str(url).lower().strip().rstrip('/')
-            # Extract the profile ID part (e.g., "john-smith-123abc")
             if '/in/' in url:
                 return url.split('/in/')[-1].split('/')[0].split('?')[0]
             return url
 
-        # Try LinkedIn URL matching first (most reliable)
-        linkedin_col = None
-        for col in ['LinkedIn', 'linkedin_url', 'LinkedIn URL', 'linkedinUrl', 'profile_url', 'URL']:
-            if col in past_df.columns:
-                linkedin_col = col
-                break
+        # Case-insensitive column finder
+        def _find_col_ci(col_list, candidates):
+            col_lower = {c.lower(): c for c in col_list}
+            for c in candidates:
+                if c in col_list:
+                    return c
+                if c.lower() in col_lower:
+                    return col_lower[c.lower()]
+            return None
 
-        if linkedin_col and 'linkedin_url' in df.columns:
-            past_urls = set(normalize_linkedin_url(url) for url in past_df[linkedin_col].dropna())
-            df['_norm_url'] = df['linkedin_url'].apply(normalize_linkedin_url)
-            df['_is_past'] = df['_norm_url'].isin(past_urls)
-            df = df.drop(columns=['_norm_url'])
+        # Find LinkedIn URL column in past_df — case-insensitive, covers common
+        # export formats (HeyReach, LinkedIn, Instantly, SourcingX CSV)
+        _url_col_candidates = [
+            'LinkedIn', 'linkedin_url', 'LinkedIn URL', 'LinkedIn Profile URL',
+            'linkedinUrl', 'profileUrl', 'profile_url', 'URL',
+        ]
+        linkedin_col = _find_col_ci(past_df.columns.tolist(), _url_col_candidates)
+
+        # Try URL matching; fall back to public_url when linkedin_url is absent
+        _df_url_col = 'linkedin_url' if 'linkedin_url' in df.columns else (
+            'public_url' if 'public_url' in df.columns else None
+        )
+        if linkedin_col and _df_url_col:
+            past_urls = {normalize_linkedin_url(u) for u in past_df[linkedin_col].dropna()} - {''}
+            if past_urls:
+                df['_norm_url'] = df[_df_url_col].apply(normalize_linkedin_url)
+                df['_is_past'] = df['_norm_url'].isin(past_urls)
+                df = df.drop(columns=['_norm_url'])
 
         # Helper to normalize names for comparison
         def normalize_name(name):
             if pd.isna(name) or not name:
                 return ''
-            # Lowercase, strip, remove extra spaces
             name = str(name).lower().strip()
-            name = ' '.join(name.split())  # Collapse multiple spaces
-            # Remove common special chars and emojis
+            name = ' '.join(name.split())
             import re
-            name = re.sub(r'[^\w\s]', '', name)  # Keep only alphanumeric and spaces
+            name = re.sub(r'[^\w\s]', '', name)
             return name.strip()
 
-        # Also try name matching (catches cases where URL format differs)
-        name_col = None
-        for col in ['Name', 'name', 'Full Name', 'fullName', 'Candidate Name']:
-            if col in past_df.columns:
-                name_col = col
-                break
+        # Build past_names from the sheet.  Handles:
+        #   • Combined Name column  (e.g. SourcingX export, Loxo)
+        #   • Separate First Name / Last Name columns  (HeyReach, Filterly, Instantly)
+        past_names = set()
+        _name_col_candidates = ['Name', 'name', 'Full Name', 'fullName', 'Candidate Name']
+        name_col = _find_col_ci(past_df.columns.tolist(), _name_col_candidates)
+        _first_col = _find_col_ci(past_df.columns.tolist(), ['First Name', 'first_name', 'firstName'])
+        _last_col  = _find_col_ci(past_df.columns.tolist(), ['Last Name',  'last_name',  'lastName'])
 
         if name_col:
-            past_names = set(normalize_name(name) for name in past_df[name_col].dropna() if str(name).strip())
-            if past_names:
-                # Try full name from 'name' column first
-                if 'name' in df.columns:
-                    df['_norm_name'] = df['name'].apply(normalize_name)
-                    df['_name_match'] = df['_norm_name'].isin(past_names)
-                    df['_is_past'] = df['_is_past'] | df['_name_match']
-                    df = df.drop(columns=['_norm_name', '_name_match'])
-                # Also try first_name + last_name
-                if 'first_name' in df.columns and 'last_name' in df.columns:
-                    df['_full_name'] = df.apply(
-                        lambda r: normalize_name(f"{r.get('first_name', '')} {r.get('last_name', '')}"),
-                        axis=1
-                    )
-                    df['_name_match'] = df['_full_name'].isin(past_names)
-                    df['_is_past'] = df['_is_past'] | df['_name_match']
-                    df = df.drop(columns=['_full_name', '_name_match'])
+            past_names.update(
+                normalize_name(n) for n in past_df[name_col].dropna() if str(n).strip()
+            )
+        if _first_col and _last_col:
+            for _, row in past_df[[_first_col, _last_col]].iterrows():
+                combined = normalize_name(f"{row[_first_col]} {row[_last_col]}")
+                if combined:
+                    past_names.add(combined)
+        elif _first_col and not name_col:
+            # Only first name available — still worth trying
+            past_names.update(
+                normalize_name(n) for n in past_df[_first_col].dropna() if str(n).strip()
+            )
+        past_names.discard('')
+
+        if past_names:
+            if 'name' in df.columns:
+                df['_norm_name'] = df['name'].apply(normalize_name)
+                df['_is_past'] = df['_is_past'] | df['_norm_name'].isin(past_names)
+                df = df.drop(columns=['_norm_name'])
+            if 'first_name' in df.columns and 'last_name' in df.columns:
+                df['_full_name'] = df.apply(
+                    lambda r: normalize_name(f"{r.get('first_name', '')} {r.get('last_name', '')}"),
+                    axis=1
+                )
+                df['_is_past'] = df['_is_past'] | df['_full_name'].isin(past_names)
+                df = df.drop(columns=['_full_name'])
 
         stats['past_candidates'] = df['_is_past'].sum()
         _store_filtered('Past Candidates', df['_is_past'])
         df = df[~df['_is_past']].drop(columns=['_is_past'])
 
-        if stats['past_candidates'] == 0 and linkedin_col is None and name_col is None:
-            stats['_skipped_filters'].append(f"past_candidates (sheet needs 'LinkedIn' or 'Name' column, has: {list(past_df.columns)})")
+        _had_url_col  = linkedin_col is not None
+        _had_name_col = name_col is not None or _first_col is not None
+        if stats['past_candidates'] == 0 and not _had_url_col and not _had_name_col:
+            stats['_skipped_filters'].append(
+                f"past_candidates (no LinkedIn/Name column found — "
+                f"sheet columns: {list(past_df.columns[:8])})"
+            )
         elif stats['past_candidates'] == 0:
-            # Columns exist but no matches - could be data format issue
-            stats['_skipped_filters'].append(f"past_candidates (0 matches - check name format in sheet vs candidates)")
+            stats['_skipped_filters'].append(
+                f"past_candidates (0 matches — "
+                f"URL col: {linkedin_col or 'none'}, "
+                f"name col: {name_col or ((_first_col and _last_col) and 'First+Last') or 'none'})"
+            )
 
     # 2. Blacklist filter
     if filters.get('blacklist'):

@@ -43,9 +43,27 @@ Status codes:
 - `404` — no match (treat as "no result", not an error)
 - `429` — rate limit exceeded
 
-### `GET /account/credits` — remaining credits
+### `GET /allowance` — remaining credits
 
-No trailing slash. Returns `{credits, balance}` (one of those keys depending on plan).
+No trailing slash. Returns nested shape:
+
+```json
+{
+  "credits": {
+    "emails_and_phones": <int>,
+    "verifications": <int>
+  },
+  "reset_date": "<ISO 8601 timestamp>"
+}
+```
+
+(Older API versions returned a flat int — code reading credits must handle both shapes.)
+
+### `POST /persons/enrich/bulk` — batch enrichment (NOT currently used by SourcingX)
+
+Added by SalesQL in v2.29.0 (2026-04-29). Accepts up to **100 person queries per request**; each query follows the same parameter groups as single enrichment (linkedin_url, or full_name + organization_name/domain, etc.). Response is an array of person objects (and/or error objects) in the same order.
+
+SourcingX still uses one-at-a-time `GET /persons/enrich/` calls. If you're optimizing throughput, switching to bulk is the obvious lever — but check rate limits and credit semantics before rolling it out across the pipeline.
 
 ## URL Format Rules — CRITICAL
 
@@ -100,9 +118,9 @@ When multiple emails come back, **prefer `status=Valid`** over `Risky`/`Catch-al
 ## Gotchas
 
 1. **404 is normal** — skip and continue, do not retry.
-2. **Trailing slash matters** — `/persons/enrich/` requires it; `/account/credits` does not.
+2. **Trailing slash matters** — `/persons/enrich/` requires it; `/allowance` does not.
 3. **Obfuscated ACoAA URLs** — SalesQL 404s on these. Resolve to a flagship URL via Crustdata `linkedin_flagship_url` / `flagship_profile_url` first.
-4. **No batch endpoint** — enrich one at a time with throttling (~1 req/sec is safe).
+4. **SourcingX uses one-at-a-time enrichment** — the pipeline calls `GET /persons/enrich/` per profile with ~1 req/sec throttling. SalesQL **does** have a bulk endpoint (`POST /persons/enrich/bulk`, up to 100/request, added 2026-04-29) but we haven't migrated to it yet. "No batch" describes our current code, not the API.
 5. **Coverage gap, not URL bug** — do not "fix" missing emails by mangling URLs. Add a fallback provider instead.
 6. **Stale emails possible** — for projects that look up old LinkedIn URLs, the returned email may be from a previous employer. Filter accordingly.
 7. **`credits` response shape varies** — current API returns `{"credits": {"emails_and_phones": <int>, ...}}` (nested). Older shapes used a flat int. Code that reads credits must handle both.

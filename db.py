@@ -55,7 +55,7 @@ class SupabaseClient:
             headers=self.headers,
             params=params,
             json=json_data,
-            timeout=30
+            timeout=90
         )
         response.raise_for_status()
         if response.text:

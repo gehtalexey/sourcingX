@@ -56,6 +56,26 @@ from embeddings import (
     estimate_token_count,
 )
 
+# OpenAI allows 300k tokens per embedding request; stay well under it.
+OPENAI_TOKEN_LIMIT = 250_000
+
+
+def token_aware_chunks(texts: list[str]) -> list[list[str]]:
+    """Split texts into sub-batches that each fit under OPENAI_TOKEN_LIMIT."""
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_tokens = 0
+    for text in texts:
+        t = estimate_token_count(text)
+        if current and current_tokens + t > OPENAI_TOKEN_LIMIT:
+            chunks.append(current)
+            current, current_tokens = [], 0
+        current.append(text)
+        current_tokens += t
+    if current:
+        chunks.append(current)
+    return chunks
+
 
 # Columns we fetch from Supabase. Includes raw_data so the embedding text
 # can pull headline/summary/education detail. raw_data is heavy (~20-50KB)
@@ -194,20 +214,23 @@ def write_embeddings(
     hashes: list[str],
     model: str,
 ) -> int:
-    """Upsert embedding columns for each row. Returns count written."""
+    """Write embedding columns in batches. Returns count written."""
+    if not rows:
+        return 0
     now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
-    payload = []
-    for row, vector, h in zip(rows, vectors, hashes):
-        payload.append({
+    payload = [
+        {
             "linkedin_url": row["linkedin_url"],
             "embedding": vector,
             "embedded_at": now,
             "embedding_model": model,
             "embedding_input_hash": h,
-        })
-    if not payload:
-        return 0
-    client.upsert_batch("profiles", payload, on_conflict="linkedin_url")
+        }
+        for row, vector, h in zip(rows, vectors, hashes)
+    ]
+    write_chunk_size = 96
+    for i in range(0, len(payload), write_chunk_size):
+        client.upsert_batch("profiles", payload[i:i + write_chunk_size], on_conflict="linkedin_url")
     return len(payload)
 
 
@@ -308,15 +331,14 @@ def run_backfill(
                 dry_run_offset += len(batch)
             continue
 
-        # Embed in OpenAI-sized chunks (96) to keep payloads small.
+        # Split by token count so no single OpenAI call exceeds 250k tokens.
         vectors: list[list[float]] = []
-        for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
-            chunk = texts[i : i + EMBEDDING_BATCH_SIZE]
+        for chunk in token_aware_chunks(texts):
             try:
                 chunk_vectors = embed_texts(openai_client, chunk, model=EMBEDDING_MODEL)
             except Exception as exc:
                 print(
-                    f"OpenAI call failed for chunk starting at {i}: {exc}. "
+                    f"OpenAI call failed ({len(chunk)} texts): {exc}. "
                     f"Sleeping 5s and retrying once.",
                     file=sys.stderr,
                 )

@@ -44,6 +44,14 @@ from db import SupabaseClient
 # is comfortably under any timeout.
 SCAN_PAGE_SIZE = 1000
 
+# How many linkedin_urls to inline in a PostgREST `?linkedin_url=in.(...)`
+# GET request when fetching full rows. URLs average ~50 chars, and
+# PostgREST/Supabase rejects requests once the URL query exceeds its
+# limit (empirically 500 URLs → 400 Bad Request, 450 still works).
+# 200 keeps us safely under that ceiling regardless of the user's
+# --batch-size for upserts.
+URL_FETCH_CHUNK_SIZE = 200
+
 
 def load_config():
     config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'config.json')
@@ -128,19 +136,25 @@ def backfill(execute: bool, batch_size: int):
         chunk = all_urls[i:i + batch_size]
         print(f"  Batch {i // batch_size + 1}: rows {i+1}–{min(i+batch_size, total)} of {total}...")
 
-        # Fetch full rows for this chunk
-        rows_resp = requests.get(
-            profiles_url,
-            headers=client.headers,
-            params={
-                'select': '*',
-                'linkedin_url': f"in.({','.join(chunk)})",
-                'limit': len(chunk),
-            },
-            timeout=60
-        )
-        rows_resp.raise_for_status()
-        rows = rows_resp.json()
+        # Fetch full rows. The IN-list goes through the GET query string,
+        # which PostgREST caps in length — so we sub-chunk the URLs even
+        # when the upsert batch is larger. The upsert below sends rows in
+        # the POST body, where URL length doesn't apply.
+        rows = []
+        for j in range(0, len(chunk), URL_FETCH_CHUNK_SIZE):
+            sub = chunk[j:j + URL_FETCH_CHUNK_SIZE]
+            rows_resp = requests.get(
+                profiles_url,
+                headers=client.headers,
+                params={
+                    'select': '*',
+                    'linkedin_url': f"in.({','.join(sub)})",
+                    'limit': len(sub),
+                },
+                timeout=60
+            )
+            rows_resp.raise_for_status()
+            rows.extend(rows_resp.json())
 
         if not rows:
             continue

@@ -7,6 +7,14 @@ This script fetches those profiles and re-saves them, which fires the trigger.
 
 No Crustdata credits are spent — we re-save what's already in the DB.
 
+Selection strategy:
+    We page through `profiles` by primary key `id` (keyset pagination) and
+    project only the certifications JSON path in `select=`. Filtering for
+    non-empty certifications is done client-side. This avoids any JSON
+    expression in the WHERE clause, which on the live table caused
+    Supabase statement timeouts (PostgREST 500 / code 57014) when an
+    earlier version of this script paged by `raw_data->>certifications`.
+
 Usage:
     # Dry-run (default) — shows count only:
     python scripts/backfill_cert_search.py
@@ -24,9 +32,17 @@ import os
 import sys
 import time
 
+import requests
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from db import SupabaseClient
+
+
+# How many rows to scan per keyset page when looking for non-empty
+# certifications. The projection is tiny (just the cert path), so 1000
+# is comfortably under any timeout.
+SCAN_PAGE_SIZE = 1000
 
 
 def load_config():
@@ -35,28 +51,47 @@ def load_config():
         return json.load(f)
 
 
-def get_profiles_with_certs(client: SupabaseClient, limit: int = 10000) -> list:
-    """Fetch profiles that have certifications in raw_data."""
-    import requests
+def find_profiles_with_certs(client: SupabaseClient) -> list:
+    """Scan profiles by id (keyset pagination) and return linkedin_urls
+    of those with a non-empty certifications array.
+
+    We never put a JSON expression in the WHERE clause — only in the
+    projection — so the query stays on the `id` primary key index and
+    can't time out scanning JSON for filterable rows.
+    """
     url = f"{client.url}/rest/v1/profiles"
-    params = {
-        'select': 'linkedin_url,raw_data',
-        'raw_data->certifications': 'not.eq.[]',
-        'limit': limit,
-    }
-    # Use a direct filter for non-empty certifications array
-    params = {
-        'select': 'linkedin_url',
-        'limit': limit,
-    }
-    response = requests.get(
-        url,
-        headers={**client.headers, 'Prefer': 'count=exact'},
-        params=params,
-        timeout=30
-    )
-    # Fall back to RPC approach — fetch all and filter client-side
-    return None
+    last_id = None
+    found = []
+    scanned = 0
+
+    while True:
+        params = {
+            'select': 'id,linkedin_url,certifications:raw_data->certifications',
+            'order': 'id.asc',
+            'limit': SCAN_PAGE_SIZE,
+        }
+        if last_id is not None:
+            params['id'] = f'gt.{last_id}'
+
+        resp = requests.get(url, headers=client.headers, params=params, timeout=60)
+        resp.raise_for_status()
+        page = resp.json()
+        if not page:
+            break
+
+        scanned += len(page)
+        for row in page:
+            certs = row.get('certifications')
+            if isinstance(certs, list) and len(certs) > 0:
+                found.append(row['linkedin_url'])
+
+        last_id = page[-1]['id']
+        print(f"  scanned {scanned} rows, matches so far: {len(found)}")
+
+        if len(page) < SCAN_PAGE_SIZE:
+            break
+
+    return found
 
 
 def backfill(execute: bool, batch_size: int):
@@ -73,42 +108,11 @@ def backfill(execute: bool, batch_size: int):
         sys.exit(1)
 
     client = SupabaseClient(supabase_url, supabase_key)
+    profiles_url = f"{client.url}/rest/v1/profiles"
 
-    import requests
-
-    # Count profiles with certifications
-    count_url = f"{client.url}/rest/v1/profiles"
-    print("Fetching profiles with certifications...")
-
-    # Fetch linkedin_urls of profiles with non-empty certifications
-    # We use a JSONB filter: raw_data->certifications is not null and not empty array
-    offset = 0
-    all_urls = []
-    while True:
-        resp = requests.get(
-            count_url,
-            headers=client.headers,
-            params={
-                'select': 'linkedin_url',
-                'limit': 1000,
-                'offset': offset,
-                # filter: certifications array has at least 1 element
-                # PostgREST doesn't support jsonb_array_length directly in filters,
-                # so we use a workaround: raw_data->certifications != 'null' and != '[]'
-                'raw_data->>certifications': 'not.is.null',
-            },
-            timeout=30
-        )
-        resp.raise_for_status()
-        batch = resp.json()
-        if not batch:
-            break
-        all_urls.extend([r['linkedin_url'] for r in batch])
-        if len(batch) < 1000:
-            break
-        offset += len(batch)
-
-    print(f"Found {len(all_urls)} profiles with certifications field set.")
+    print("Scanning profiles for non-empty certifications (keyset paging by id)...")
+    all_urls = find_profiles_with_certs(client)
+    print(f"\nFound {len(all_urls)} profiles with non-empty certifications.")
 
     if not execute:
         print("DRY-RUN — pass --execute to actually update.")
@@ -124,9 +128,9 @@ def backfill(execute: bool, batch_size: int):
         chunk = all_urls[i:i + batch_size]
         print(f"  Batch {i // batch_size + 1}: rows {i+1}–{min(i+batch_size, total)} of {total}...")
 
-        # Fetch full rows
+        # Fetch full rows for this chunk
         rows_resp = requests.get(
-            count_url,
+            profiles_url,
             headers=client.headers,
             params={
                 'select': '*',
@@ -141,9 +145,9 @@ def backfill(execute: bool, batch_size: int):
         if not rows:
             continue
 
-        # Upsert back — this fires the BEFORE UPDATE trigger which rebuilds search_text
+        # Upsert back — fires the BEFORE UPDATE trigger which rebuilds search_text
         upsert_resp = requests.post(
-            count_url,
+            profiles_url,
             headers={**client.headers, 'Prefer': 'resolution=merge-duplicates'},
             params={'on_conflict': 'linkedin_url'},
             json=rows,

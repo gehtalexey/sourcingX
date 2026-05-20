@@ -629,40 +629,49 @@ def save_enriched_profiles_bulk(client: SupabaseClient, profiles: list,
             stats['errors'] += 1
             stats['error_messages'].append(f"{norm_url}: prepare failed: {str(e)[:100]}")
 
-    # Step 4: Batch upsert in chunks
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i:i+batch_size]
-        try:
-            if has_original_urls_column:
-                client.upsert_batch('profiles', batch, on_conflict='linkedin_url')
-            else:
-                # Strip original_urls from all rows
-                clean_batch = [{k: v for k, v in row.items() if k != 'original_urls'} for row in batch]
-                client.upsert_batch('profiles', clean_batch, on_conflict='linkedin_url')
-            stats['saved'] += len(batch)
-        except Exception as e:
-            error_str = str(e)
-            # If original_urls column doesn't exist, retry this batch without it
-            if has_original_urls_column and ('original_urls' in error_str or '42703' in error_str):
-                has_original_urls_column = False
-                try:
+    # Step 4: Batch upsert in chunks, grouped by key-shape.
+    # PostgREST requires every row in a batch to have the same keys (PGRST102).
+    # _prepare_profile_row strips None so rows have varying key sets.  The old
+    # fix padded all rows to the union of keys — but that reintroduces None for
+    # missing fields, which overwrites existing DB values with NULL on upsert.
+    # Instead, group by frozenset(keys) so each sub-batch is shape-homogeneous
+    # with no padding needed.
+    from collections import defaultdict as _dd
+    shape_groups: dict = _dd(list)
+    for r in rows:
+        shape_groups[frozenset(r.keys())].append(r)
+
+    for shape_rows in shape_groups.values():
+        for i in range(0, len(shape_rows), batch_size):
+            batch = shape_rows[i:i+batch_size]
+            try:
+                if has_original_urls_column:
+                    client.upsert_batch('profiles', batch, on_conflict='linkedin_url')
+                else:
                     clean_batch = [{k: v for k, v in row.items() if k != 'original_urls'} for row in batch]
                     client.upsert_batch('profiles', clean_batch, on_conflict='linkedin_url')
-                    stats['saved'] += len(batch)
-                    continue
-                except Exception as e2:
-                    error_str = str(e2)
+                stats['saved'] += len(batch)
+            except Exception as e:
+                error_str = str(e)
+                if has_original_urls_column and ('original_urls' in error_str or '42703' in error_str):
+                    has_original_urls_column = False
+                    try:
+                        clean_batch = [{k: v for k, v in row.items() if k != 'original_urls'} for row in batch]
+                        client.upsert_batch('profiles', clean_batch, on_conflict='linkedin_url')
+                        stats['saved'] += len(batch)
+                        continue
+                    except Exception as e2:
+                        error_str = str(e2)
 
-            # Batch failed — fall back to individual saves for this batch
-            print(f"[DB] Batch upsert failed ({error_str[:100]}), falling back to individual saves")
-            for row in batch:
-                try:
-                    client.upsert('profiles', row, on_conflict='linkedin_url')
-                    stats['saved'] += 1
-                except Exception as row_e:
-                    stats['errors'] += 1
-                    url = row.get('linkedin_url', 'unknown')
-                    stats['error_messages'].append(f"{url}: {str(row_e)[:100]}")
+                print(f"[DB] Batch upsert failed ({error_str[:100]}), falling back to individual saves")
+                for row in batch:
+                    try:
+                        client.upsert('profiles', row, on_conflict='linkedin_url')
+                        stats['saved'] += 1
+                    except Exception as row_e:
+                        stats['errors'] += 1
+                        url = row.get('linkedin_url', 'unknown')
+                        stats['error_messages'].append(f"{url}: {str(row_e)[:100]}")
 
     return stats
 
@@ -1884,32 +1893,42 @@ def search_profiles_boolean(client: SupabaseClient, filters: dict, limit: int = 
         params['email'] = 'not.is.null'
 
     # Date filters
+    # When both bounds are set, emit as a single and() expression so they don't
+    # collide on params['enriched_at'] in the simple-conditions loop below
+    # (second write would silently overwrite the first, dropping the lower bound).
     if filters.get('date_after') and filters.get('date_before'):
-        and_conditions.append(f"enriched_at.gte.{filters['date_after']}")
-        and_conditions.append(f"enriched_at.lte.{filters['date_before']}")
+        and_conditions.append(
+            f"and(enriched_at.gte.{filters['date_after']},enriched_at.lte.{filters['date_before']})"
+        )
     elif filters.get('date_after'):
         params['enriched_at'] = f"gte.{filters['date_after']}"
     elif filters.get('date_before'):
         params['enriched_at'] = f"lte.{filters['date_before']}"
 
-    # Combine all AND conditions
-    if and_conditions:
-        if len(and_conditions) == 1:
-            # Single condition - check if it's already wrapped
-            cond = and_conditions[0]
-            if cond.startswith('or('):
-                params['or'] = f"({cond[3:-1]})"  # Extract inner, wrap in parens
-            elif cond.startswith('and('):
-                params['and'] = f"({cond[4:-1]})"
-            else:
-                # Single term condition - add directly as column filter
-                # Format: column.ilike.*value* -> column=ilike.*value*
-                parts = cond.split('.', 1)
-                if len(parts) == 2:
-                    params[parts[0]] = parts[1]
+    # Combine all AND conditions.
+    # Simple col.op.val conditions (ilike, imatch, not.ilike, etc.) go as direct
+    # URL params — PostgREST ANDs multiple params automatically, and this is more
+    # reliable than wrapping them in and() which can silently fail in some
+    # PostgREST versions when mixed with ilike/imatch operators.
+    # Complex or()/and() expressions are collected and put in an and() group.
+    complex_conditions = []
+    for cond in and_conditions:
+        if cond.startswith('or(') or cond.startswith('and('):
+            complex_conditions.append(cond)
         else:
-            # Multiple conditions - wrap in and()
-            params['and'] = f"({','.join(and_conditions)})"
+            parts = cond.split('.', 1)
+            if len(parts) == 2:
+                params[parts[0]] = parts[1]
+
+    if complex_conditions:
+        if len(complex_conditions) == 1:
+            cond = complex_conditions[0]
+            if cond.startswith('or('):
+                params['or'] = f"({cond[3:-1]})"
+            else:  # and(
+                params['and'] = f"({cond[4:-1]})"
+        else:
+            params['and'] = f"({','.join(complex_conditions)})"
 
     # Select without raw_data for performance
     columns = 'linkedin_url,name,current_title,current_company,all_employers,all_titles,all_schools,skills,location,email,enriched_at'

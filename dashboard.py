@@ -10550,11 +10550,12 @@ with tab_database:
                 has_column_filters = any([f_name, f_current_title, f_past_titles, f_current_company, f_past_companies,
                                           f_location, f_skills, f_schools, f_date_after, f_freshness != "All", f_has_email])
 
-                # Store search state
+                # Store search state — clear cached results so the next render re-queries
                 if search_clicked:
                     st.session_state['db_search_executed'] = True
                     st.session_state['db_applied_filters'] = current_filters
                     st.session_state['db_fulltext'] = fulltext_query
+                    st.session_state.pop('db_search_results', None)
 
                 # Fetch profiles based on search (SERVER-SIDE filtering)
                 all_profiles = []
@@ -10567,42 +10568,54 @@ with tab_database:
                     has_column_filters = any(af.get(k) for k in ['name', 'current_title', 'past_titles', 'current_company', 'past_companies',
                                                    'location', 'skills', 'schools', 'date_after', 'has_email']) or af.get('freshness', 'All') != 'All'
 
-                    # For past_titles and past_companies, we need full-text search for partial matching
-                    # Build a combined fulltext query if these filters are used
-                    array_field_query_parts = []
-                    if af.get('past_titles'):
-                        # Convert "backend, frontend" to "backend OR frontend"
-                        terms = [t.strip() for t in af['past_titles'].split(',') if t.strip()]
-                        if terms:
-                            array_field_query_parts.append(' OR '.join(terms))
-                    if af.get('past_companies'):
-                        terms = [t.strip() for t in af['past_companies'].split(',') if t.strip()]
-                        if terms:
-                            array_field_query_parts.append(' OR '.join(terms))
-
-                    # Combine with existing fulltext query
-                    if array_field_query_parts:
-                        array_query = ' AND '.join(f"({p})" for p in array_field_query_parts)
+                    if 'db_search_results' in st.session_state:
+                        # Use cached results — no DB query on this render
+                        all_profiles = st.session_state['db_search_results']
                         if ft and ft.strip():
-                            ft = f"({ft}) AND ({array_query})"
-                        else:
-                            ft = array_query
-                        # Remove these from column filters since we're using fulltext
-                        af = {k: v for k, v in af.items() if k not in ['past_titles', 'past_companies']}
-
-                    if ft and ft.strip():
-                        # Full-text search (supports partial matching on all fields)
-                        from db import search_profiles_fulltext
-                        all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=50000)
-                        st.caption(f"Full-text search: **{ft}**" + (" + column filters" if has_column_filters else ""))
-                    elif has_column_filters:
-                        # Column filters only (server-side)
-                        from db import search_profiles_boolean
-                        all_profiles = search_profiles_boolean(db_client, af, limit=50000)
-                        st.caption("Server-side filtered search")
+                            st.caption(f"Full-text search: **{ft}**" + (" + column filters" if has_column_filters else ""))
+                        elif has_column_filters:
+                            st.caption("Server-side filtered search")
                     else:
-                        # No filters - load all (cached, 1-min TTL)
-                        all_profiles = _cached_all_profiles(limit=50000)
+                        # Fresh query — only runs immediately after Search is clicked
+
+                        # For past_titles and past_companies, we need full-text search for partial matching
+                        # Build a combined fulltext query if these filters are used
+                        array_field_query_parts = []
+                        if af.get('past_titles'):
+                            # Convert "backend, frontend" to "backend OR frontend"
+                            terms = [t.strip() for t in af['past_titles'].split(',') if t.strip()]
+                            if terms:
+                                array_field_query_parts.append(' OR '.join(terms))
+                        if af.get('past_companies'):
+                            terms = [t.strip() for t in af['past_companies'].split(',') if t.strip()]
+                            if terms:
+                                array_field_query_parts.append(' OR '.join(terms))
+
+                        # Combine with existing fulltext query
+                        if array_field_query_parts:
+                            array_query = ' AND '.join(f"({p})" for p in array_field_query_parts)
+                            if ft and ft.strip():
+                                ft = f"({ft}) AND ({array_query})"
+                            else:
+                                ft = array_query
+                            # Remove these from column filters since we're using fulltext
+                            af = {k: v for k, v in af.items() if k not in ['past_titles', 'past_companies']}
+
+                        if ft and ft.strip():
+                            # Full-text search (supports partial matching on all fields)
+                            from db import search_profiles_fulltext
+                            all_profiles = search_profiles_fulltext(db_client, ft.strip(), limit=50000)
+                            st.caption(f"Full-text search: **{ft}**" + (" + column filters" if has_column_filters else ""))
+                        elif has_column_filters:
+                            # Column filters only (server-side)
+                            from db import search_profiles_boolean
+                            all_profiles = search_profiles_boolean(db_client, af, limit=50000)
+                            st.caption("Server-side filtered search")
+                        else:
+                            # No filters - load all (cached, 1-min TTL)
+                            all_profiles = _cached_all_profiles(limit=50000)
+
+                        st.session_state['db_search_results'] = all_profiles
                 else:
                     st.info("Enter filters and click **Search** to find profiles")
 

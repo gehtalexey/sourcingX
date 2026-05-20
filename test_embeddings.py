@@ -84,7 +84,7 @@ def test_build_embedding_text_includes_labeled_fields():
     profile = _make_profile()
     text = build_embedding_text(profile)
 
-    assert "Name: Jane Doe" in text
+    assert "Name:" not in text
     assert "Current role: Senior Backend Engineer" in text
     assert "Current company: Acme" in text
     assert "Headline: Backend engineer working on distributed systems" in text
@@ -106,7 +106,7 @@ def test_build_embedding_text_skips_nan_and_none():
         "skills": [None, "Python", ""],
         "raw_data": {"headline": float("nan")},
     })
-    assert "Name: Jane" in text
+    assert "Name:" not in text
     assert "Current role" not in text
     assert "Current company" not in text  # 'nan' filtered
     assert "Headline" not in text

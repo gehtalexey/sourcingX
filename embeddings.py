@@ -129,7 +129,6 @@ def build_embedding_text(profile: dict) -> str:
     if not isinstance(raw_data, dict):
         raw_data = {}
 
-    name = _safe_str(profile.get("name"))
     headline = _safe_str(raw_data.get("headline"))
     summary = _safe_str(raw_data.get("summary"))
     current_title = _safe_str(profile.get("current_title"))
@@ -149,7 +148,6 @@ def build_embedding_text(profile: dict) -> str:
     # "title" close to "title" across profiles. This is the same approach
     # OpenAI's own retrieval cookbook recommends for structured records.
     lines = [
-        f"Name: {name}" if name else "",
         f"Current role: {current_title}" if current_title else "",
         f"Current company: {current_company}" if current_company else "",
         f"Location: {location}" if location else "",

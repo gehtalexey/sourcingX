@@ -629,52 +629,49 @@ def save_enriched_profiles_bulk(client: SupabaseClient, profiles: list,
             stats['errors'] += 1
             stats['error_messages'].append(f"{norm_url}: prepare failed: {str(e)[:100]}")
 
-    # Step 4: Batch upsert in chunks
-    for i in range(0, len(rows), batch_size):
-        batch = rows[i:i+batch_size]
-        # PostgREST batch upsert requires every row in a batch to have the
-        # SAME set of keys (PGRST102 "All object keys must match"). Rows
-        # built by _prepare_profile_row strip None values, so different
-        # profiles end up with different key sets and the batch is rejected
-        # — forcing fallback to per-row saves, which is 100x slower. Pad
-        # each row to the union of keys across the batch (None for missing)
-        # so the batch path actually fires.
-        if batch:
-            all_keys = set()
-            for r in batch:
-                all_keys.update(r.keys())
-            batch = [{k: r.get(k) for k in all_keys} for r in batch]
-        try:
-            if has_original_urls_column:
-                client.upsert_batch('profiles', batch, on_conflict='linkedin_url')
-            else:
-                # Strip original_urls from all rows
-                clean_batch = [{k: v for k, v in row.items() if k != 'original_urls'} for row in batch]
-                client.upsert_batch('profiles', clean_batch, on_conflict='linkedin_url')
-            stats['saved'] += len(batch)
-        except Exception as e:
-            error_str = str(e)
-            # If original_urls column doesn't exist, retry this batch without it
-            if has_original_urls_column and ('original_urls' in error_str or '42703' in error_str):
-                has_original_urls_column = False
-                try:
+    # Step 4: Batch upsert in chunks, grouped by key-shape.
+    # PostgREST requires every row in a batch to have the same keys (PGRST102).
+    # _prepare_profile_row strips None so rows have varying key sets.  The old
+    # fix padded all rows to the union of keys — but that reintroduces None for
+    # missing fields, which overwrites existing DB values with NULL on upsert.
+    # Instead, group by frozenset(keys) so each sub-batch is shape-homogeneous
+    # with no padding needed.
+    from collections import defaultdict as _dd
+    shape_groups: dict = _dd(list)
+    for r in rows:
+        shape_groups[frozenset(r.keys())].append(r)
+
+    for shape_rows in shape_groups.values():
+        for i in range(0, len(shape_rows), batch_size):
+            batch = shape_rows[i:i+batch_size]
+            try:
+                if has_original_urls_column:
+                    client.upsert_batch('profiles', batch, on_conflict='linkedin_url')
+                else:
                     clean_batch = [{k: v for k, v in row.items() if k != 'original_urls'} for row in batch]
                     client.upsert_batch('profiles', clean_batch, on_conflict='linkedin_url')
-                    stats['saved'] += len(batch)
-                    continue
-                except Exception as e2:
-                    error_str = str(e2)
+                stats['saved'] += len(batch)
+            except Exception as e:
+                error_str = str(e)
+                if has_original_urls_column and ('original_urls' in error_str or '42703' in error_str):
+                    has_original_urls_column = False
+                    try:
+                        clean_batch = [{k: v for k, v in row.items() if k != 'original_urls'} for row in batch]
+                        client.upsert_batch('profiles', clean_batch, on_conflict='linkedin_url')
+                        stats['saved'] += len(batch)
+                        continue
+                    except Exception as e2:
+                        error_str = str(e2)
 
-            # Batch failed — fall back to individual saves for this batch
-            print(f"[DB] Batch upsert failed ({error_str[:100]}), falling back to individual saves")
-            for row in batch:
-                try:
-                    client.upsert('profiles', row, on_conflict='linkedin_url')
-                    stats['saved'] += 1
-                except Exception as row_e:
-                    stats['errors'] += 1
-                    url = row.get('linkedin_url', 'unknown')
-                    stats['error_messages'].append(f"{url}: {str(row_e)[:100]}")
+                print(f"[DB] Batch upsert failed ({error_str[:100]}), falling back to individual saves")
+                for row in batch:
+                    try:
+                        client.upsert('profiles', row, on_conflict='linkedin_url')
+                        stats['saved'] += 1
+                    except Exception as row_e:
+                        stats['errors'] += 1
+                        url = row.get('linkedin_url', 'unknown')
+                        stats['error_messages'].append(f"{url}: {str(row_e)[:100]}")
 
     return stats
 
@@ -1896,9 +1893,13 @@ def search_profiles_boolean(client: SupabaseClient, filters: dict, limit: int = 
         params['email'] = 'not.is.null'
 
     # Date filters
+    # When both bounds are set, emit as a single and() expression so they don't
+    # collide on params['enriched_at'] in the simple-conditions loop below
+    # (second write would silently overwrite the first, dropping the lower bound).
     if filters.get('date_after') and filters.get('date_before'):
-        and_conditions.append(f"enriched_at.gte.{filters['date_after']}")
-        and_conditions.append(f"enriched_at.lte.{filters['date_before']}")
+        and_conditions.append(
+            f"and(enriched_at.gte.{filters['date_after']},enriched_at.lte.{filters['date_before']})"
+        )
     elif filters.get('date_after'):
         params['enriched_at'] = f"gte.{filters['date_after']}"
     elif filters.get('date_before'):

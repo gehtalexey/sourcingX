@@ -7804,12 +7804,13 @@ with tab_filter:
                     if keywords_full_profile or keywords_skills_only:
                         st.warning("Boolean keyword search unavailable — boolean_query module not found.")
 
-                # Sync `final` with the actual surviving rowcount. apply_pre_filters set it
-                # before the post-apply trims (Not Relevant All Employers + Boolean keyword
-                # search) ran, so the "X candidates remaining" message + Remaining metric
-                # both reported a stale, over-count number that didn't match the Passed
-                # Candidates preview or Export.
+                # Sync `final` and `total_removed` with the actual post-trim state.
+                # apply_pre_filters set both before the post-apply trims (Not Relevant
+                # All Employers + Boolean keyword search) ran, so the "X remaining"
+                # banner, the Remaining metric, and the Removed metric all reported
+                # stale numbers that didn't add up to Original.
                 stats['final'] = len(filtered_df)
+                stats['total_removed'] = stats.get('original', len(filtered_df)) - len(filtered_df)
                 st.session_state['passed_candidates_df'] = filtered_df  # Store filtered results separately
                 st.session_state['results_df'] = filtered_df
                 st.session_state['filter_stats'] = stats

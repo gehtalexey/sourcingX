@@ -364,6 +364,9 @@ def run_backfill(
             f"est cost so far ${estimate_embedding_cost(total_tokens_est):.4f}"
         )
 
+        # Throttle between pages to avoid exhausting Supabase disk I/O burst budget
+        time.sleep(1)
+
     elapsed = time.time() - start
     print()
     print("=" * 60)

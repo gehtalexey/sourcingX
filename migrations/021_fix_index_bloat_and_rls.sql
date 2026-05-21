@@ -9,13 +9,20 @@
 --      query instead of once per row
 --   4. Grant EXECUTE on is_workspace_member to authenticator (stops repeated
 --      "permission denied" errors that fire every ~60 seconds from PostgREST)
+--
+-- Fresh-DB safety: index drops use IF EXISTS throughout. RLS and GRANT changes
+-- are wrapped in DO $$ blocks with existence checks because top_companies,
+-- similar_search_state, company_similarity_reviews, and is_workspace_member
+-- are not yet represented in the checked-in migration chain — the blocks are
+-- no-ops on a fresh DB and apply correctly on production.
 
 -- ============================================================
 -- 1. DROP DUPLICATE INDEXES
 -- ============================================================
 
--- profiles: idx_profiles_search duplicates idx_profiles_search_text
-DROP INDEX IF EXISTS public.idx_profiles_search;
+-- profiles: idx_profiles_search_text is an out-of-band production duplicate of
+-- idx_profiles_search (created in migration 009). Drop the untracked one.
+DROP INDEX IF EXISTS public.idx_profiles_search_text;
 
 -- pipeline_candidates: two duplicate pairs
 DROP INDEX IF EXISTS public.idx_pc_linkedin;
@@ -38,72 +45,92 @@ DROP INDEX IF EXISTS public.idx_profiles_skills;
 
 -- ============================================================
 -- 3. FIX RLS POLICIES: (SELECT auth.uid()) instead of auth.uid()
+--    Existence-guarded because these tables are not in the migration chain.
 -- ============================================================
 
--- top_companies: SELECT policy
-DROP POLICY IF EXISTS top_companies_read ON public.top_companies;
-CREATE POLICY top_companies_read ON public.top_companies
-  FOR SELECT
-  USING (
-    (workspace_id IS NULL)
-    OR (workspace_id IN (
-      SELECT workspace_members.workspace_id
-      FROM workspace_members
-      WHERE workspace_members.user_id = (SELECT auth.uid())
-    ))
-  );
+DO $$ BEGIN
 
--- top_companies: ALL policy (write/admin)
-DROP POLICY IF EXISTS top_companies_write ON public.top_companies;
-CREATE POLICY top_companies_write ON public.top_companies
-  FOR ALL
-  USING (
-    (
-      (workspace_id IS NULL)
-      AND (EXISTS (
-        SELECT 1 FROM user_profiles
-        WHERE user_profiles.id = (SELECT auth.uid())
-          AND user_profiles.role = 'admin'::text
-      ))
-    )
-    OR (workspace_id IN (
-      SELECT workspace_members.workspace_id
-      FROM workspace_members
-      WHERE workspace_members.user_id = (SELECT auth.uid())
-        AND workspace_members.role = 'admin'::text
-    ))
-  );
+  -- top_companies: SELECT policy
+  IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'top_companies') THEN
+    DROP POLICY IF EXISTS top_companies_read ON public.top_companies;
+    CREATE POLICY top_companies_read ON public.top_companies
+      FOR SELECT
+      USING (
+        (workspace_id IS NULL)
+        OR (workspace_id IN (
+          SELECT workspace_members.workspace_id
+          FROM workspace_members
+          WHERE workspace_members.user_id = (SELECT auth.uid())
+        ))
+      );
 
--- similar_search_state
-DROP POLICY IF EXISTS similar_search_state_access ON public.similar_search_state;
-CREATE POLICY similar_search_state_access ON public.similar_search_state
-  FOR ALL
-  USING (
-    conversation_id IN (
-      SELECT conversations.id
-      FROM conversations
-      WHERE conversations.workspace_id IN (
-        SELECT workspace_members.workspace_id
-        FROM workspace_members
-        WHERE workspace_members.user_id = (SELECT auth.uid())
-      )
-    )
-  );
+    -- top_companies: ALL policy (write/admin)
+    DROP POLICY IF EXISTS top_companies_write ON public.top_companies;
+    CREATE POLICY top_companies_write ON public.top_companies
+      FOR ALL
+      USING (
+        (
+          (workspace_id IS NULL)
+          AND (EXISTS (
+            SELECT 1 FROM user_profiles
+            WHERE user_profiles.id = (SELECT auth.uid())
+              AND user_profiles.role = 'admin'::text
+          ))
+        )
+        OR (workspace_id IN (
+          SELECT workspace_members.workspace_id
+          FROM workspace_members
+          WHERE workspace_members.user_id = (SELECT auth.uid())
+            AND workspace_members.role = 'admin'::text
+        ))
+      );
+  END IF;
 
--- company_similarity_reviews
-DROP POLICY IF EXISTS company_similarity_reviews_access ON public.company_similarity_reviews;
-CREATE POLICY company_similarity_reviews_access ON public.company_similarity_reviews
-  FOR ALL
-  USING (
-    workspace_id IN (
-      SELECT workspace_members.workspace_id
-      FROM workspace_members
-      WHERE workspace_members.user_id = (SELECT auth.uid())
-    )
-  );
+  -- similar_search_state
+  IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'similar_search_state') THEN
+    DROP POLICY IF EXISTS similar_search_state_access ON public.similar_search_state;
+    CREATE POLICY similar_search_state_access ON public.similar_search_state
+      FOR ALL
+      USING (
+        conversation_id IN (
+          SELECT conversations.id
+          FROM conversations
+          WHERE conversations.workspace_id IN (
+            SELECT workspace_members.workspace_id
+            FROM workspace_members
+            WHERE workspace_members.user_id = (SELECT auth.uid())
+          )
+        )
+      );
+  END IF;
+
+  -- company_similarity_reviews
+  IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'company_similarity_reviews') THEN
+    DROP POLICY IF EXISTS company_similarity_reviews_access ON public.company_similarity_reviews;
+    CREATE POLICY company_similarity_reviews_access ON public.company_similarity_reviews
+      FOR ALL
+      USING (
+        workspace_id IN (
+          SELECT workspace_members.workspace_id
+          FROM workspace_members
+          WHERE workspace_members.user_id = (SELECT auth.uid())
+        )
+      );
+  END IF;
+
+END $$;
 
 -- ============================================================
 -- 4. FIX is_workspace_member PERMISSION ERROR
+--    Existence-guarded because the function is not in the migration chain.
 -- ============================================================
 
-GRANT EXECUTE ON FUNCTION public.is_workspace_member(uuid) TO authenticator;
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE p.proname = 'is_workspace_member' AND n.nspname = 'public'
+  ) THEN
+    GRANT EXECUTE ON FUNCTION public.is_workspace_member(uuid) TO authenticator;
+  END IF;
+END $$;

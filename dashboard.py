@@ -8017,7 +8017,15 @@ with tab_filter:
                             _email_mask |= (_passed_df_full['salesql_email'].notna() & (_passed_df_full['salesql_email'] != ''))
                         if 'email' in _passed_df_full.columns:
                             _email_mask |= (_passed_df_full['email'].notna() & (_passed_df_full['email'] != ''))
-                        _need_email = int((~_email_mask).sum())
+                        _have_email = int(_email_mask.sum())
+                        _need_email = len(_passed_df_full) - _have_email
+                        # Show the split so the user always knows the full picture:
+                        # how many already have an email vs. how many would be enriched.
+                        st.caption(
+                            f"**{len(_passed_df_full)}** passed · "
+                            f"**{_have_email}** already have an email · "
+                            f"**{_need_email}** need personal email"
+                        )
                         if _need_email > 0:
                             if st.button(
                                 f"Enrich {_need_email} passed with personal email",

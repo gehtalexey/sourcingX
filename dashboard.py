@@ -7761,7 +7761,20 @@ with tab_filter:
                         emps = employers_data if isinstance(employers_data, (list, tuple)) else [e.strip() for e in str(employers_data).split(',')]
                         return any(_company_matches_filter_list(e, _nr_list) for e in emps if e)
                     _nr_all_mask = filtered_df['all_employers'].apply(_has_nr_employer)
-                    stats['not_relevant_all_employers'] = int(_nr_all_mask.sum())
+                    _nr_all_count = int(_nr_all_mask.sum())
+                    stats['not_relevant_all_employers'] = _nr_all_count
+                    # Mirror _store_filtered's contract: capture a lightweight
+                    # snapshot (display columns, max 100 rows) into filtered_out
+                    # so the "Review filtered out candidates" dropdown can show
+                    # this category alongside the current-company variant.
+                    if _nr_all_count > 0:
+                        _nr_all_label = 'Not Relevant (All Employers)'
+                        _nr_light_cols = ['name', 'first_name', 'last_name', 'current_title', 'current_company', 'linkedin_url']
+                        _nr_avail = [c for c in _nr_light_cols if c in filtered_df.columns]
+                        if _nr_avail:
+                            filtered_out[_nr_all_label] = filtered_df.loc[_nr_all_mask, _nr_avail].head(100).copy()
+                        else:
+                            filtered_out[_nr_all_label] = filtered_df.loc[_nr_all_mask, list(filtered_df.columns)[:5]].head(100).copy()
                     filtered_df = filtered_df[~_nr_all_mask]
 
                 # Boolean keyword search — full profile and/or skills only
@@ -7791,6 +7804,12 @@ with tab_filter:
                     if keywords_full_profile or keywords_skills_only:
                         st.warning("Boolean keyword search unavailable — boolean_query module not found.")
 
+                # Sync `final` with the actual surviving rowcount. apply_pre_filters set it
+                # before the post-apply trims (Not Relevant All Employers + Boolean keyword
+                # search) ran, so the "X candidates remaining" message + Remaining metric
+                # both reported a stale, over-count number that didn't match the Passed
+                # Candidates preview or Export.
+                stats['final'] = len(filtered_df)
                 st.session_state['passed_candidates_df'] = filtered_df  # Store filtered results separately
                 st.session_state['results_df'] = filtered_df
                 st.session_state['filter_stats'] = stats
@@ -7801,6 +7820,7 @@ with tab_filter:
                     'Past Candidates': stats.get('past_candidates', 0),
                     'Blacklist Companies': stats.get('blacklist', 0),
                     'Not Relevant (Current)': stats.get('not_relevant_current', 0),
+                    'Not Relevant (All Employers)': stats.get('not_relevant_all_employers', 0),
                     'Excluded Titles': stats.get('excluded_titles', 0),
                     'Not Matching Titles': stats.get('not_matching_titles', 0),
                     'Role Too Short': stats.get('role_too_short', 0),

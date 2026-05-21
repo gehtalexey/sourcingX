@@ -1160,6 +1160,28 @@ def get_profile_count() -> int:
     return 0
 
 
+def count_passed_email_split(df) -> tuple:
+    """Return (have_email, need_email) counts for the passed-only enrichment UI.
+
+    'Has email' = either the `email` column or the `salesql_email` column is
+    populated (non-null, non-empty). Mirrors the skip logic in
+    `enrich_profiles_with_salesql` (dashboard.py:1763-1768) so the count shown
+    next to the SalesQL passed-only button never drifts from the count of
+    profiles that function actually processes.
+
+    Returns (0, 0) on empty/None input.
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return (0, 0)
+    mask = pd.Series([False] * len(df), index=df.index)
+    if 'salesql_email' in df.columns:
+        mask |= (df['salesql_email'].notna() & (df['salesql_email'] != ''))
+    if 'email' in df.columns:
+        mask |= (df['email'].notna() & (df['email'] != ''))
+    have = int(mask.sum())
+    return (have, len(df) - have)
+
+
 def _get_session_file():
     """Get per-user session file path."""
     username = st.session_state.get('username', 'default')
@@ -7666,6 +7688,16 @@ with tab_filter:
                         if key in st.session_state:
                             del st.session_state[key]
                     st.success(f"Reset to {len(original_df)} profiles")
+                    # Tell the user any SalesQL emails enriched during this session
+                    # revert in-memory to the pre-enrichment baseline. They're safe in
+                    # Supabase — a reload picks them back up — but the visible state
+                    # right after Reset will look "less enriched" than before. Heads-up
+                    # so they don't think emails were lost.
+                    st.caption(
+                        "Note: in-memory emails added during this session revert to the "
+                        "pre-enrichment baseline. They're preserved in Supabase — re-running "
+                        "*Load existing from DB* or re-uploading the CSV brings them back."
+                    )
                     save_session_state()
                     st.rerun()
                 else:
@@ -7989,7 +8021,7 @@ with tab_filter:
                     st.caption(f"Showing first 100 of {len(passed_preview_df)} passed candidates")
 
             # Export button always visible after filtering (outside expander)
-            _exp_col1, _exp_col2, _exp_col3 = st.columns([1, 2, 1])
+            _exp_col1, _exp_col2 = st.columns([1, 2])
             with _exp_col1:
                 _export_filtered = prepare_df_for_export(passed_preview_df)
                 _csv_filtered = _export_filtered.to_csv(index=False).encode('utf-8-sig')
@@ -8012,13 +8044,7 @@ with tab_filter:
                 if _passed_salesql_key:
                     _passed_df_full = st.session_state.get('passed_candidates_df')
                     if _passed_df_full is not None and not _passed_df_full.empty:
-                        _email_mask = pd.Series([False] * len(_passed_df_full), index=_passed_df_full.index)
-                        if 'salesql_email' in _passed_df_full.columns:
-                            _email_mask |= (_passed_df_full['salesql_email'].notna() & (_passed_df_full['salesql_email'] != ''))
-                        if 'email' in _passed_df_full.columns:
-                            _email_mask |= (_passed_df_full['email'].notna() & (_passed_df_full['email'] != ''))
-                        _have_email = int(_email_mask.sum())
-                        _need_email = len(_passed_df_full) - _have_email
+                        _have_email, _need_email = count_passed_email_split(_passed_df_full)
                         # Show the split so the user always knows the full picture:
                         # how many already have an email vs. how many would be enriched.
                         st.caption(

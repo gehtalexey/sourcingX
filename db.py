@@ -1167,6 +1167,70 @@ def get_profiles_by_urls(client: SupabaseClient, urls: list, include_raw_data: b
     return results
 
 
+def get_profiles_by_url_variants(
+    client: SupabaseClient,
+    urls: list,
+    include_raw_data: bool = True,
+    batch_size: int = 50,
+) -> list:
+    """Fetch profiles where ANY of linkedin_url, original_url, or original_urls
+    contains a matching URL. All three columns are indexed (btree x2 + GIN),
+    so this is one round-trip per batch with three index lookups joined by OR.
+
+    Much faster than match_profiles_by_urls_rpc for the "CSV uploaded — which
+    of these are already enriched?" lookup. Returns canonical profile rows
+    (linkedin_url unique).
+
+    Args:
+        client: SupabaseClient
+        urls: List of URLs (any variant — canonical, Sales Nav slug, www prefix, etc.)
+        include_raw_data: If True, returns the full row including raw_data JSONB
+            (needed downstream for AI screening). False trims to display columns.
+        batch_size: URLs per request. Kept small (~25) to stay under PostgREST's
+            URL-length budget when three IN-lists go into a single or() filter.
+    """
+    if not urls:
+        return []
+
+    normalized = list({normalize_linkedin_url(u) for u in urls if u})
+    normalized = [u for u in normalized if u]
+    if not normalized:
+        return []
+
+    columns = '*' if include_raw_data else (
+        'linkedin_url,name,location,current_title,current_company,all_employers,'
+        'all_titles,all_schools,skills,email,enriched_at,enrichment_status'
+    )
+
+    results = []
+    seen = set()
+    for i in range(0, len(normalized), batch_size):
+        batch = normalized[i:i + batch_size]
+        in_list = ','.join(batch)
+        # Postgres array literal: {"url1","url2"} (double-quotes survive PostgREST encoding).
+        array_list = '{' + ','.join(f'"{u}"' for u in batch) + '}'
+
+        # Three simple queries — one per indexed column. Each is a clean
+        # PostgREST filter with no nested-OR parser ambiguity.
+        filter_variants = (
+            {'linkedin_url': f'in.({in_list})'},
+            {'original_url': f'in.({in_list})'},
+            {'original_urls': f'ov.{array_list}'},
+        )
+        for _flt in filter_variants:
+            try:
+                batch_rows = client.select('profiles', columns, _flt, limit=len(batch) * 2)
+            except Exception as e:
+                print(f"[DB] get_profiles_by_url_variants {list(_flt)[0]} batch failed: {e}")
+                continue
+            for p in batch_rows:
+                u = p.get('linkedin_url')
+                if u and u not in seen:
+                    seen.add(u)
+                    results.append(p)
+    return results
+
+
 def match_profiles_by_urls_rpc(
     client: SupabaseClient,
     urls: list,

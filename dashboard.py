@@ -6653,15 +6653,30 @@ with tab_upload:
                                             # profiles aren't proposed for re-enrichment.
                                             # Crustdata error rows use linkedin_profile_url; the
                                             # http-error path uses linkedin_url. Read both.
+                                            # DATA-INTEGRITY GUARD (PR #87 review): when
+                                            # force-reenrich is on, the pool includes URLs that
+                                            # already have enriched data in DB. Saving those as
+                                            # not_found would DOWNGRADE good profiles. Skip them.
+                                            _refresh_skip_norm = set()
+                                            if _force_reenrich:
+                                                for _u in _existing_urls:
+                                                    _nu = normalize_linkedin_url(_u) if _u else None
+                                                    if _nu:
+                                                        _refresh_skip_norm.add(_nu)
                                             if _enrich_errors:
-                                                _failed_records = [
-                                                    {
-                                                        'url': _e.get('linkedin_url') or _e.get('linkedin_profile_url'),
+                                                _failed_records = []
+                                                for _e in _enrich_errors:
+                                                    _u_raw = _e.get('linkedin_url') or _e.get('linkedin_profile_url')
+                                                    if not _u_raw:
+                                                        continue
+                                                    if normalize_linkedin_url(_u_raw) in _refresh_skip_norm:
+                                                        # Already enriched, force-refresh failed —
+                                                        # leave existing 'enriched' status intact.
+                                                        continue
+                                                    _failed_records.append({
+                                                        'url': _u_raw,
                                                         'error': _e.get('error'),
-                                                    }
-                                                    for _e in _enrich_errors
-                                                    if (_e.get('linkedin_url') or _e.get('linkedin_profile_url'))
-                                                ]
+                                                    })
                                                 if _failed_records:
                                                     try:
                                                         save_failed_enrichments_batch(_db_client, _failed_records)
@@ -6726,14 +6741,27 @@ with tab_upload:
                                     try:
                                         _db_client_f = _get_db_client()
                                         if _db_client_f:
-                                            _failed_records = [
-                                                {
-                                                    'url': _e.get('linkedin_url') or _e.get('linkedin_profile_url'),
+                                            # DATA-INTEGRITY GUARD (PR #87 review): skip
+                                            # failures whose URL is already enriched in DB
+                                            # (force-refresh path). Saving as not_found would
+                                            # downgrade them.
+                                            _refresh_skip_norm = set()
+                                            if _force_reenrich:
+                                                for _u in _existing_urls:
+                                                    _nu = normalize_linkedin_url(_u) if _u else None
+                                                    if _nu:
+                                                        _refresh_skip_norm.add(_nu)
+                                            _failed_records = []
+                                            for _e in _enrich_errors:
+                                                _u_raw = _e.get('linkedin_url') or _e.get('linkedin_profile_url')
+                                                if not _u_raw:
+                                                    continue
+                                                if normalize_linkedin_url(_u_raw) in _refresh_skip_norm:
+                                                    continue
+                                                _failed_records.append({
+                                                    'url': _u_raw,
                                                     'error': _e.get('error'),
-                                                }
-                                                for _e in _enrich_errors
-                                                if (_e.get('linkedin_url') or _e.get('linkedin_profile_url'))
-                                            ]
+                                                })
                                             if _failed_records:
                                                 save_failed_enrichments_batch(_db_client_f, _failed_records)
                                     except Exception as _fbe:

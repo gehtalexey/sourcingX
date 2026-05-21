@@ -71,7 +71,9 @@ def test_clear_handles_partial_state():
         "enriched_df",            # Enrich tab output
         "enriched_profiles_raw",  # raw profile cache keyed by URL
         "filter_stats",           # Filter tab funnel
-        "f2_filter_stats",        # Filter+ tab funnel
+        # f2_filter_stats / f2_filtered_out were intentionally removed when
+        # the Advanced Filtering ("Filter+") section was merged into the
+        # main Filter tab and deleted (commit a5bbea9). Don't re-add here.
     ],
 )
 def test_known_stale_keys_are_in_clear_list(key):

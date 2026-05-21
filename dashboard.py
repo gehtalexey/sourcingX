@@ -90,7 +90,7 @@ try:
         match_profiles_by_urls_rpc,
         save_failed_enrichments_batch, get_not_found_urls,
         update_profile_email, update_profile_emails_batch, get_profile,
-        get_profiles_by_urls, get_profiles_by_url_variants,
+        get_profiles_by_urls,
         ENRICHMENT_REFRESH_MONTHS,
     )
     from pb_dedup import filter_results_against_database, update_phantombuster_with_skip_list, get_skip_list_from_database
@@ -6447,15 +6447,11 @@ with tab_upload:
                                                 _unmatched_csv_rows = _orig_csv_df[
                                                     ~_orig_norm.isin(_loaded_norm)
                                                 ].copy()
-                                            if not _unmatched_csv_rows.empty:
-                                                _combined_df = pd.concat(
-                                                    [_existing_df, _unmatched_csv_rows],
-                                                    ignore_index=True,
-                                                    sort=False,
-                                                )
-                                            else:
-                                                _combined_df = _existing_df
-
+                                            # (Earlier revisions merged `_unmatched_csv_rows` into
+                                            # results_df; current contract is rich-only in the
+                                            # working set — the unmatched rows are tracked via
+                                            # original_results_df instead. `_unmatched_csv_rows`
+                                            # is kept only to populate _new_count below.)
                                             clear_results_derived_state(st.session_state)
                                             # Both refs hold just the rich profiles so the Filter
                                             # tab shows N (not N + sparse). The Load tab's enrich

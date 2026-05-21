@@ -7989,7 +7989,7 @@ with tab_filter:
                     st.caption(f"Showing first 100 of {len(passed_preview_df)} passed candidates")
 
             # Export button always visible after filtering (outside expander)
-            _exp_col1, _exp_col2 = st.columns([1, 3])
+            _exp_col1, _exp_col2, _exp_col3 = st.columns([1, 2, 1])
             with _exp_col1:
                 _export_filtered = prepare_df_for_export(passed_preview_df)
                 _csv_filtered = _export_filtered.to_csv(index=False).encode('utf-8-sig')
@@ -8001,6 +8001,69 @@ with tab_filter:
                     key="filter_tab_export_filtered",
                     type="primary"
                 )
+
+            # ===== SalesQL personal-email enrichment for passed-only =====
+            # Explicit scope: only the profiles that survived filtering. Avoids
+            # accidentally spending credits on the full upload when the recruiter
+            # only wants emails for the short-list. Personal-only by default —
+            # work emails come later via the AI Screen / outreach flow.
+            with _exp_col2:
+                _passed_salesql_key = load_salesql_key()
+                if _passed_salesql_key:
+                    _passed_df_full = st.session_state.get('passed_candidates_df')
+                    if _passed_df_full is not None and not _passed_df_full.empty:
+                        _email_mask = pd.Series([False] * len(_passed_df_full), index=_passed_df_full.index)
+                        if 'salesql_email' in _passed_df_full.columns:
+                            _email_mask |= (_passed_df_full['salesql_email'].notna() & (_passed_df_full['salesql_email'] != ''))
+                        if 'email' in _passed_df_full.columns:
+                            _email_mask |= (_passed_df_full['email'].notna() & (_passed_df_full['email'] != ''))
+                        _need_email = int((~_email_mask).sum())
+                        if _need_email > 0:
+                            if st.button(
+                                f"Enrich {_need_email} passed with personal email",
+                                key="filter_passed_salesql_personal",
+                                help="SalesQL personal-email enrichment on profiles that survived filtering. Skips profiles that already have an email.",
+                            ):
+                                _progress = st.progress(0)
+                                _status = st.empty()
+                                def _passed_progress(current, total):
+                                    _progress.progress(current / total if total else 0)
+                                    _status.text(f"Enriching {current}/{total}...")
+                                _enriched_passed = enrich_profiles_with_salesql(
+                                    _passed_df_full,
+                                    _passed_salesql_key,
+                                    progress_callback=_passed_progress,
+                                    personal_only=True,
+                                    limit=_need_email,
+                                )
+                                # Persist new emails to DB for cross-session reuse
+                                if HAS_DATABASE:
+                                    _dbc = _get_db_client()
+                                    if _dbc:
+                                        _emails_to_save = []
+                                        for _, _r in _enriched_passed.iterrows():
+                                            _em = _r.get('salesql_email')
+                                            _url = _r.get('linkedin_url')
+                                            if _em and _url and str(_em).strip():
+                                                _emails_to_save.append({'linkedin_url': _url, 'email': _em})
+                                        if _emails_to_save:
+                                            _res = update_profile_emails_batch(_dbc, _emails_to_save, source='salesql')
+                                            if _res.get('saved', 0) > 0:
+                                                st.caption(f"💾 Saved {_res['saved']} emails to database")
+                                # Update both refs so the new emails are visible everywhere
+                                st.session_state['passed_candidates_df'] = _enriched_passed
+                                st.session_state['results_df'] = _enriched_passed
+                                save_session_state()
+                                _new_emails = (
+                                    int(_enriched_passed['salesql_email'].notna().sum())
+                                    if 'salesql_email' in _enriched_passed.columns else 0
+                                )
+                                st.success(f"Done. {_new_emails} passed profiles now have a personal email.")
+                                st.rerun()
+                        else:
+                            st.caption("All passed profiles already have an email.")
+                else:
+                    st.caption("SalesQL not configured.")
 
     # Priority Lists Section (Step 2 - after filtering)
     st.divider()

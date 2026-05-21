@@ -90,6 +90,7 @@ try:
         match_profiles_by_urls_rpc,
         save_failed_enrichments_batch, get_not_found_urls,
         update_profile_email, update_profile_emails_batch, get_profile,
+        get_profiles_by_urls,
         ENRICHMENT_REFRESH_MONTHS,
     )
     from pb_dedup import filter_results_against_database, update_phantombuster_with_skip_list, get_skip_list_from_database
@@ -5030,9 +5031,28 @@ st.title("SourcingX")
 api_key = load_api_key()
 has_crust_key = api_key and api_key != "YOUR_CRUSTDATA_API_KEY_HERE"
 
-# Show data status in header (always render to keep widget tree stable for tabs)
+# Show data status in header (always render to keep widget tree stable for tabs).
+# Surface both the original CSV upload count AND the working/enriched count so
+# the user always knows the size of the source set, not just what's currently
+# enriched/loaded.
 _profile_count = get_profile_count()
-st.info(f"📊 **{_profile_count}** profiles loaded" if _profile_count else "No profiles loaded — start from the Load tab")
+_orig_csv_df = st.session_state.get('original_results_df')
+_orig_count = (
+    len(_orig_csv_df)
+    if _orig_csv_df is not None and isinstance(_orig_csv_df, pd.DataFrame) and not _orig_csv_df.empty
+    else 0
+)
+if _profile_count and _orig_count and _orig_count != _profile_count:
+    st.info(
+        f"📊 **{_orig_count}** profiles uploaded from CSV · "
+        f"**{_profile_count}** ready in working set"
+    )
+elif _orig_count:
+    st.info(f"📊 **{_orig_count}** profiles uploaded from CSV")
+elif _profile_count:
+    st.info(f"📊 **{_profile_count}** profiles loaded")
+else:
+    st.info("No profiles loaded — start from the Load tab")
 
 # Create tabs
 tab_search, tab_upload, tab_filter, tab_screening, tab_emails, tab_database, tab_similar, tab_usage = st.tabs([
@@ -6185,6 +6205,16 @@ with tab_upload:
                 st.markdown("### Enrich with Crustdata")
                 st.caption("Pull full LinkedIn profile data: work history, education, skills")
 
+                # Show "loaded existing from DB" message if just clicked
+                # (st.success doesn't survive st.rerun(); pop from session_state on next render)
+                if '_load_existing_message' in st.session_state:
+                    _msg = st.session_state.pop('_load_existing_message')
+                    st.success(_msg)
+                    st.info(
+                        "**Profiles are now in the Filter tab.** "
+                        "Click **2. Filter** above to apply blacklists, target companies, and other filters."
+                    )
+
                 # Show enrichment result message if stored
                 if 'enrichment_message' in st.session_state:
                     msg = st.session_state.pop('enrichment_message')
@@ -6194,34 +6224,276 @@ with tab_upload:
                         st.success(msg[8:])
                     else:
                         st.info(msg)
+                    # After enrichment, the enriched DataFrame is auto-routed into
+                    # results_df, so the Filter tab is immediately ready to use.
+                    _enriched_after = st.session_state.get('enriched_df')
+                    if _enriched_after is not None and not _enriched_after.empty:
+                        st.info(
+                            f"**{len(_enriched_after)} enriched profiles ready in the Filter tab.** "
+                            "Click **2. Filter** above to apply blacklists, target companies, and other filters."
+                        )
 
                 if not HAS_DATABASE:
                     st.error("Supabase is not connected. Enrichment is disabled because results won't be saved.")
                 elif not has_crust_key:
                     st.warning("Crustdata API key not configured. Add 'api_key' to config.json")
                 else:
+                    # Source URLs from original_results_df (immutable CSV snapshot) so
+                    # the still-to-enrich rows survive even after Load Existing narrows
+                    # results_df to enriched-only. Fall back to results_df if no original.
+                    _enrich_src_df = st.session_state.get('original_results_df')
+                    if _enrich_src_df is None or _enrich_src_df.empty:
+                        _enrich_src_df = results_df
                     # Only enrich rows that aren't already complete (excludes Crustdata search rows)
-                    if '_needs_enrichment' in results_df.columns:
-                        _enrich_source_df = results_df[results_df['_needs_enrichment'] != False]
+                    if '_needs_enrichment' in _enrich_src_df.columns:
+                        _enrich_source_df = _enrich_src_df[_enrich_src_df['_needs_enrichment'] != False]
                     else:
-                        _enrich_source_df = results_df
+                        _enrich_source_df = _enrich_src_df
                     _enrich_urls = extract_urls_from_phantombuster(_enrich_source_df)
                     if _enrich_urls:
+                        # ----- DB dedup: split CSV URLs into already-in-DB vs new -----
+                        # Recruiters were paying 3 credits per URL even for profiles
+                        # the DB already had fresh data on. Targeted check via the
+                        # indexed url-variant query — cached in session_state keyed by
+                        # the CSV's URL set, so a re-render of this tab is instant.
+                        _csv_url_key = hashlib.md5(
+                            '\n'.join(sorted(filter(None, _enrich_urls))).encode('utf-8')
+                        ).hexdigest()
+                        _existing_norm_set = st.session_state.get(f'_db_check_existing_{_csv_url_key}')
+                        _not_found_norm_set = st.session_state.get(f'_db_check_notfound_{_csv_url_key}')
+                        if _existing_norm_set is None or _not_found_norm_set is None:
+                            _existing_norm_set = set()
+                            _not_found_norm_set = set()
+                            if HAS_DATABASE:
+                                try:
+                                    _db_c = _get_db_client()
+                                    if _db_c:
+                                        # Use the battle-tested helper from PR #63 — it handles URL
+                                        # quoting, suffix variants (john-doe vs john-doe-abc123),
+                                        # and parallel batch fetches. Light columns only.
+                                        _cutoff = (datetime.utcnow() - timedelta(days=180)).isoformat()
+                                        _light_cols = 'linkedin_url,original_url,original_urls,enriched_at'
+                                        with st.spinner(
+                                            f"Checking which of {len(_enrich_urls)} CSV profiles are already in your database..."
+                                        ):
+                                            _hits = _fetch_candidate_profiles_for_urls(
+                                                _db_c, _enrich_urls, _light_cols, _cutoff
+                                            )
+                                        # Build the set of "known" URLs from every URL
+                                        # variant the matched profiles know — so we can
+                                        # tag each CSV URL as existing even when its
+                                        # canonical column differs.
+                                        for _p in _hits:
+                                            for _u in (
+                                                _p.get('linkedin_url'),
+                                                _p.get('original_url'),
+                                                *(_p.get('original_urls') or []),
+                                            ):
+                                                _nu = normalize_linkedin_url(_u) if _u else None
+                                                if _nu:
+                                                    _existing_norm_set.add(_nu)
+                                        # Also pull the URLs Crustdata previously couldn't find.
+                                        # We don't want to keep proposing them for re-enrichment.
+                                        try:
+                                            _nf_urls = _cached_not_found_urls(months=6)
+                                            for _u in _nf_urls:
+                                                _nu = normalize_linkedin_url(_u) if _u else None
+                                                if _nu:
+                                                    _not_found_norm_set.add(_nu)
+                                        except Exception:
+                                            pass
+                                except Exception as _ce:
+                                    st.caption(f"Note: DB dedup check failed — treating all as new. ({_ce})")
+                            st.session_state[f'_db_check_existing_{_csv_url_key}'] = _existing_norm_set
+                            st.session_state[f'_db_check_notfound_{_csv_url_key}'] = _not_found_norm_set
+
+                        _new_urls = []
+                        _existing_urls = []
+                        _not_found_urls = []
+                        for _u in _enrich_urls:
+                            _nu = normalize_linkedin_url(_u) if _u else None
+                            if _nu and _nu in _existing_norm_set:
+                                _existing_urls.append(_u)
+                            elif _nu and _nu in _not_found_norm_set:
+                                _not_found_urls.append(_u)
+                            else:
+                                _new_urls.append(_u)
+
+                        # Always show the breakdown so the user can see the dedup check
+                        # ran, even when nothing matched.
+                        _nf_line = (
+                            f" **{len(_not_found_urls)}** previously attempted — "
+                            "Crustdata has no data for them (skipped)."
+                            if _not_found_urls else ""
+                        )
+                        if _existing_urls or _not_found_urls:
+                            st.info(
+                                f"**{len(_existing_urls)} of {len(_enrich_urls)}** profiles already enriched in "
+                                f"your database (no credits needed)."
+                                + _nf_line +
+                                f" **{len(_new_urls)}** need fresh enrichment "
+                                f"(~{len(_new_urls) * 3} credits)."
+                            )
+                            _force_reenrich = st.checkbox(
+                                "Force re-enrich profiles already in DB (overwrites stored data)",
+                                value=False,
+                                key="load_force_reenrich",
+                                help="Off by default. Enable only if you want to refresh stale profile data."
+                            )
+                        else:
+                            st.info(
+                                f"**0 of {len(_enrich_urls)}** profiles found in your database — "
+                                f"all **{len(_enrich_urls)}** need enrichment "
+                                f"(~{len(_enrich_urls) * 3} credits)."
+                            )
+                            _force_reenrich = False
+
+                        _enrich_pool = _enrich_urls if _force_reenrich else _new_urls
+                        _enrich_pool_size = len(_enrich_pool)
+
                         col_enrich1, col_enrich2 = st.columns(2)
                         with col_enrich1:
-                            _max_enrich = st.number_input(
-                                "Profiles to enrich",
-                                min_value=1,
-                                max_value=len(_enrich_urls),
-                                value=min(10, len(_enrich_urls)),
-                                key="load_enrich_max",
-                                help="Start with a few to test, then increase"
-                            )
+                            if _enrich_pool_size > 0:
+                                _max_enrich = st.number_input(
+                                    "Profiles to enrich",
+                                    min_value=1,
+                                    max_value=_enrich_pool_size,
+                                    value=min(10, _enrich_pool_size),
+                                    key="load_enrich_max",
+                                    help="Start with a few to test, then increase"
+                                )
+                            else:
+                                _max_enrich = 0
+                                st.caption("Nothing new to enrich — all profiles already in DB.")
                         with col_enrich2:
-                            st.caption(f"**{len(_enrich_urls)}** profiles loaded · 3 Crustdata credits each")
+                            if _enrich_pool_size > 0:
+                                st.caption(f"**{_enrich_pool_size}** pending · 3 Crustdata credits each")
+                            else:
+                                st.caption("Tip: click *Load existing* to pull them into the Filter tab.")
 
-                        if st.button(f"Enrich {_max_enrich} profiles", type="primary", key="load_enrich_btn"):
-                            _urls_to_enrich = _enrich_urls[:_max_enrich]
+                        # Always allow loading existing DB profiles into the workspace,
+                        # so the user can filter / screen them without spending credits.
+                        if _existing_urls:
+                            if st.button(
+                                f"Load {len(_existing_urls)} existing from DB into Filter tab",
+                                key="load_existing_from_db_btn",
+                            ):
+                                try:
+                                    _db_c = _get_db_client()
+                                    if _db_c:
+                                        # Same proven helper as the dedup check — handles URL
+                                        # quoting + suffix variants. '*' brings back raw_data
+                                        # which downstream screening needs.
+                                        _cutoff = (datetime.utcnow() - timedelta(days=180)).isoformat()
+                                        with st.spinner(f"Loading {len(_existing_urls)} profiles from DB..."):
+                                            _existing_profiles = _fetch_candidate_profiles_for_urls(
+                                                _db_c, _existing_urls, '*', _cutoff
+                                            )
+
+                                        # Strict-filter: the helper's suffix pass can over-fetch
+                                        # rows whose slug just starts the same way as a CSV slug
+                                        # (different people). Drop any row whose URL fields don't
+                                        # overlap the CSV input — so loaded count matches the
+                                        # dedup breakdown exactly.
+                                        _csv_norm_set = {
+                                            normalize_linkedin_url(_u) for _u in _existing_urls if _u
+                                        }
+                                        _csv_norm_set.discard(None)
+                                        _csv_norm_set.discard('')
+
+                                        def _profile_overlaps_csv(_p):
+                                            for _u in (
+                                                _p.get('linkedin_url'),
+                                                _p.get('original_url'),
+                                                *(_p.get('original_urls') or []),
+                                            ):
+                                                _nu = normalize_linkedin_url(_u) if _u else None
+                                                if _nu and _nu in _csv_norm_set:
+                                                    return True
+                                            return False
+
+                                        _existing_profiles = [
+                                            _p for _p in _existing_profiles if _profile_overlaps_csv(_p)
+                                        ]
+
+                                        if _existing_profiles:
+                                            _existing_df = profiles_to_dataframe(_existing_profiles)
+                                            # Build the "loaded" URL set from EVERY URL variant the
+                                            # matched profiles know — canonical linkedin_url,
+                                            # original_url, and original_urls[]. CSV URLs that
+                                            # matched via any variant must not be counted as still-
+                                            # to-enrich, even if their text doesn't equal the
+                                            # canonical column.
+                                            _loaded_norm = set()
+                                            for _profile in _existing_profiles:
+                                                for _u in (
+                                                    _profile.get('linkedin_url'),
+                                                    _profile.get('original_url'),
+                                                    *(_profile.get('original_urls') or []),
+                                                ):
+                                                    _nu = normalize_linkedin_url(_u) if _u else None
+                                                    if _nu:
+                                                        _loaded_norm.add(_nu)
+                                            _orig_csv_df = st.session_state.get('original_results_df')
+                                            _unmatched_csv_rows = pd.DataFrame()
+                                            if (
+                                                _orig_csv_df is not None
+                                                and not _orig_csv_df.empty
+                                                and 'linkedin_url' in _orig_csv_df.columns
+                                            ):
+                                                _orig_norm = _orig_csv_df['linkedin_url'].apply(
+                                                    lambda u: normalize_linkedin_url(u) if u else None
+                                                )
+                                                _unmatched_csv_rows = _orig_csv_df[
+                                                    ~_orig_norm.isin(_loaded_norm)
+                                                ].copy()
+                                            # (Earlier revisions merged `_unmatched_csv_rows` into
+                                            # results_df; current contract is rich-only in the
+                                            # working set — the unmatched rows are tracked via
+                                            # original_results_df instead. `_unmatched_csv_rows`
+                                            # is kept only to populate _new_count below.)
+                                            clear_results_derived_state(st.session_state)
+                                            # Both refs hold just the rich profiles so the Filter
+                                            # tab shows N (not N + sparse). The Load tab's enrich
+                                            # block sources URLs from original_results_df (the
+                                            # immutable CSV snapshot) so the still-to-enrich
+                                            # rows aren't lost.
+                                            st.session_state['enriched_df'] = _existing_df
+                                            st.session_state['results_df'] = _existing_df
+                                            st.session_state['enriched_profiles_raw'] = {
+                                                p.get('linkedin_url', ''): p for p in _existing_profiles if p.get('raw_data')
+                                            }
+                                            save_session_state()
+                                            _dedup_note = (
+                                                f" ({len(_existing_urls) - len(_existing_df)} CSV URLs resolved to "
+                                                f"the same profiles)"
+                                                if len(_existing_df) < len(_existing_urls) else ""
+                                            )
+                                            _new_count = len(_unmatched_csv_rows)
+                                            _new_note = (
+                                                f" {_new_count} profiles still need enrichment — "
+                                                "click *Enrich N profiles* below."
+                                                if _new_count > 0 else ""
+                                            )
+                                            # Store message in session_state — st.success
+                                            # doesn't survive st.rerun(), so without this the
+                                            # user sees no confirmation that the load worked.
+                                            st.session_state['_load_existing_message'] = (
+                                                f"Loaded {len(_existing_df)} profiles into the Filter tab"
+                                                + _dedup_note + "." + _new_note
+                                            )
+                                            st.rerun()
+                                        else:
+                                            st.warning("Could not load any profiles from DB.")
+                                    else:
+                                        st.error("No DB connection.")
+                                except Exception as _le:
+                                    st.error(f"Failed to load existing: {_le}")
+
+                        if _enrich_pool_size > 0 and st.button(
+                            f"Enrich {_max_enrich} profiles", type="primary", key="load_enrich_btn"
+                        ):
+                            _urls_to_enrich = _enrich_pool[:_max_enrich]
                             _enrich_results = []
                             _enrich_progress = st.progress(0)
                             _enrich_status = st.empty()
@@ -6274,18 +6546,70 @@ with tab_upload:
                                                 if _p.get('name') and not _row.get('name'):
                                                     _new_enriched_df.at[_idx, 'name'] = _p['name']
 
-                                # Merge with any existing enriched_df
-                                _existing_enriched = st.session_state.get('enriched_df')
-                                if _existing_enriched is not None and not _existing_enriched.empty:
-                                    _combined = pd.concat([_existing_enriched, _new_enriched_df], ignore_index=True)
+                                # Also pull profiles the CSV already had in DB so the
+                                # Filter tab sees the full uploaded set (newly enriched +
+                                # already-known), not just what we just paid to enrich.
+                                _db_existing_df = pd.DataFrame()
+                                if _existing_urls and HAS_DATABASE:
+                                    try:
+                                        _db_c = _get_db_client()
+                                        if _db_c:
+                                            _cutoff = (datetime.utcnow() - timedelta(days=180)).isoformat()
+                                            _db_rows = _fetch_candidate_profiles_for_urls(
+                                                _db_c, _existing_urls, '*', _cutoff
+                                            )
+                                            # Strict-filter to CSV overlap (drop suffix-pass extras
+                                            # that point at different people with similar slugs).
+                                            _csv_norm_set = {
+                                                normalize_linkedin_url(_u) for _u in _existing_urls if _u
+                                            }
+                                            _csv_norm_set.discard(None)
+                                            _csv_norm_set.discard('')
+                                            _db_rows = [
+                                                _p for _p in _db_rows
+                                                if any(
+                                                    normalize_linkedin_url(_u) in _csv_norm_set
+                                                    for _u in (
+                                                        _p.get('linkedin_url'),
+                                                        _p.get('original_url'),
+                                                        *(_p.get('original_urls') or []),
+                                                    )
+                                                    if _u
+                                                )
+                                            ]
+                                            if _db_rows:
+                                                _db_existing_df = profiles_to_dataframe(_db_rows)
+                                                # Cache raw_data for downstream screening
+                                                _raw_map = st.session_state.get('enriched_profiles_raw', {}) or {}
+                                                for _p in _db_rows:
+                                                    _k = _p.get('linkedin_url', '')
+                                                    if _k and _p.get('raw_data'):
+                                                        _raw_map[_k] = _p
+                                                st.session_state['enriched_profiles_raw'] = _raw_map
+                                    except Exception as _ddbe:
+                                        st.caption(f"Note: couldn't load already-in-DB profiles ({_ddbe})")
+
+                                # Merge: existing-in-DB + new-just-enriched + any prior enriched_df
+                                _frames = [_df for _df in (
+                                    st.session_state.get('enriched_df'),
+                                    _db_existing_df,
+                                    _new_enriched_df,
+                                ) if _df is not None and not _df.empty]
+                                if _frames:
+                                    _combined = pd.concat(_frames, ignore_index=True)
                                     _url_col = 'linkedin_url' if 'linkedin_url' in _combined.columns else None
                                     if _url_col:
+                                        # keep='last' lets newly enriched overwrite older copies
                                         _combined = _combined.drop_duplicates(subset=[_url_col], keep='last')
                                     _out_enriched = _combined
                                 else:
                                     _out_enriched = _new_enriched_df
 
                                 st.session_state['enriched_df'] = _out_enriched
+                                # Wire enriched data into the Filter tab: the basic
+                                # Filter section reads results_df. original_results_df
+                                # still holds the raw uploaded CSV for reference.
+                                st.session_state['results_df'] = _out_enriched
                                 if 'enriched_results' in st.session_state:
                                     del st.session_state['enriched_results']
                                 save_session_state()
@@ -6320,24 +6644,156 @@ with tab_upload:
                                                 batch_size=100,
                                             )
                                             _db_saved = _bulk['saved']
+
+                                            # Persist failures as not_found so the same dead
+                                            # profiles aren't proposed for re-enrichment.
+                                            # Crustdata error rows use linkedin_profile_url; the
+                                            # http-error path uses linkedin_url. Read both.
+                                            # DATA-INTEGRITY GUARD (PR #87 review): when
+                                            # force-reenrich is on, the pool includes URLs that
+                                            # already have enriched data in DB. Saving those as
+                                            # not_found would DOWNGRADE good profiles. Skip them.
+                                            _refresh_skip_norm = set()
+                                            if _force_reenrich:
+                                                for _u in _existing_urls:
+                                                    _nu = normalize_linkedin_url(_u) if _u else None
+                                                    if _nu:
+                                                        _refresh_skip_norm.add(_nu)
+                                            if _enrich_errors:
+                                                _failed_records = []
+                                                for _e in _enrich_errors:
+                                                    _u_raw = _e.get('linkedin_url') or _e.get('linkedin_profile_url')
+                                                    if not _u_raw:
+                                                        continue
+                                                    if normalize_linkedin_url(_u_raw) in _refresh_skip_norm:
+                                                        # Already enriched, force-refresh failed —
+                                                        # leave existing 'enriched' status intact.
+                                                        continue
+                                                    _failed_records.append({
+                                                        'url': _u_raw,
+                                                        'error': _e.get('error'),
+                                                    })
+                                                if _failed_records:
+                                                    try:
+                                                        save_failed_enrichments_batch(_db_client, _failed_records)
+                                                    except Exception as _fbe:
+                                                        print(f"[Load] failed_enrichments save failed: {_fbe}")
                                     except Exception as _dbe:
                                         st.warning(f"Database save failed: {_dbe}")
 
-                                # Clear caches so downstream tabs reflect fresh data
-                                try:
-                                    _cached_recently_enriched_urls.clear()
-                                except Exception:
-                                    pass
-                                st.cache_data.clear()
+                                # Clear ONLY the caches actually invalidated by enrichment.
+                                # The previous wholesale st.cache_data.clear() wiped every
+                                # cached function in the app (credits, search history, sheet
+                                # data, etc.), causing a 5-10s freeze after enrichment.
+                                for _cache in (
+                                    _cached_recently_enriched_urls,
+                                    _cached_not_found_urls,
+                                    _get_db_restore_counts_cached,
+                                    _cached_all_profiles,
+                                ):
+                                    try:
+                                        _cache.clear()
+                                    except Exception:
+                                        pass
+
+                                # Drop the CSV-keyed dedup result so the breakdown
+                                # reflects the new DB state on next render (otherwise
+                                # the post-enrichment numbers stay stale).
+                                for _ckey in [
+                                    k for k in list(st.session_state.keys())
+                                    if k.startswith('_db_check_existing_')
+                                    or k.startswith('_db_check_notfound_')
+                                ]:
+                                    st.session_state.pop(_ckey, None)
 
                                 _db_msg = f" | DB: {_db_saved}/{len(_enrich_successful)} saved" if HAS_DATABASE else ""
                                 if _enrich_errors:
-                                    st.session_state['enrichment_message'] = f"warning:Enriched {len(_enrich_successful)} profiles in {_time_str}{_db_msg}. {len(_enrich_errors)} failed."
+                                    # Surface the first distinct error so the user sees WHY,
+                                    # not just a count. Truncated to 200 chars to keep the
+                                    # banner readable.
+                                    _err_samples = []
+                                    _seen_errs = set()
+                                    for _e in _enrich_errors:
+                                        _emsg = str(_e.get('error', 'Unknown'))[:200]
+                                        if _emsg not in _seen_errs:
+                                            _seen_errs.add(_emsg)
+                                            _err_samples.append(_emsg)
+                                        if len(_err_samples) >= 2:
+                                            break
+                                    _err_blurb = " | First errors: " + " · ".join(_err_samples) if _err_samples else ""
+                                    st.session_state['enrichment_message'] = (
+                                        f"warning:Enriched {len(_enrich_successful)} profiles in {_time_str}{_db_msg}. "
+                                        f"{len(_enrich_errors)} failed.{_err_blurb}"
+                                    )
                                 else:
                                     st.session_state['enrichment_message'] = f"success:Enriched {len(_enrich_successful)} profiles in {_time_str}{_db_msg}"
                                 st.rerun()
                             elif _enrich_errors:
-                                st.error(f"Enrichment failed for all profiles. Error: {_enrich_errors[0].get('error', 'Unknown')[:200]}")
+                                # All profiles failed — still persist as not_found so they
+                                # don't keep showing up as "to enrich" on every render.
+                                # Crustdata error rows use linkedin_profile_url; the http-error
+                                # path uses linkedin_url. Read both.
+                                if HAS_DATABASE:
+                                    try:
+                                        _db_client_f = _get_db_client()
+                                        if _db_client_f:
+                                            # DATA-INTEGRITY GUARD (PR #87 review): skip
+                                            # failures whose URL is already enriched in DB
+                                            # (force-refresh path). Saving as not_found would
+                                            # downgrade them.
+                                            _refresh_skip_norm = set()
+                                            if _force_reenrich:
+                                                for _u in _existing_urls:
+                                                    _nu = normalize_linkedin_url(_u) if _u else None
+                                                    if _nu:
+                                                        _refresh_skip_norm.add(_nu)
+                                            _failed_records = []
+                                            for _e in _enrich_errors:
+                                                _u_raw = _e.get('linkedin_url') or _e.get('linkedin_profile_url')
+                                                if not _u_raw:
+                                                    continue
+                                                if normalize_linkedin_url(_u_raw) in _refresh_skip_norm:
+                                                    continue
+                                                _failed_records.append({
+                                                    'url': _u_raw,
+                                                    'error': _e.get('error'),
+                                                })
+                                            if _failed_records:
+                                                save_failed_enrichments_batch(_db_client_f, _failed_records)
+                                    except Exception as _fbe:
+                                        print(f"[Load] failed_enrichments save (all-failed) failed: {_fbe}")
+
+                                # Invalidate dedup caches so the next render sees these URLs
+                                # as not_found, not as "need enrichment".
+                                for _cache in (_cached_not_found_urls, _cached_recently_enriched_urls):
+                                    try:
+                                        _cache.clear()
+                                    except Exception:
+                                        pass
+                                for _ckey in [
+                                    k for k in list(st.session_state.keys())
+                                    if k.startswith('_db_check_existing_')
+                                    or k.startswith('_db_check_notfound_')
+                                ]:
+                                    st.session_state.pop(_ckey, None)
+
+                                # Show a clear message: not a system failure, just no data.
+                                _err_samples = []
+                                _seen_errs = set()
+                                for _e in _enrich_errors:
+                                    _emsg = str(_e.get('error', 'Unknown'))[:160]
+                                    if _emsg not in _seen_errs:
+                                        _seen_errs.add(_emsg)
+                                        _err_samples.append(_emsg)
+                                    if len(_err_samples) >= 2:
+                                        break
+                                _err_blurb = " | ".join(_err_samples) if _err_samples else "Unknown"
+                                st.session_state['enrichment_message'] = (
+                                    f"warning:Crustdata had no data for {len(_enrich_errors)} profile(s). "
+                                    f"They've been marked not_found and won't be re-proposed. "
+                                    f"First error: {_err_blurb}"
+                                )
+                                st.rerun()
                             else:
                                 st.error("No results returned from API. Check your API key and credits.")
                     else:
@@ -6908,6 +7364,24 @@ with tab_filter:
                 f"loaded_profiles_{len(df)}.csv",
                 "text/csv",
                 key="filter_tab_export_all"
+            )
+
+        # Warn if the loaded data isn't enriched yet — most filters need
+        # enriched fields (current_title, current_company, skills, all_employers).
+        # A sparse CSV upload that hasn't been Enriched / Loaded from DB will pass
+        # most filters silently (no data to match), giving misleading results.
+        _enriched_check = st.session_state.get('enriched_df')
+        _is_enriched_ready = (
+            _enriched_check is not None
+            and isinstance(_enriched_check, pd.DataFrame)
+            and not _enriched_check.empty
+        )
+        if not _is_enriched_ready:
+            st.warning(
+                "**These profiles aren't enriched yet.** Most filters (blacklist by company, "
+                "target companies, title keywords, tenure, universities) need enriched data — "
+                "go back to **1. Load** and click *Load existing from DB* or *Enrich N profiles* first. "
+                "Only the **Past Candidates** name filter works on the raw CSV as-is."
             )
 
         needs_filtering = 'job_1_job_title' in df.columns and 'current_title' not in df.columns

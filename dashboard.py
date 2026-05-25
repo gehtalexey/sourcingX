@@ -9346,7 +9346,8 @@ with tab_screening:
                 enriched_df_merge = st.session_state.get('enriched_df')
                 if enriched_df_merge is not None and not enriched_df_merge.empty and 'linkedin_url' in df.columns and 'linkedin_url' in enriched_df_merge.columns:
                     merge_cols = [c for c in enriched_df_merge.columns
-                                  if c not in df.columns and c not in exclude_from_merge]
+                                  if c not in df.columns and c not in exclude_from_merge
+                                  and not c.startswith('_')]
                     if merge_cols:
                         df = df.merge(
                             enriched_df_merge[['linkedin_url'] + merge_cols],

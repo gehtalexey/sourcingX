@@ -10626,16 +10626,17 @@ with tab_database:
                             from db import delete_profile as _del_prof_db
                             _removed_db = 0
                             _failed_db = []
+                            _deleted_db_urls = set()
                             for _url in _to_remove_db['linkedin_url'].dropna():
                                 if _del_prof_db(db_client, str(_url)):
                                     _removed_db += 1
+                                    _deleted_db_urls.add(str(_url))
                                 else:
                                     _failed_db.append(_url)
-                            if 'db_search_results' in st.session_state:
-                                _remove_set = set(_to_remove_db['linkedin_url'].dropna().tolist())
+                            if _deleted_db_urls and 'db_search_results' in st.session_state:
                                 st.session_state['db_search_results'] = [
                                     p for p in st.session_state['db_search_results']
-                                    if p.get('linkedin_url') not in _remove_set
+                                    if p.get('linkedin_url') not in _deleted_db_urls
                                 ]
                             if _removed_db:
                                 st.success(f"Removed {_removed_db} profile{'s' if _removed_db > 1 else ''} from the database.")
@@ -10928,19 +10929,20 @@ with tab_similar:
                         _sim_db = get_supabase_client()
                         _removed_sim = 0
                         _failed_sim = []
+                        _deleted_sim_urls = set()
                         for _url in _to_remove_sim['LinkedIn'].dropna():
                             if _sim_db and _del_prof_sim(_sim_db, str(_url)):
                                 _removed_sim += 1
+                                _deleted_sim_urls.add(str(_url))
                             else:
                                 _failed_sim.append(_url)
+                        if _deleted_sim_urls and 'similar_last_result' in st.session_state:
+                            _sr = st.session_state['similar_last_result']
+                            _sr['matches'] = [
+                                m for m in (_sr.get('matches') or [])
+                                if m.get('linkedin_url') not in _deleted_sim_urls
+                            ]
                         if _removed_sim:
-                            _remove_sim_set = set(_to_remove_sim['LinkedIn'].dropna().tolist())
-                            if 'similar_last_result' in st.session_state:
-                                _sr = st.session_state['similar_last_result']
-                                _sr['matches'] = [
-                                    m for m in (_sr.get('matches') or [])
-                                    if m.get('linkedin_url') not in _remove_sim_set
-                                ]
                             st.success(f"Removed {_removed_sim} profile{'s' if _removed_sim > 1 else ''} from the database.")
                         if _failed_sim:
                             st.warning(f"Could not remove: {', '.join(str(u) for u in _failed_sim)}")

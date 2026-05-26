@@ -2421,7 +2421,15 @@ def delete_profile(client: SupabaseClient, linkedin_url: str) -> bool:
         if not normalized:
             print(f"[DB] Could not normalize URL: {linkedin_url}")
             return False
-        client.delete('profiles', {'linkedin_url': normalized})
+        deleted = client.delete('profiles', {'linkedin_url': normalized})
+        if not deleted:
+            print(f"[DB] No row matched for deletion: {normalized}")
+            return False
+        # Best-effort cleanup of screening data for this URL
+        try:
+            client.delete('screening_results', {'linkedin_url': normalized})
+        except Exception as se:
+            print(f"[DB] Warning: could not clean up screening_results for '{normalized}': {se}")
         return True
     except Exception as e:
         print(f"[DB] Failed to delete profile '{linkedin_url}': {e}")

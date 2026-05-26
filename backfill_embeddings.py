@@ -197,7 +197,7 @@ def fetch_all_for_drift_check(
         filters={"enrichment_status": "eq.enriched"},
         limit=batch_size,
         offset=offset,
-        order_by="enriched_at.asc.nullslast",
+        order_by="enriched_at.asc.nullslast,linkedin_url.asc",
     )
 
 

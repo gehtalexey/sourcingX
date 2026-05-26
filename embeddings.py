@@ -75,6 +75,38 @@ def _join_list(value, sep: str = ", ", limit: int = 30) -> str:
     return sep.join(items[:limit])
 
 
+# ---------------------------------------------------------------------------
+# Seniority / track derivation helpers
+# ---------------------------------------------------------------------------
+_MANAGER_KEYWORDS = {
+    "manager", "director", " vp ", "v.p.", "head of", "chief",
+    "cto", "cpo", "ceo", "coo", "president", "team lead",
+}
+_STAFF_KEYWORDS = {"staff ", "principal ", "distinguished ", "fellow"}
+_SENIOR_KEYWORDS = {"senior", "sr.", " lead"}
+_JUNIOR_KEYWORDS = {"junior", "jr.", "associate ", "entry level"}
+
+
+def _derive_seniority(title: str) -> str:
+    t = title.lower()
+    if any(k in t for k in _STAFF_KEYWORDS):
+        return "Staff/Principal"
+    if any(k in t for k in _MANAGER_KEYWORDS):
+        return "Manager/Leadership"
+    if any(k in t for k in _SENIOR_KEYWORDS):
+        return "Senior"
+    if any(k in t for k in _JUNIOR_KEYWORDS):
+        return "Junior"
+    return "Mid-level"
+
+
+def _derive_track(title: str) -> str:
+    t = title.lower()
+    if any(k in t for k in _MANAGER_KEYWORDS):
+        return "Manager"
+    return "Individual Contributor"
+
+
 def _education_summary(raw_data: dict) -> str:
     """One-line summary of education entries from Crustdata raw data."""
     if not raw_data:
@@ -113,59 +145,41 @@ def _past_roles_summary(raw_data: dict) -> str:
 
 
 def build_embedding_text(profile: dict) -> str:
-    """Build the canonical text we embed for a profile.
+    """Build canonical embedding text focused on role, skills, and career path.
 
-    Accepts a ``profiles`` row (dict). Uses the cheap indexed columns first
-    and falls back into ``raw_data`` for headline / summary / education
-    detail. Returns an empty string when there's nothing meaningful to
-    embed — the caller should skip those rows.
+    Intentionally excludes: name, company names, headline, summary, education,
+    and school names. These cause false-positive similarity matches (two people
+    at the same company look "similar"; LinkedIn marketing copy dominates the
+    vector). What actually matters for recruiting similarity is what someone
+    does, what they build with, and where their career has gone.
 
-    The shape of this text is part of the embedding's identity: changing it
-    invalidates every stored vector. If you must change it, bump the
-    ``embedding_model`` tag (e.g. add ``+v2``) so the backfill worker
-    re-embeds rows automatically via the input-hash check.
+    Changing this function invalidates all stored vectors — run
+    ``backfill_embeddings.py --re-embed-changed --page-size 50`` after
+    any modification.
     """
-    raw_data = profile.get("raw_data") or {}
-    if not isinstance(raw_data, dict):
-        raw_data = {}
-
-    headline = _safe_str(raw_data.get("headline"))
-    summary = _safe_str(raw_data.get("summary"))
     current_title = _safe_str(profile.get("current_title"))
-    current_company = _safe_str(profile.get("current_company"))
     location = _safe_str(profile.get("location"))
+    skills = _join_list(profile.get("skills"), limit=30)
 
-    all_titles = _join_list(profile.get("all_titles"))
-    all_employers = _join_list(profile.get("all_employers"))
-    all_schools = _join_list(profile.get("all_schools"))
-    skills = _join_list(profile.get("skills"), limit=50)
+    # Recent titles only (no company names) — gives trajectory signal
+    # without anchoring similarity to specific employers.
+    recent_titles = _join_list(
+        (profile.get("all_titles") or [])[:5], sep=" → "
+    )
 
-    education_detail = _education_summary(raw_data)
-    past_detail = _past_roles_summary(raw_data)
+    seniority = _derive_seniority(current_title) if current_title else ""
+    track = _derive_track(current_title) if current_title else ""
 
-    # Labeled fields help the embedding model weight semantic categories;
-    # plain prose collapses into a single fuzzy meaning, while labels keep
-    # "title" close to "title" across profiles. This is the same approach
-    # OpenAI's own retrieval cookbook recommends for structured records.
     lines = [
         f"Current role: {current_title}" if current_title else "",
-        f"Current company: {current_company}" if current_company else "",
-        f"Location: {location}" if location else "",
-        f"Headline: {headline}" if headline else "",
-        f"Summary: {summary}" if summary else "",
-        f"Past titles: {all_titles}" if all_titles else "",
-        f"Past employers: {all_employers}" if all_employers else "",
-        f"Past roles: {past_detail}" if past_detail else "",
-        f"Education: {all_schools}" if all_schools else "",
-        f"Education detail: {education_detail}" if education_detail else "",
+        f"Seniority: {seniority}" if seniority else "",
+        f"Track: {track}" if track else "",
         f"Skills: {skills}" if skills else "",
+        f"Career path: {recent_titles}" if recent_titles else "",
+        f"Location: {location}" if location else "",
     ]
     text = "\n".join(line for line in lines if line)
-
-    if len(text) > MAX_INPUT_CHARS:
-        text = text[:MAX_INPUT_CHARS]
-
-    return text
+    return text[:MAX_INPUT_CHARS]
 
 
 def compute_input_hash(text: str) -> str:

@@ -10644,7 +10644,8 @@ with tab_database:
                                 st.success(f"Removed {_removed_db} profile{'s' if _removed_db > 1 else ''} from the database.")
                             if _failed_db:
                                 st.warning(f"Could not remove: {', '.join(str(u) for u in _failed_db)}")
-                            st.rerun()
+                            if _removed_db:
+                                st.rerun()
 
                     # Action buttons
                     btn_col1, btn_col2 = st.columns(2)
@@ -10938,12 +10939,19 @@ with tab_similar:
                                 _deleted_sim_urls.add(str(_url))
                             else:
                                 _failed_sim.append(_url)
-                        if _deleted_sim_urls and 'similar_last_result' in st.session_state:
-                            _sr = st.session_state['similar_last_result']
-                            _sr['matches'] = [
-                                m for m in (_sr.get('matches') or [])
-                                if m.get('linkedin_url') not in _deleted_sim_urls
-                            ]
+                        if _deleted_sim_urls:
+                            if 'similar_last_result' in st.session_state:
+                                _sr = st.session_state['similar_last_result']
+                                _sr['matches'] = [
+                                    m for m in (_sr.get('matches') or [])
+                                    if m.get('linkedin_url') not in _deleted_sim_urls
+                                ]
+                            if 'db_search_results' in st.session_state:
+                                st.session_state['db_search_results'] = [
+                                    p for p in st.session_state['db_search_results']
+                                    if p.get('linkedin_url') not in _deleted_sim_urls
+                                ]
+                            _cached_all_profiles.clear()
                         if _removed_sim:
                             st.success(f"Removed {_removed_sim} profile{'s' if _removed_sim > 1 else ''} from the database.")
                         if _failed_sim:

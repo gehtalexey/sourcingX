@@ -10576,12 +10576,14 @@ with tab_database:
                     if show_all_db_cols:
                         _all_edit_df = blank_tenure_sentinel(display_df).copy()
                         _all_edit_df.insert(0, 'Remove', False)
+                        import hashlib as _hl
+                        _all_key = _hl.md5(",".join(_all_edit_df.get('linkedin_url', pd.Series()).dropna().astype(str).tolist()).encode()).hexdigest()[:8]
                         _edited_db_df = st.data_editor(
                             _all_edit_df,
                             use_container_width=True,
                             hide_index=True,
                             disabled=[c for c in _all_edit_df.columns if c != 'Remove'],
-                            key="db_editor_all",
+                            key=f"db_editor_all_{_all_key}",
                             column_config={
                                 "Remove": st.column_config.CheckboxColumn("Remove"),
                                 "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
@@ -10596,12 +10598,14 @@ with tab_database:
                         available_cols = [c for c in preview_cols if c in display_df.columns]
                         _preview_edit_df = (display_df[available_cols] if available_cols else display_df).copy()
                         _preview_edit_df.insert(0, 'Remove', False)
+                        import hashlib as _hl
+                        _preview_key = _hl.md5(",".join(_preview_edit_df.get('linkedin_url', pd.Series()).dropna().astype(str).tolist()).encode()).hexdigest()[:8]
                         _edited_db_df = st.data_editor(
                             _preview_edit_df,
                             use_container_width=True,
                             hide_index=True,
                             disabled=[c for c in _preview_edit_df.columns if c != 'Remove'],
-                            key="db_editor_preview",
+                            key=f"db_editor_preview_{_preview_key}",
                             column_config={
                                 "Remove": st.column_config.CheckboxColumn("Remove"),
                                 "name": st.column_config.TextColumn("Name"),
@@ -10906,12 +10910,14 @@ with tab_similar:
                     for m in matches
                 ])
                 df.insert(0, 'Remove', False)
+                import hashlib as _hl
+                _sim_key = _hl.md5(",".join(df['LinkedIn'].dropna().astype(str).tolist()).encode()).hexdigest()[:8]
                 _edited_sim_df = st.data_editor(
                     df,
                     use_container_width=True,
                     hide_index=True,
                     disabled=[c for c in df.columns if c != 'Remove'],
-                    key="sim_editor",
+                    key=f"sim_editor_{_sim_key}",
                     column_config={
                         "Remove": st.column_config.CheckboxColumn("Remove"),
                         "LinkedIn": st.column_config.LinkColumn("LinkedIn"),

@@ -182,25 +182,22 @@ def _select_with_offset(
 def fetch_all_for_drift_check(
     client: SupabaseClient,
     batch_size: int,
-    cursor: str | None,
+    offset: int,
 ) -> list[dict]:
     """Page through *all* enriched rows for the drift-detection mode.
 
-    Used only when ``--re-embed-changed`` is set. Returns one keyset page;
-    the caller advances the cursor by the last row's ``enriched_at``.
+    Used only when ``--re-embed-changed`` is set. Uses offset pagination so
+    NULL enriched_at rows are handled correctly (keyset on enriched_at gets
+    stuck when NULLs sort first and the cursor never advances past them).
+    Raw_data filter removed — the new formula doesn't use raw_data.
     """
-    filters = {
-        "enrichment_status": "eq.enriched",
-        "raw_data": "not.is.null",
-    }
-    if cursor:
-        filters["enriched_at"] = f"lt.{cursor}"
-    return client.select(
-        table="profiles",
+    return _select_with_offset(
+        client,
         columns=FETCH_COLUMNS + ",embedded_at",
-        filters=filters,
+        filters={"enrichment_status": "eq.enriched"},
         limit=batch_size,
-        order_by="enriched_at.desc",
+        offset=offset,
+        order_by="enriched_at.asc.nullslast,linkedin_url.asc",
     )
 
 
@@ -255,9 +252,10 @@ def run_backfill(
     total_processed = 0
     total_written = 0
     total_tokens_est = 0
-    cursor: str | None = None
-    # Dry-run can't rely on writes to advance the "still missing" set, so
-    # it tracks an explicit offset into the result window.
+    # re_embed_changed uses offset pagination (keyset on enriched_at breaks
+    # when NULLs are present). dry_run also needs an explicit offset so it
+    # doesn't re-scan the same page forever.
+    re_embed_offset = 0
     dry_run_offset = 0
     start = time.time()
 
@@ -270,7 +268,7 @@ def run_backfill(
             page_target = min(page_size, limit - total_processed)
 
         if re_embed_changed:
-            batch = fetch_all_for_drift_check(client, page_target, cursor)
+            batch = fetch_all_for_drift_check(client, page_target, re_embed_offset)
         elif dry_run:
             batch = fetch_missing_batch(client, page_target, offset=dry_run_offset)
         else:
@@ -302,10 +300,10 @@ def run_backfill(
             total_tokens_est += estimate_token_count(text)
 
         if not rows_to_embed:
-            # Advance whichever pagination cursor this mode uses, so a page
+            # Advance whichever pagination counter this mode uses, so a page
             # full of skip-worthy rows doesn't stall the loop.
             if re_embed_changed and batch:
-                cursor = batch[-1].get("enriched_at") or cursor
+                re_embed_offset += len(batch)
                 total_processed += len(batch)
                 continue
             if dry_run and batch:
@@ -323,7 +321,7 @@ def run_backfill(
                 f"~${estimate_embedding_cost(total_tokens_est):.4f})"
             )
             if re_embed_changed and batch:
-                cursor = batch[-1].get("enriched_at") or cursor
+                re_embed_offset += len(batch)
             else:
                 # Live-path filter (embedding IS NULL) doesn't change in
                 # dry-run because we don't write; advance via offset so the
@@ -353,7 +351,7 @@ def run_backfill(
         total_processed += len(batch)
 
         if re_embed_changed and batch:
-            cursor = batch[-1].get("enriched_at") or cursor
+            re_embed_offset += len(batch)
 
         elapsed = time.time() - start
         rate = total_written / elapsed if elapsed > 0 else 0

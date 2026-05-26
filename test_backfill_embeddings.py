@@ -152,9 +152,9 @@ def test_live_run_does_not_use_offset(monkeypatch):
 # Tests for the --re-embed-changed cursor fix.
 # ---------------------------------------------------------------------------
 def test_re_embed_changed_selects_enriched_at(monkeypatch):
-    """The drift-check SELECT must include enriched_at so the cursor can
-    advance. Without enriched_at, row.get('enriched_at') is None and the
-    same page is fetched forever."""
+    """The drift-check SELECT must include enriched_at and use offset
+    pagination. Previously the code used a keyset cursor on enriched_at
+    which got stuck looping forever on NULL enriched_at rows."""
     page_a = [_make_row(1, with_embedded=True, hash_value="OLD"),
               _make_row(2, with_embedded=True, hash_value="OLD")]
     client = FakeSupabaseClient(pages=[page_a, []])
@@ -175,12 +175,14 @@ def test_re_embed_changed_selects_enriched_at(monkeypatch):
             f"drift-check SELECT missing enriched_at: {call}"
         )
 
-    # The second SELECT must include the cursor filter (enriched_at < ...)
-    # — proof the cursor actually moved.
+    # The second SELECT must use offset pagination (offset == len(page_a)),
+    # not the old keyset cursor — proof the offset counter actually advanced.
     second = client.select_calls[1]
-    cursor_filter = second["filters"].get("enriched_at", "")
-    assert cursor_filter.startswith("lt."), (
-        f"second drift-check call did not apply keyset cursor: {second}"
+    assert second.get("offset") == len(page_a), (
+        f"second drift-check call did not advance offset: {second}"
+    )
+    assert "enriched_at" not in second.get("filters", {}), (
+        f"second drift-check call still using keyset cursor: {second}"
     )
 
 

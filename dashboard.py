@@ -10633,11 +10633,13 @@ with tab_database:
                                     _deleted_db_urls.add(str(_url))
                                 else:
                                     _failed_db.append(_url)
-                            if _deleted_db_urls and 'db_search_results' in st.session_state:
-                                st.session_state['db_search_results'] = [
-                                    p for p in st.session_state['db_search_results']
-                                    if p.get('linkedin_url') not in _deleted_db_urls
-                                ]
+                            if _deleted_db_urls:
+                                if 'db_search_results' in st.session_state:
+                                    st.session_state['db_search_results'] = [
+                                        p for p in st.session_state['db_search_results']
+                                        if p.get('linkedin_url') not in _deleted_db_urls
+                                    ]
+                                _cached_all_profiles.clear()
                             if _removed_db:
                                 st.success(f"Removed {_removed_db} profile{'s' if _removed_db > 1 else ''} from the database.")
                             if _failed_db:

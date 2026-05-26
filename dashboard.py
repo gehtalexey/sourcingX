@@ -10756,6 +10756,33 @@ with tab_database:
                             except Exception as e:
                                 st.error(f"Error: {e}")
 
+                # Remove from database section
+                st.divider()
+                st.markdown("#### Remove Profile from Database")
+                st.caption("Permanently removes a profile so it won't appear in any search results.")
+
+                remove_url_db = st.text_input(
+                    "LinkedIn URL to remove",
+                    key="remove_profile_url_db",
+                    placeholder="https://www.linkedin.com/in/username"
+                )
+                remove_confirm_db = st.checkbox(
+                    "Yes, permanently remove this profile",
+                    key="remove_profile_confirm_db"
+                )
+                if st.button("Remove from Database", key="remove_profile_btn_db", type="secondary"):
+                    if not remove_url_db.strip():
+                        st.warning("Please enter a LinkedIn URL.")
+                    elif not remove_confirm_db:
+                        st.warning("Check the confirmation box first.")
+                    else:
+                        from db import delete_profile as _delete_profile
+                        ok = _delete_profile(db_client, remove_url_db.strip())
+                        if ok:
+                            st.success("Profile removed from the database.")
+                        else:
+                            st.error("Could not remove — check that the URL is correct.")
+
         except Exception as e:
             st.error(f"Database error: {e}")
 
@@ -10881,6 +10908,37 @@ with tab_similar:
                     file_name="similar_profiles.csv",
                     mime="text/csv",
                 )
+
+        # Remove from database section
+        st.divider()
+        st.markdown("#### Remove Profile from Database")
+        st.caption("Permanently removes a profile so it won't appear in any search results.")
+
+        remove_url_sim = st.text_input(
+            "LinkedIn URL to remove",
+            key="remove_profile_url_sim",
+            placeholder="https://www.linkedin.com/in/username"
+        )
+        remove_confirm_sim = st.checkbox(
+            "Yes, permanently remove this profile",
+            key="remove_profile_confirm_sim"
+        )
+        if st.button("Remove from Database", key="remove_profile_btn_sim", type="secondary"):
+            if not remove_url_sim.strip():
+                st.warning("Please enter a LinkedIn URL.")
+            elif not remove_confirm_sim:
+                st.warning("Check the confirmation box first.")
+            else:
+                from db import delete_profile as _delete_profile_sim
+                _sim_db_client = get_supabase_client()
+                if _sim_db_client:
+                    ok = _delete_profile_sim(_sim_db_client, remove_url_sim.strip())
+                    if ok:
+                        st.success("Profile removed from the database.")
+                    else:
+                        st.error("Could not remove — check that the URL is correct.")
+                else:
+                    st.error("Database not available.")
 
 # ========== TAB 8: Usage ==========
 with tab_usage:

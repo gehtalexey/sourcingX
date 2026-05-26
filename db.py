@@ -2414,6 +2414,20 @@ def delete_screening_prompt(client: SupabaseClient, role_type: str) -> bool:
         return False
 
 
+def delete_profile(client: SupabaseClient, linkedin_url: str) -> bool:
+    """Permanently remove a profile from the database by LinkedIn URL."""
+    try:
+        normalized = normalize_linkedin_url(linkedin_url)
+        if not normalized:
+            print(f"[DB] Could not normalize URL: {linkedin_url}")
+            return False
+        client.delete('profiles', {'linkedin_url': normalized})
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to delete profile '{linkedin_url}': {e}")
+        return False
+
+
 def match_prompt_by_keywords(client: SupabaseClient, text: str) -> Optional[dict]:
     """Find the best matching prompt based on keywords in the text.
 

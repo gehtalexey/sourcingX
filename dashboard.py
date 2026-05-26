@@ -10574,12 +10574,16 @@ with tab_database:
                         display_df = display_df.drop(columns=['enriched_at_dt'], errors='ignore')
 
                     if show_all_db_cols:
-                        # Show ALL columns in dataframe
-                        st.dataframe(
-                            blank_tenure_sentinel(display_df),
-                            width="stretch",
+                        _all_edit_df = blank_tenure_sentinel(display_df).copy()
+                        _all_edit_df.insert(0, 'Remove', False)
+                        _edited_db_df = st.data_editor(
+                            _all_edit_df,
+                            use_container_width=True,
                             hide_index=True,
+                            disabled=[c for c in _all_edit_df.columns if c != 'Remove'],
+                            key="db_editor_all",
                             column_config={
+                                "Remove": st.column_config.CheckboxColumn("Remove"),
                                 "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                                 "public_url": st.column_config.LinkColumn("LinkedIn"),
                                 "enriched_at": st.column_config.DatetimeColumn("Enriched", format="YYYY-MM-DD"),
@@ -10590,12 +10594,16 @@ with tab_database:
                     else:
                         preview_cols = ['name', 'current_title', 'current_company', 'email', 'freshness', 'location', 'linkedin_url']
                         available_cols = [c for c in preview_cols if c in display_df.columns]
-
-                        st.dataframe(
-                            display_df[available_cols] if available_cols else display_df,
-                            width="stretch",
+                        _preview_edit_df = (display_df[available_cols] if available_cols else display_df).copy()
+                        _preview_edit_df.insert(0, 'Remove', False)
+                        _edited_db_df = st.data_editor(
+                            _preview_edit_df,
+                            use_container_width=True,
                             hide_index=True,
+                            disabled=[c for c in _preview_edit_df.columns if c != 'Remove'],
+                            key="db_editor_preview",
                             column_config={
+                                "Remove": st.column_config.CheckboxColumn("Remove"),
                                 "name": st.column_config.TextColumn("Name"),
                                 "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                                 "current_company": st.column_config.TextColumn("Company"),
@@ -10605,6 +10613,35 @@ with tab_database:
                                 "freshness": st.column_config.TextColumn("Freshness"),
                             }
                         )
+
+                    # Show "Remove selected" button only when at least one row is checked
+                    _to_remove_db = _edited_db_df[_edited_db_df['Remove'] == True]
+                    if len(_to_remove_db) > 0:
+                        _n_db = len(_to_remove_db)
+                        if st.button(
+                            f"Remove {_n_db} selected from database",
+                            key="db_remove_selected_btn",
+                            type="secondary",
+                        ):
+                            from db import delete_profile as _del_prof_db
+                            _removed_db = 0
+                            _failed_db = []
+                            for _url in _to_remove_db['linkedin_url'].dropna():
+                                if _del_prof_db(db_client, str(_url)):
+                                    _removed_db += 1
+                                else:
+                                    _failed_db.append(_url)
+                            if 'db_search_results' in st.session_state:
+                                _remove_set = set(_to_remove_db['linkedin_url'].dropna().tolist())
+                                st.session_state['db_search_results'] = [
+                                    p for p in st.session_state['db_search_results']
+                                    if p.get('linkedin_url') not in _remove_set
+                                ]
+                            if _removed_db:
+                                st.success(f"Removed {_removed_db} profile{'s' if _removed_db > 1 else ''} from the database.")
+                            if _failed_db:
+                                st.warning(f"Could not remove: {', '.join(str(u) for u in _failed_db)}")
+                            st.rerun()
 
                     # Action buttons
                     btn_col1, btn_col2 = st.columns(2)
@@ -10756,33 +10793,6 @@ with tab_database:
                             except Exception as e:
                                 st.error(f"Error: {e}")
 
-                # Remove from database section
-                st.divider()
-                st.markdown("#### Remove Profile from Database")
-                st.caption("Permanently removes a profile so it won't appear in any search results.")
-
-                remove_url_db = st.text_input(
-                    "LinkedIn URL to remove",
-                    key="remove_profile_url_db",
-                    placeholder="https://www.linkedin.com/in/username"
-                )
-                remove_confirm_db = st.checkbox(
-                    "Yes, permanently remove this profile",
-                    key="remove_profile_confirm_db"
-                )
-                if st.button("Remove from Database", key="remove_profile_btn_db", type="secondary"):
-                    if not remove_url_db.strip():
-                        st.warning("Please enter a LinkedIn URL.")
-                    elif not remove_confirm_db:
-                        st.warning("Check the confirmation box first.")
-                    else:
-                        from db import delete_profile as _delete_profile
-                        ok = _delete_profile(db_client, remove_url_db.strip())
-                        if ok:
-                            st.success("Profile removed from the database.")
-                        else:
-                            st.error("Could not remove — check that the URL is correct.")
-
         except Exception as e:
             st.error(f"Database error: {e}")
 
@@ -10891,54 +10901,57 @@ with tab_similar:
                     }
                     for m in matches
                 ])
-                st.dataframe(
+                df.insert(0, 'Remove', False)
+                _edited_sim_df = st.data_editor(
                     df,
                     use_container_width=True,
                     hide_index=True,
+                    disabled=[c for c in df.columns if c != 'Remove'],
+                    key="sim_editor",
                     column_config={
+                        "Remove": st.column_config.CheckboxColumn("Remove"),
                         "LinkedIn": st.column_config.LinkColumn("LinkedIn"),
                         "Similarity": st.column_config.ProgressColumn(
                             "Similarity", min_value=0.0, max_value=1.0, format="%.3f"
                         ),
                     },
                 )
+                _to_remove_sim = _edited_sim_df[_edited_sim_df['Remove'] == True]
+                if len(_to_remove_sim) > 0:
+                    _n_sim = len(_to_remove_sim)
+                    if st.button(
+                        f"Remove {_n_sim} selected from database",
+                        key="sim_remove_selected_btn",
+                        type="secondary",
+                    ):
+                        from db import delete_profile as _del_prof_sim
+                        _sim_db = get_supabase_client()
+                        _removed_sim = 0
+                        _failed_sim = []
+                        for _url in _to_remove_sim['LinkedIn'].dropna():
+                            if _sim_db and _del_prof_sim(_sim_db, str(_url)):
+                                _removed_sim += 1
+                            else:
+                                _failed_sim.append(_url)
+                        if _removed_sim:
+                            _remove_sim_set = set(_to_remove_sim['LinkedIn'].dropna().tolist())
+                            if 'similar_last_result' in st.session_state:
+                                _sr = st.session_state['similar_last_result']
+                                _sr['matches'] = [
+                                    m for m in (_sr.get('matches') or [])
+                                    if m.get('linkedin_url') not in _remove_sim_set
+                                ]
+                            st.success(f"Removed {_removed_sim} profile{'s' if _removed_sim > 1 else ''} from the database.")
+                        if _failed_sim:
+                            st.warning(f"Could not remove: {', '.join(str(u) for u in _failed_sim)}")
+                        if _removed_sim:
+                            st.rerun()
                 st.download_button(
                     "Download as CSV",
-                    df.to_csv(index=False).encode("utf-8"),
+                    df.drop(columns=['Remove'], errors='ignore').to_csv(index=False).encode("utf-8"),
                     file_name="similar_profiles.csv",
                     mime="text/csv",
                 )
-
-        # Remove from database section
-        st.divider()
-        st.markdown("#### Remove Profile from Database")
-        st.caption("Permanently removes a profile so it won't appear in any search results.")
-
-        remove_url_sim = st.text_input(
-            "LinkedIn URL to remove",
-            key="remove_profile_url_sim",
-            placeholder="https://www.linkedin.com/in/username"
-        )
-        remove_confirm_sim = st.checkbox(
-            "Yes, permanently remove this profile",
-            key="remove_profile_confirm_sim"
-        )
-        if st.button("Remove from Database", key="remove_profile_btn_sim", type="secondary"):
-            if not remove_url_sim.strip():
-                st.warning("Please enter a LinkedIn URL.")
-            elif not remove_confirm_sim:
-                st.warning("Check the confirmation box first.")
-            else:
-                from db import delete_profile as _delete_profile_sim
-                _sim_db_client = get_supabase_client()
-                if _sim_db_client:
-                    ok = _delete_profile_sim(_sim_db_client, remove_url_sim.strip())
-                    if ok:
-                        st.success("Profile removed from the database.")
-                    else:
-                        st.error("Could not remove — check that the URL is correct.")
-                else:
-                    st.error("Database not available.")
 
 # ========== TAB 8: Usage ==========
 with tab_usage:

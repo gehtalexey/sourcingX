@@ -10574,12 +10574,18 @@ with tab_database:
                         display_df = display_df.drop(columns=['enriched_at_dt'], errors='ignore')
 
                     if show_all_db_cols:
-                        # Show ALL columns in dataframe
-                        st.dataframe(
-                            blank_tenure_sentinel(display_df),
-                            width="stretch",
+                        _all_edit_df = blank_tenure_sentinel(display_df).copy()
+                        _all_edit_df.insert(0, 'Remove', False)
+                        import hashlib as _hl
+                        _all_key = _hl.md5(",".join(_all_edit_df.get('linkedin_url', pd.Series()).dropna().astype(str).tolist()).encode()).hexdigest()[:8]
+                        _edited_db_df = st.data_editor(
+                            _all_edit_df,
+                            use_container_width=True,
                             hide_index=True,
+                            disabled=[c for c in _all_edit_df.columns if c != 'Remove'],
+                            key=f"db_editor_all_{_all_key}",
                             column_config={
+                                "Remove": st.column_config.CheckboxColumn("Remove"),
                                 "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                                 "public_url": st.column_config.LinkColumn("LinkedIn"),
                                 "enriched_at": st.column_config.DatetimeColumn("Enriched", format="YYYY-MM-DD"),
@@ -10590,12 +10596,18 @@ with tab_database:
                     else:
                         preview_cols = ['name', 'current_title', 'current_company', 'email', 'freshness', 'location', 'linkedin_url']
                         available_cols = [c for c in preview_cols if c in display_df.columns]
-
-                        st.dataframe(
-                            display_df[available_cols] if available_cols else display_df,
-                            width="stretch",
+                        _preview_edit_df = (display_df[available_cols] if available_cols else display_df).copy()
+                        _preview_edit_df.insert(0, 'Remove', False)
+                        import hashlib as _hl
+                        _preview_key = _hl.md5(",".join(_preview_edit_df.get('linkedin_url', pd.Series()).dropna().astype(str).tolist()).encode()).hexdigest()[:8]
+                        _edited_db_df = st.data_editor(
+                            _preview_edit_df,
+                            use_container_width=True,
                             hide_index=True,
+                            disabled=[c for c in _preview_edit_df.columns if c != 'Remove'],
+                            key=f"db_editor_preview_{_preview_key}",
                             column_config={
+                                "Remove": st.column_config.CheckboxColumn("Remove"),
                                 "name": st.column_config.TextColumn("Name"),
                                 "linkedin_url": st.column_config.LinkColumn("LinkedIn"),
                                 "current_company": st.column_config.TextColumn("Company"),
@@ -10605,6 +10617,39 @@ with tab_database:
                                 "freshness": st.column_config.TextColumn("Freshness"),
                             }
                         )
+
+                    # Show "Remove selected" button only when at least one row is checked
+                    _to_remove_db = _edited_db_df[_edited_db_df['Remove'] == True]
+                    if len(_to_remove_db) > 0:
+                        _n_db = len(_to_remove_db)
+                        if st.button(
+                            f"Remove {_n_db} selected from database",
+                            key="db_remove_selected_btn",
+                            type="secondary",
+                        ):
+                            from db import delete_profile as _del_prof_db
+                            _removed_db = 0
+                            _failed_db = []
+                            _deleted_db_urls = set()
+                            for _url in _to_remove_db['linkedin_url'].dropna():
+                                if _del_prof_db(db_client, str(_url)):
+                                    _removed_db += 1
+                                    _deleted_db_urls.add(str(_url))
+                                else:
+                                    _failed_db.append(_url)
+                            if _deleted_db_urls:
+                                if 'db_search_results' in st.session_state:
+                                    st.session_state['db_search_results'] = [
+                                        p for p in st.session_state['db_search_results']
+                                        if p.get('linkedin_url') not in _deleted_db_urls
+                                    ]
+                                _cached_all_profiles.clear()
+                            if _removed_db:
+                                st.success(f"Removed {_removed_db} profile{'s' if _removed_db > 1 else ''} from the database.")
+                            if _failed_db:
+                                st.warning(f"Could not remove: {', '.join(str(u) for u in _failed_db)}")
+                            if _removed_db:
+                                st.rerun()
 
                     # Action buttons
                     btn_col1, btn_col2 = st.columns(2)
@@ -10864,20 +10909,64 @@ with tab_similar:
                     }
                     for m in matches
                 ])
-                st.dataframe(
+                df.insert(0, 'Remove', False)
+                import hashlib as _hl
+                _sim_key = _hl.md5(",".join(df['LinkedIn'].dropna().astype(str).tolist()).encode()).hexdigest()[:8]
+                _edited_sim_df = st.data_editor(
                     df,
                     use_container_width=True,
                     hide_index=True,
+                    disabled=[c for c in df.columns if c != 'Remove'],
+                    key=f"sim_editor_{_sim_key}",
                     column_config={
+                        "Remove": st.column_config.CheckboxColumn("Remove"),
                         "LinkedIn": st.column_config.LinkColumn("LinkedIn"),
                         "Similarity": st.column_config.ProgressColumn(
                             "Similarity", min_value=0.0, max_value=1.0, format="%.3f"
                         ),
                     },
                 )
+                _to_remove_sim = _edited_sim_df[_edited_sim_df['Remove'] == True]
+                if len(_to_remove_sim) > 0:
+                    _n_sim = len(_to_remove_sim)
+                    if st.button(
+                        f"Remove {_n_sim} selected from database",
+                        key="sim_remove_selected_btn",
+                        type="secondary",
+                    ):
+                        from db import delete_profile as _del_prof_sim
+                        _sim_db = get_supabase_client()
+                        _removed_sim = 0
+                        _failed_sim = []
+                        _deleted_sim_urls = set()
+                        for _url in _to_remove_sim['LinkedIn'].dropna():
+                            if _sim_db and _del_prof_sim(_sim_db, str(_url)):
+                                _removed_sim += 1
+                                _deleted_sim_urls.add(str(_url))
+                            else:
+                                _failed_sim.append(_url)
+                        if _deleted_sim_urls:
+                            if 'similar_last_result' in st.session_state:
+                                _sr = st.session_state['similar_last_result']
+                                _sr['matches'] = [
+                                    m for m in (_sr.get('matches') or [])
+                                    if m.get('linkedin_url') not in _deleted_sim_urls
+                                ]
+                            if 'db_search_results' in st.session_state:
+                                st.session_state['db_search_results'] = [
+                                    p for p in st.session_state['db_search_results']
+                                    if p.get('linkedin_url') not in _deleted_sim_urls
+                                ]
+                            _cached_all_profiles.clear()
+                        if _removed_sim:
+                            st.success(f"Removed {_removed_sim} profile{'s' if _removed_sim > 1 else ''} from the database.")
+                        if _failed_sim:
+                            st.warning(f"Could not remove: {', '.join(str(u) for u in _failed_sim)}")
+                        if _removed_sim:
+                            st.rerun()
                 st.download_button(
                     "Download as CSV",
-                    df.to_csv(index=False).encode("utf-8"),
+                    df.drop(columns=['Remove'], errors='ignore').to_csv(index=False).encode("utf-8"),
                     file_name="similar_profiles.csv",
                     mime="text/csv",
                 )

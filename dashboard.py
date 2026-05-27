@@ -5209,10 +5209,11 @@ with tab_search:
                                         st.session_state['past_candidates_names_for_search'] = _pc_names
 
             else:
-                # URL cleared — remove stale exclusions so searches run clean
+                # URL cleared — remove stale exclusions and the shared sheet URL so
+                # the Filter tab doesn't silently reconnect the old spreadsheet.
                 for _k in ('nr_for_search', 'blacklist_for_search',
                            'past_candidates_urls_for_search', 'past_candidates_names_for_search',
-                           '_search_exclusions_loaded_from'):
+                           '_search_exclusions_loaded_from', 'user_sheet_url'):
                     st.session_state.pop(_k, None)
 
             # Status row
@@ -5709,18 +5710,26 @@ with tab_search:
 
                         _pc_names_set = set(st.session_state.get('past_candidates_names_for_search') or [])
                         _bl_raw = [c for c in (st.session_state.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+                        _nr_raw = [c for c in (st.session_state.get('nr_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
 
                         def _name_of(p):
                             return _norm_name(p.get('name') or f"{p.get('first_name', '')} {p.get('last_name', '')}")
 
+                        def _get_co(p):
+                            emp = pick_current_employer(p.get('current_employers'))
+                            return (emp.get('employer_name') or emp.get('name', '')) if emp else ''
+
                         def _is_bl(p):
                             if not _bl_raw:
                                 return False
-                            emp = pick_current_employer(p.get('current_employers'))
-                            co = (emp.get('employer_name') or emp.get('name', '')) if emp else ''
-                            if not co:
+                            co = _get_co(p)
+                            return bool(co) and _company_matches_filter_list(co, _bl_raw)
+
+                        def _is_nr(p):
+                            if not _nr_raw:
                                 return False
-                            return _company_matches_filter_list(co, _bl_raw)
+                            co = _get_co(p)
+                            return bool(co) and _company_matches_filter_list(co, _nr_raw)
 
                         def _clean_page(profiles):
                             out = profiles
@@ -5728,6 +5737,8 @@ with tab_search:
                                 out = [p for p in out if _name_of(p) not in _pc_names_set]
                             if _bl_raw:
                                 out = [p for p in out if not _is_bl(p)]
+                            if _nr_raw:
+                                out = [p for p in out if not _is_nr(p)]
                             return out
 
                         all_profiles = _clean_page(results['profiles'])
@@ -6079,37 +6090,55 @@ with tab_search:
                                     exclude_profiles=_lm_p.get('past_candidates_urls_for_search') or None,
                                 )
 
-                                if more_results.get("profiles"):
-                                    # Append to existing results
-                                    current_results = st.session_state.get('crustdata_search_results', [])
-                                    new_profiles = more_results['profiles']
-                                    # Post-filter using the same exclusions as the original search
-                                    def _lm_norm_name(n):
-                                        n = str(n).lower().strip()
-                                        n = ' '.join(n.split())
-                                        n = re.sub(r'[^\w\s]', '', n)
-                                        return n.strip()
+                                # Post-filter helpers (same exclusions as original search)
+                                def _lm_norm_name(n):
+                                    n = str(n).lower().strip()
+                                    n = ' '.join(n.split())
+                                    n = re.sub(r'[^\w\s]', '', n)
+                                    return n.strip()
 
-                                    _lm_names_set = set(_lm_p.get('past_candidates_names_for_search') or [])
-                                    _lm_bl_raw = [c for c in (_lm_p.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+                                _lm_names_set = set(_lm_p.get('past_candidates_names_for_search') or [])
+                                _lm_bl_raw = [c for c in (_lm_p.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+                                _lm_nr_raw = [c for c in (_lm_p.get('nr_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+
+                                def _lm_get_co(p):
+                                    emp = pick_current_employer(p.get('current_employers'))
+                                    return (emp.get('employer_name') or emp.get('name', '')) if emp else ''
+
+                                def _lm_clean(profiles):
+                                    out = profiles
                                     if _lm_names_set:
-                                        new_profiles = [
-                                            p for p in new_profiles
-                                            if _lm_norm_name(p.get('name') or f"{p.get('first_name','')} {p.get('last_name','')}") not in _lm_names_set
-                                        ]
+                                        out = [p for p in out if _lm_norm_name(p.get('name') or f"{p.get('first_name','')} {p.get('last_name','')}") not in _lm_names_set]
                                     if _lm_bl_raw:
-                                        def _lm_is_bl(p):
-                                            emp = pick_current_employer(p.get('current_employers'))
-                                            co = (emp.get('employer_name') or emp.get('name', '')) if emp else ''
-                                            if not co:
-                                                return False
-                                            return _company_matches_filter_list(co, _lm_bl_raw)
-                                        new_profiles = [p for p in new_profiles if not _lm_is_bl(p)]
+                                        out = [p for p in out if not (_lm_get_co(p) and _company_matches_filter_list(_lm_get_co(p), _lm_bl_raw))]
+                                    if _lm_nr_raw:
+                                        out = [p for p in out if not (_lm_get_co(p) and _company_matches_filter_list(_lm_get_co(p), _lm_nr_raw))]
+                                    return out
+
+                                # Keep fetching until we have at least one valid profile or run out of pages
+                                current_results = st.session_state.get('crustdata_search_results', [])
+                                new_profiles = _lm_clean(more_results.get('profiles') or [])
+                                next_cursor = more_results.get('cursor')
+                                total_lm_credits = more_results.get('credits_used', 0)
+                                while not new_profiles and next_cursor:
+                                    extra = search_people_db(
+                                        filters,
+                                        limit=_lm_p.get('limit', 100),
+                                        cursor=next_cursor,
+                                        sorts=_lm_p.get('sorts'),
+                                        api_key=api_key,
+                                        exclude_profiles=_lm_p.get('past_candidates_urls_for_search') or None,
+                                    )
+                                    new_profiles = _lm_clean(extra.get('profiles') or [])
+                                    next_cursor = extra.get('cursor')
+                                    total_lm_credits += extra.get('credits_used', 0)
+
+                                if new_profiles or more_results.get("profiles"):
                                     st.session_state['crustdata_search_results'] = current_results + new_profiles
-                                    st.session_state['crustdata_search_cursor'] = more_results.get('cursor')
+                                    st.session_state['crustdata_search_cursor'] = next_cursor
                                     st.session_state['crustdata_search_credits_used'] = (
                                         st.session_state.get('crustdata_search_credits_used', 0) +
-                                        more_results.get('credits_used', 0)
+                                        total_lm_credits
                                     )
                                     # Select new profiles by default
                                     current_selected = st.session_state.get('crustdata_search_selected', [])

@@ -5689,8 +5689,9 @@ with tab_search:
                     geo_radius_km=int(search_geo_radius) if search_geo_radius > 0 else None,
                     min_connections=int(search_min_connections) if search_min_connections > 0 else None,
                     exact_company=search_exact_company,
-                    not_relevant_companies=st.session_state.get('nr_for_search') or None,
-                    blacklist_companies=st.session_state.get('blacklist_for_search') or None,
+                    # not_relevant and blacklist are applied client-side in _clean_page()
+                    # rather than as API filters — sending them to Crustdata changes its
+                    # scoring universe and degrades result quality.
                 )
 
                 try:
@@ -6079,8 +6080,7 @@ with tab_search:
                                     geo_radius_km=_lm_p.get('geo_radius_km'),
                                     min_connections=_lm_p.get('min_connections'),
                                     exact_company=_lm_p.get('exact_company', False),
-                                    not_relevant_companies=_lm_p.get('nr_for_search') or None,
-                                    blacklist_companies=_lm_p.get('blacklist_for_search') or None,
+                                    # not_relevant and blacklist applied client-side in _lm_clean()
                                 )
 
                                 more_results = search_people_db(

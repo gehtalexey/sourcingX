@@ -261,6 +261,8 @@ def build_filters(
     geo_radius_km: int = None,
     min_connections: int = None,
     exact_company: bool = False,
+    not_relevant_companies: List[str] = None,
+    blacklist_companies: List[str] = None,
 ) -> Dict[str, Any]:
     """
     Build Crustdata filter object from UI inputs.
@@ -613,6 +615,22 @@ def build_filters(
             "value": min_connections
         })
 
+    # Exclude not-relevant and blacklisted companies (current employer only).
+    # Both lists are merged into a single not_in to avoid ambiguity if the API
+    # treats two conditions on the same column with OR rather than AND semantics.
+    # not_in is exact/case-sensitive; the post-search fuzzy filter handles variants.
+    _excl_set = set()
+    if not_relevant_companies:
+        _excl_set.update(n.strip().strip('"').strip() for n in not_relevant_companies if n and n.strip())
+    if blacklist_companies:
+        _excl_set.update(n.strip().strip('"').strip() for n in blacklist_companies if n and n.strip())
+    if _excl_set:
+        conditions.append({
+            "column": "current_employers.name",
+            "type": "not_in",
+            "value": sorted(_excl_set)
+        })
+
     # Return combined filter
     if not conditions:
         # Return empty filter that matches everything
@@ -646,6 +664,7 @@ def search_people_db(
     cursor: str = None,
     sorts: List[Dict[str, str]] = None,
     api_key: str = None,
+    exclude_profiles: List[str] = None,
 ) -> Dict[str, Any]:
     """
     Search Crustdata's people database.
@@ -697,6 +716,15 @@ def search_people_db(
     # Add pagination cursor
     if cursor:
         body["cursor"] = cursor
+
+    # Exclude specific LinkedIn profiles (past candidates).
+    # Crustdata nests this under post_processing, not at the top level.
+    # Normalize URLs to canonical form so scheme/www/trailing-slash variants match.
+    if exclude_profiles:
+        clean_urls = [normalize_linkedin_url(u) for u in exclude_profiles if u and str(u).strip()]
+        clean_urls = [u for u in clean_urls if u]
+        if clean_urls:
+            body["post_processing"] = {"exclude_profiles": clean_urls}
 
     # Add sorting
     if sorts:

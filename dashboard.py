@@ -5767,6 +5767,12 @@ with tab_search:
                             'exact_company': search_exact_company,
                             'limit': search_limit,
                             'sorts': search_sorts,
+                            # Snapshot exclusions so Load More uses the same lists even if
+                            # the user changes the sheet URL between search and Load More.
+                            'nr_for_search': st.session_state.get('nr_for_search'),
+                            'blacklist_for_search': st.session_state.get('blacklist_for_search'),
+                            'past_candidates_urls_for_search': st.session_state.get('past_candidates_urls_for_search'),
+                            'past_candidates_names_for_search': st.session_state.get('past_candidates_names_for_search'),
                         }
                         # Defer DB save to after rerun so results render immediately
                         st.session_state['_pending_initial_save'] = True
@@ -6040,8 +6046,8 @@ with tab_search:
                                     geo_radius_km=_lm_p.get('geo_radius_km'),
                                     min_connections=_lm_p.get('min_connections'),
                                     exact_company=_lm_p.get('exact_company', False),
-                                    not_relevant_companies=st.session_state.get('nr_for_search') or None,
-                                    blacklist_companies=st.session_state.get('blacklist_for_search') or None,
+                                    not_relevant_companies=_lm_p.get('nr_for_search') or None,
+                                    blacklist_companies=_lm_p.get('blacklist_for_search') or None,
                                 )
 
                                 more_results = search_people_db(
@@ -6050,16 +6056,16 @@ with tab_search:
                                     cursor=cursor,
                                     sorts=_lm_p.get('sorts'),
                                     api_key=api_key,
-                                    exclude_profiles=st.session_state.get('past_candidates_urls_for_search') or None,
+                                    exclude_profiles=_lm_p.get('past_candidates_urls_for_search') or None,
                                 )
 
                                 if more_results.get("profiles"):
                                     # Append to existing results
                                     current_results = st.session_state.get('crustdata_search_results', [])
                                     new_profiles = more_results['profiles']
-                                    # Post-filter by past candidate names and blacklist
-                                    _lm_names_set = set(st.session_state.get('past_candidates_names_for_search') or [])
-                                    _lm_bl = [c.lower().strip() for c in (st.session_state.get('blacklist_for_search') or []) if c and c.strip() and len(c.strip()) >= 3]
+                                    # Post-filter using the same exclusions as the original search
+                                    _lm_names_set = set(_lm_p.get('past_candidates_names_for_search') or [])
+                                    _lm_bl = [c.lower().strip() for c in (_lm_p.get('blacklist_for_search') or []) if c and c.strip() and len(c.strip()) >= 3]
                                     if _lm_names_set:
                                         new_profiles = [
                                             p for p in new_profiles

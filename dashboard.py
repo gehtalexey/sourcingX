@@ -5196,6 +5196,13 @@ with tab_search:
                                     if _pc_names:
                                         st.session_state['past_candidates_names_for_search'] = _pc_names
 
+            else:
+                # URL cleared — remove stale exclusions so searches run clean
+                for _k in ('nr_for_search', 'blacklist_for_search',
+                           'past_candidates_urls_for_search', 'past_candidates_names_for_search',
+                           '_search_exclusions_loaded_from'):
+                    st.session_state.pop(_k, None)
+
             # Status row
             _st_cols = st.columns(3)
             with _st_cols[0]:
@@ -5680,8 +5687,31 @@ with tab_search:
                     results = search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key, exclude_profiles=_exclude_urls)
 
                     if results.get("profiles"):
-                        all_profiles = results['profiles']
-                        total_count = results.get('total_count', len(all_profiles))
+                        # Name filter applied inline during pagination so we keep
+                        # fetching until we have the requested count (not just raw API count).
+                        _pc_names_set = set(st.session_state.get('past_candidates_names_for_search') or [])
+                        _bl_names = [c.lower().strip() for c in (st.session_state.get('blacklist_for_search') or []) if c and c.strip() and len(c.strip()) >= 3]
+
+                        def _name_of(p):
+                            return (p.get('name') or f"{p.get('first_name', '')} {p.get('last_name', '')}").strip().lower()
+
+                        def _is_bl(p):
+                            if not _bl_names:
+                                return False
+                            emp = pick_current_employer(p.get('current_employers'))
+                            co = ((emp.get('employer_name') or emp.get('name', '')) if emp else '').lower().strip()
+                            return bool(co) and any(bl in co or co in bl for bl in _bl_names)
+
+                        def _clean_page(profiles):
+                            out = profiles
+                            if _pc_names_set:
+                                out = [p for p in out if _name_of(p) not in _pc_names_set]
+                            if _bl_names:
+                                out = [p for p in out if not _is_bl(p)]
+                            return out
+
+                        all_profiles = _clean_page(results['profiles'])
+                        total_count = results.get('total_count', len(results['profiles']))
                         total_credits = results.get('credits_used', 0)
                         cursor = results.get('cursor')
 
@@ -5699,19 +5729,11 @@ with tab_search:
                                 exclude_profiles=_exclude_urls,
                             )
                             if page_results.get("profiles"):
-                                all_profiles.extend(page_results['profiles'])
+                                all_profiles.extend(_clean_page(page_results['profiles']))
                                 total_credits += page_results.get('credits_used', 0)
                                 cursor = page_results.get('cursor')
                             else:
                                 break
-
-                        # Post-filter by past candidate names (catches those without a LinkedIn URL)
-                        _pc_names_set = set(st.session_state.get('past_candidates_names_for_search') or [])
-                        if _pc_names_set:
-                            all_profiles = [
-                                p for p in all_profiles
-                                if (p.get('name') or f"{p.get('first_name','')} {p.get('last_name','')}").strip().lower() not in _pc_names_set
-                            ]
 
                         loaded_count = len(all_profiles)
                         st.session_state['crustdata_search_results'] = all_profiles
@@ -6035,13 +6057,20 @@ with tab_search:
                                     # Append to existing results
                                     current_results = st.session_state.get('crustdata_search_results', [])
                                     new_profiles = more_results['profiles']
-                                    # Post-filter by past candidate names
+                                    # Post-filter by past candidate names and blacklist
                                     _lm_names_set = set(st.session_state.get('past_candidates_names_for_search') or [])
+                                    _lm_bl = [c.lower().strip() for c in (st.session_state.get('blacklist_for_search') or []) if c and c.strip() and len(c.strip()) >= 3]
                                     if _lm_names_set:
                                         new_profiles = [
                                             p for p in new_profiles
                                             if (p.get('name') or f"{p.get('first_name','')} {p.get('last_name','')}").strip().lower() not in _lm_names_set
                                         ]
+                                    if _lm_bl:
+                                        def _lm_is_bl(p):
+                                            emp = pick_current_employer(p.get('current_employers'))
+                                            co = ((emp.get('employer_name') or emp.get('name', '')) if emp else '').lower().strip()
+                                            return bool(co) and any(bl in co or co in bl for bl in _lm_bl)
+                                        new_profiles = [p for p in new_profiles if not _lm_is_bl(p)]
                                     st.session_state['crustdata_search_results'] = current_results + new_profiles
                                     st.session_state['crustdata_search_cursor'] = more_results.get('cursor')
                                     st.session_state['crustdata_search_credits_used'] = (

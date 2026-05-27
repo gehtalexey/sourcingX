@@ -5183,9 +5183,16 @@ with tab_search:
                                     st.session_state['past_candidates_urls_for_search'] = _pc_urls
 
                             # Names → post-search filter fallback
+                            # Normalize: lowercase, collapse whitespace, strip punctuation
+                            def _norm_pc_name(n):
+                                n = str(n).lower().strip()
+                                n = ' '.join(n.split())
+                                n = re.sub(r'[^\w\s]', '', n)
+                                return n.strip()
+
                             _pc_name_col = _find_pc_col(['Name', 'Full Name', 'full_name', 'FullName', 'Candidate Name'])
                             if _pc_name_col:
-                                _pc_names = [str(n).strip().lower() for n in _pc_df[_pc_name_col].dropna() if n and str(n).strip()]
+                                _pc_names = [_norm_pc_name(n) for n in _pc_df[_pc_name_col].dropna() if n and str(n).strip()]
                                 if _pc_names:
                                     st.session_state['past_candidates_names_for_search'] = _pc_names
                             else:
@@ -5194,7 +5201,7 @@ with tab_search:
                                 _pc_last_col = _find_pc_col(['Last Name', 'last_name', 'LastName', 'last'])
                                 if _pc_first_col and _pc_last_col:
                                     _pc_names = [
-                                        f"{str(r[_pc_first_col]).strip()} {str(r[_pc_last_col]).strip()}".strip().lower()
+                                        _norm_pc_name(f"{str(r[_pc_first_col]).strip()} {str(r[_pc_last_col]).strip()}")
                                         for _, r in _pc_df[[_pc_first_col, _pc_last_col]].dropna().iterrows()
                                         if str(r[_pc_first_col]).strip() or str(r[_pc_last_col]).strip()
                                     ]
@@ -5694,30 +5701,32 @@ with tab_search:
                     if results.get("profiles"):
                         # Name filter applied inline during pagination so we keep
                         # fetching until we have the requested count (not just raw API count).
+                        def _norm_name(n):
+                            n = str(n).lower().strip()
+                            n = ' '.join(n.split())
+                            n = re.sub(r'[^\w\s]', '', n)
+                            return n.strip()
+
                         _pc_names_set = set(st.session_state.get('past_candidates_names_for_search') or [])
-                        _bl_names = [c.lower().strip() for c in (st.session_state.get('blacklist_for_search') or []) if c and c.strip() and len(c.strip()) >= 3]
+                        _bl_raw = [c for c in (st.session_state.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
 
                         def _name_of(p):
-                            return (p.get('name') or f"{p.get('first_name', '')} {p.get('last_name', '')}").strip().lower()
+                            return _norm_name(p.get('name') or f"{p.get('first_name', '')} {p.get('last_name', '')}")
 
                         def _is_bl(p):
-                            if not _bl_names:
+                            if not _bl_raw:
                                 return False
                             emp = pick_current_employer(p.get('current_employers'))
-                            co = ((emp.get('employer_name') or emp.get('name', '')) if emp else '').lower().strip()
+                            co = (emp.get('employer_name') or emp.get('name', '')) if emp else ''
                             if not co:
                                 return False
-                            for bl in _bl_names:
-                                bl_norm = _normalize_company_name(bl)
-                                if bl_norm and len(bl_norm) >= 3 and re.search(r'\b' + re.escape(bl_norm) + r'\b', co):
-                                    return True
-                            return False
+                            return _company_matches_filter_list(co, _bl_raw)
 
                         def _clean_page(profiles):
                             out = profiles
                             if _pc_names_set:
                                 out = [p for p in out if _name_of(p) not in _pc_names_set]
-                            if _bl_names:
+                            if _bl_raw:
                                 out = [p for p in out if not _is_bl(p)]
                             return out
 
@@ -6075,24 +6084,26 @@ with tab_search:
                                     current_results = st.session_state.get('crustdata_search_results', [])
                                     new_profiles = more_results['profiles']
                                     # Post-filter using the same exclusions as the original search
+                                    def _lm_norm_name(n):
+                                        n = str(n).lower().strip()
+                                        n = ' '.join(n.split())
+                                        n = re.sub(r'[^\w\s]', '', n)
+                                        return n.strip()
+
                                     _lm_names_set = set(_lm_p.get('past_candidates_names_for_search') or [])
-                                    _lm_bl = [c.lower().strip() for c in (_lm_p.get('blacklist_for_search') or []) if c and c.strip() and len(c.strip()) >= 3]
+                                    _lm_bl_raw = [c for c in (_lm_p.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
                                     if _lm_names_set:
                                         new_profiles = [
                                             p for p in new_profiles
-                                            if (p.get('name') or f"{p.get('first_name','')} {p.get('last_name','')}").strip().lower() not in _lm_names_set
+                                            if _lm_norm_name(p.get('name') or f"{p.get('first_name','')} {p.get('last_name','')}") not in _lm_names_set
                                         ]
-                                    if _lm_bl:
+                                    if _lm_bl_raw:
                                         def _lm_is_bl(p):
                                             emp = pick_current_employer(p.get('current_employers'))
-                                            co = ((emp.get('employer_name') or emp.get('name', '')) if emp else '').lower().strip()
+                                            co = (emp.get('employer_name') or emp.get('name', '')) if emp else ''
                                             if not co:
                                                 return False
-                                            for bl in _lm_bl:
-                                                bl_norm = _normalize_company_name(bl)
-                                                if bl_norm and len(bl_norm) >= 3 and re.search(r'\b' + re.escape(bl_norm) + r'\b', co):
-                                                    return True
-                                            return False
+                                            return _company_matches_filter_list(co, _lm_bl_raw)
                                         new_profiles = [p for p in new_profiles if not _lm_is_bl(p)]
                                     st.session_state['crustdata_search_results'] = current_results + new_profiles
                                     st.session_state['crustdata_search_cursor'] = more_results.get('cursor')

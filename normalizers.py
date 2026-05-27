@@ -78,7 +78,7 @@ CRUSTDATA_FIELD_MAP = {
 
     # Profile fields
     'headline': ['headline'],
-    'location': ['location'],
+    'location': ['location', 'region'],  # Crustdata uses 'region' on newer API responses
     'summary': ['summary'],
 
     # Position fields (from positions[0])

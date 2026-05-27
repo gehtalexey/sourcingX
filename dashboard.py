@@ -5105,31 +5105,80 @@ with tab_search:
 
         st.divider()
 
-        # ===== Not-relevant sheet connection (search tab) =====
-        # Lets the user connect their sheet before searching so the exclusion
-        # filter fires on the first search, without needing to visit Filters first.
-        with st.expander("Not-relevant company exclusion", expanded=not st.session_state.get('nr_for_search')):
-            nr_sheet_url = st.text_input(
+        # ===== Pre-search sheet connection =====
+        # Loads not-relevant companies, blacklist, and past candidates from the
+        # user's Google Sheet before the first search so all exclusions fire
+        # without needing to visit the Filters tab first.
+        _any_loaded = (
+            st.session_state.get('nr_for_search') or
+            st.session_state.get('blacklist_for_search') or
+            st.session_state.get('past_candidates_urls_for_search')
+        )
+        with st.expander("Search exclusions (not-relevant, blacklist, past candidates)", expanded=not _any_loaded):
+            _st_sheet_url = st.text_input(
                 "Google Sheet URL",
                 value=st.session_state.get('user_sheet_url', ''),
                 placeholder="https://docs.google.com/spreadsheets/d/...",
                 key="search_tab_nr_sheet_url",
-                help="Paste your sheet URL. The 'NotRelevant Companies' tab will be read and companies excluded from every search.",
+                help="Paste your sheet URL. Reads 'NotRelevant Companies', 'Blacklist', and 'Past Candidates' tabs.",
             )
-            if nr_sheet_url:
-                st.session_state['user_sheet_url'] = nr_sheet_url
-                if not st.session_state.get('nr_for_search'):
-                    _nr_gspread = get_gspread_client()
-                    _nr_df = load_sheet_as_df(nr_sheet_url, 'NotRelevant Companies') if _nr_gspread else None
-                    if _nr_df is not None and len(_nr_df.columns) > 0:
-                        _nr_list = []
-                        for _col in _nr_df.columns:
-                            _nr_list.extend(_nr_df[_col].dropna().tolist())
-                        st.session_state['nr_for_search'] = list(set(_nr_list))
-            if st.session_state.get('nr_for_search'):
-                st.success(f"{len(st.session_state['nr_for_search'])} not-relevant companies loaded — will be excluded from search.")
-            elif nr_sheet_url:
-                st.warning("Could not read 'NotRelevant Companies' tab. Check the sheet is shared and the tab name is correct.")
+            if _st_sheet_url:
+                st.session_state['user_sheet_url'] = _st_sheet_url
+                _st_gspread = get_gspread_client()
+                if _st_gspread:
+                    # Not-relevant companies
+                    if not st.session_state.get('nr_for_search'):
+                        _nr_df = load_sheet_as_df(_st_sheet_url, 'NotRelevant Companies')
+                        if _nr_df is not None and len(_nr_df.columns) > 0:
+                            _nr_list = []
+                            for _col in _nr_df.columns:
+                                _nr_list.extend(_nr_df[_col].dropna().tolist())
+                            st.session_state['nr_for_search'] = list(set(_nr_list))
+                    # Blacklist
+                    if not st.session_state.get('blacklist_for_search'):
+                        _bl_df = load_sheet_as_df(_st_sheet_url, 'Blacklist')
+                        if _bl_df is not None and len(_bl_df.columns) > 0:
+                            _bl_list = []
+                            for _col in _bl_df.columns:
+                                _bl_list.extend(_bl_df[_col].dropna().tolist())
+                            st.session_state['blacklist_for_search'] = list(set(_bl_list))
+                    # Past candidates — extract LinkedIn URLs
+                    if not st.session_state.get('past_candidates_urls_for_search'):
+                        _pc_df = load_sheet_as_df(_st_sheet_url, 'Past Candidates')
+                        if _pc_df is not None:
+                            _pc_url_candidates = [
+                                'LinkedIn', 'linkedin_url', 'LinkedIn URL', 'LinkedIn Profile URL',
+                                'linkedinUrl', 'profileUrl', 'profile_url', 'URL',
+                            ]
+                            _pc_col_lower = {c.lower(): c for c in _pc_df.columns}
+                            _pc_linkedin_col = next(
+                                (c for c in _pc_url_candidates if c in _pc_df.columns or c.lower() in _pc_col_lower),
+                                None
+                            )
+                            if _pc_linkedin_col:
+                                if _pc_linkedin_col not in _pc_df.columns:
+                                    _pc_linkedin_col = _pc_col_lower[_pc_linkedin_col.lower()]
+                                _pc_urls = [u.strip() for u in _pc_df[_pc_linkedin_col].dropna() if u and str(u).strip()]
+                                if _pc_urls:
+                                    st.session_state['past_candidates_urls_for_search'] = _pc_urls
+
+            # Status row
+            _st_cols = st.columns(3)
+            with _st_cols[0]:
+                if st.session_state.get('nr_for_search'):
+                    st.success(f"{len(st.session_state['nr_for_search'])} not-relevant companies")
+                elif _st_sheet_url:
+                    st.caption("Not-relevant: not loaded")
+            with _st_cols[1]:
+                if st.session_state.get('blacklist_for_search'):
+                    st.success(f"{len(st.session_state['blacklist_for_search'])} blacklisted companies")
+                elif _st_sheet_url:
+                    st.caption("Blacklist: not loaded")
+            with _st_cols[2]:
+                if st.session_state.get('past_candidates_urls_for_search'):
+                    st.success(f"{len(st.session_state['past_candidates_urls_for_search'])} past candidates")
+                elif _st_sheet_url:
+                    st.caption("Past candidates: not loaded")
 
         st.divider()
 
@@ -5582,6 +5631,7 @@ with tab_search:
                     min_connections=int(search_min_connections) if search_min_connections > 0 else None,
                     exact_company=search_exact_company,
                     not_relevant_companies=st.session_state.get('nr_for_search') or None,
+                    blacklist_companies=st.session_state.get('blacklist_for_search') or None,
                 )
 
                 try:
@@ -5589,7 +5639,8 @@ with tab_search:
                     progress_placeholder = st.empty()
                     progress_placeholder.info("Searching Crustdata database...")
 
-                    results = search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key)
+                    _exclude_urls = st.session_state.get('past_candidates_urls_for_search') or None
+                    results = search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key, exclude_profiles=_exclude_urls)
 
                     if results.get("profiles"):
                         all_profiles = results['profiles']
@@ -5607,7 +5658,8 @@ with tab_search:
                                 limit=min(remaining, 1000),
                                 cursor=cursor,
                                 sorts=search_sorts,
-                                api_key=api_key
+                                api_key=api_key,
+                                exclude_profiles=_exclude_urls,
                             )
                             if page_results.get("profiles"):
                                 all_profiles.extend(page_results['profiles'])
@@ -5921,6 +5973,8 @@ with tab_search:
                                     geo_radius_km=_lm_p.get('geo_radius_km'),
                                     min_connections=_lm_p.get('min_connections'),
                                     exact_company=_lm_p.get('exact_company', False),
+                                    not_relevant_companies=st.session_state.get('nr_for_search') or None,
+                                    blacklist_companies=st.session_state.get('blacklist_for_search') or None,
                                 )
 
                                 more_results = search_people_db(
@@ -5928,7 +5982,8 @@ with tab_search:
                                     limit=_lm_p.get('limit', 100),
                                     cursor=cursor,
                                     sorts=_lm_p.get('sorts'),
-                                    api_key=api_key
+                                    api_key=api_key,
+                                    exclude_profiles=st.session_state.get('past_candidates_urls_for_search') or None,
                                 )
 
                                 if more_results.get("profiles"):

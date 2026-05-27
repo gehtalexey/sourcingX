@@ -262,6 +262,7 @@ def build_filters(
     min_connections: int = None,
     exact_company: bool = False,
     not_relevant_companies: List[str] = None,
+    blacklist_companies: List[str] = None,
 ) -> Dict[str, Any]:
     """
     Build Crustdata filter object from UI inputs.
@@ -624,6 +625,16 @@ def build_filters(
                 "value": clean_nr
             })
 
+    # Exclude blacklisted companies (current employer only)
+    if blacklist_companies:
+        clean_bl = [n.strip().strip('"').strip() for n in blacklist_companies if n and n.strip()]
+        if clean_bl:
+            conditions.append({
+                "column": "current_employers.name",
+                "type": "not_in",
+                "value": clean_bl
+            })
+
     # Return combined filter
     if not conditions:
         # Return empty filter that matches everything
@@ -657,6 +668,7 @@ def search_people_db(
     cursor: str = None,
     sorts: List[Dict[str, str]] = None,
     api_key: str = None,
+    exclude_profiles: List[str] = None,
 ) -> Dict[str, Any]:
     """
     Search Crustdata's people database.
@@ -708,6 +720,12 @@ def search_people_db(
     # Add pagination cursor
     if cursor:
         body["cursor"] = cursor
+
+    # Exclude specific LinkedIn profiles (past candidates)
+    if exclude_profiles:
+        clean_urls = [u.strip() for u in exclude_profiles if u and u.strip()]
+        if clean_urls:
+            body["exclude_profiles"] = clean_urls
 
     # Add sorting
     if sorts:

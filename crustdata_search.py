@@ -619,11 +619,18 @@ def build_filters(
     # not_in is exact/case-sensitive — "Microsoft" won't catch "Microsoft Israel".
     # The post-search fuzzy filter in the Filters tab handles variants; this
     # is a best-effort credit-saver that eliminates exact-name matches early.
+    # Two separate conditions: all_employers is returned data, not a searchable
+    # column — use current_employers and past_employers instead.
     if not_relevant_companies:
         clean_nr = [n.strip().strip('"').strip() for n in not_relevant_companies if n and n.strip()]
         if clean_nr:
             conditions.append({
-                "column": "all_employers.name",
+                "column": "current_employers.name",
+                "type": "not_in",
+                "value": clean_nr
+            })
+            conditions.append({
+                "column": "past_employers.name",
                 "type": "not_in",
                 "value": clean_nr
             })
@@ -726,8 +733,10 @@ def search_people_db(
 
     # Exclude specific LinkedIn profiles (past candidates).
     # Crustdata nests this under post_processing, not at the top level.
+    # Normalize URLs to canonical form so scheme/www/trailing-slash variants match.
     if exclude_profiles:
-        clean_urls = [u.strip() for u in exclude_profiles if u and u.strip()]
+        clean_urls = [normalize_linkedin_url(u) for u in exclude_profiles if u and str(u).strip()]
+        clean_urls = [u for u in clean_urls if u]
         if clean_urls:
             body["post_processing"] = {"exclude_profiles": clean_urls}
 

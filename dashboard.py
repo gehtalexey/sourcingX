@@ -5700,7 +5700,13 @@ with tab_search:
                                 return False
                             emp = pick_current_employer(p.get('current_employers'))
                             co = ((emp.get('employer_name') or emp.get('name', '')) if emp else '').lower().strip()
-                            return bool(co) and any(bl in co or co in bl for bl in _bl_names)
+                            if not co:
+                                return False
+                            for bl in _bl_names:
+                                bl_norm = _normalize_company_name(bl)
+                                if bl_norm and len(bl_norm) >= 3 and re.search(r'\b' + re.escape(bl_norm) + r'\b', co):
+                                    return True
+                            return False
 
                         def _clean_page(profiles):
                             out = profiles
@@ -6075,7 +6081,13 @@ with tab_search:
                                         def _lm_is_bl(p):
                                             emp = pick_current_employer(p.get('current_employers'))
                                             co = ((emp.get('employer_name') or emp.get('name', '')) if emp else '').lower().strip()
-                                            return bool(co) and any(bl in co or co in bl for bl in _lm_bl)
+                                            if not co:
+                                                return False
+                                            for bl in _lm_bl:
+                                                bl_norm = _normalize_company_name(bl)
+                                                if bl_norm and len(bl_norm) >= 3 and re.search(r'\b' + re.escape(bl_norm) + r'\b', co):
+                                                    return True
+                                            return False
                                         new_profiles = [p for p in new_profiles if not _lm_is_bl(p)]
                                     st.session_state['crustdata_search_results'] = current_results + new_profiles
                                     st.session_state['crustdata_search_cursor'] = more_results.get('cursor')

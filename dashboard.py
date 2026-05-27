@@ -5105,6 +5105,34 @@ with tab_search:
 
         st.divider()
 
+        # ===== Not-relevant sheet connection (search tab) =====
+        # Lets the user connect their sheet before searching so the exclusion
+        # filter fires on the first search, without needing to visit Filters first.
+        with st.expander("Not-relevant company exclusion", expanded=not st.session_state.get('nr_for_search')):
+            nr_sheet_url = st.text_input(
+                "Google Sheet URL",
+                value=st.session_state.get('user_sheet_url', ''),
+                placeholder="https://docs.google.com/spreadsheets/d/...",
+                key="search_tab_nr_sheet_url",
+                help="Paste your sheet URL. The 'NotRelevant Companies' tab will be read and companies excluded from every search.",
+            )
+            if nr_sheet_url:
+                st.session_state['user_sheet_url'] = nr_sheet_url
+                if not st.session_state.get('nr_for_search'):
+                    _nr_gspread = get_gspread_client()
+                    _nr_df = load_sheet_as_df(nr_sheet_url, 'NotRelevant Companies') if _nr_gspread else None
+                    if _nr_df is not None and len(_nr_df.columns) > 0:
+                        _nr_list = []
+                        for _col in _nr_df.columns:
+                            _nr_list.extend(_nr_df[_col].dropna().tolist())
+                        st.session_state['nr_for_search'] = list(set(_nr_list))
+            if st.session_state.get('nr_for_search'):
+                st.success(f"{len(st.session_state['nr_for_search'])} not-relevant companies loaded — will be excluded from search.")
+            elif nr_sheet_url:
+                st.warning("Could not read 'NotRelevant Companies' tab. Check the sheet is shared and the tab name is correct.")
+
+        st.divider()
+
         # ===== Search Filters (with inline AI expansion) =====
         openai_key = load_openai_key()
         _has_ai = bool(openai_key and HAS_CRUSTDATA_SEARCH)
@@ -5553,6 +5581,7 @@ with tab_search:
                     geo_radius_km=int(search_geo_radius) if search_geo_radius > 0 else None,
                     min_connections=int(search_min_connections) if search_min_connections > 0 else None,
                     exact_company=search_exact_company,
+                    not_relevant_companies=st.session_state.get('nr_for_search') or None,
                 )
 
                 try:
@@ -7746,6 +7775,7 @@ with tab_filter:
                         for col in nr_df.columns:
                             not_relevant_list.extend(nr_df[col].dropna().tolist())
                         filters['not_relevant'] = list(set(not_relevant_list))  # Dedupe
+                        st.session_state['nr_for_search'] = filters['not_relevant']
                         st.info(f"Loaded {len(filters['not_relevant'])} not-relevant companies from Google Sheet ({len(nr_df.columns)} columns)")
                 elif not_relevant_file:
                     nr_df = pd.read_csv(not_relevant_file)

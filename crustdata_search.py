@@ -261,6 +261,7 @@ def build_filters(
     geo_radius_km: int = None,
     min_connections: int = None,
     exact_company: bool = False,
+    not_relevant_companies: List[str] = None,
 ) -> Dict[str, Any]:
     """
     Build Crustdata filter object from UI inputs.
@@ -612,6 +613,16 @@ def build_filters(
             "type": "=>",
             "value": min_connections
         })
+
+    # Exclude not-relevant companies (current and past employers)
+    if not_relevant_companies:
+        clean_nr = [n.strip().strip('"').strip() for n in not_relevant_companies if n and n.strip()]
+        if clean_nr:
+            conditions.append({
+                "column": "all_employers.name",
+                "type": "not_in",
+                "value": clean_nr
+            })
 
     # Return combined filter
     if not conditions:

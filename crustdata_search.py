@@ -615,7 +615,10 @@ def build_filters(
             "value": min_connections
         })
 
-    # Exclude not-relevant companies (current and past employers)
+    # Exclude not-relevant companies (current and past employers).
+    # not_in is exact/case-sensitive — "Microsoft" won't catch "Microsoft Israel".
+    # The post-search fuzzy filter in the Filters tab handles variants; this
+    # is a best-effort credit-saver that eliminates exact-name matches early.
     if not_relevant_companies:
         clean_nr = [n.strip().strip('"').strip() for n in not_relevant_companies if n and n.strip()]
         if clean_nr:
@@ -721,11 +724,12 @@ def search_people_db(
     if cursor:
         body["cursor"] = cursor
 
-    # Exclude specific LinkedIn profiles (past candidates)
+    # Exclude specific LinkedIn profiles (past candidates).
+    # Crustdata nests this under post_processing, not at the top level.
     if exclude_profiles:
         clean_urls = [u.strip() for u in exclude_profiles if u and u.strip()]
         if clean_urls:
-            body["exclude_profiles"] = clean_urls
+            body["post_processing"] = {"exclude_profiles": clean_urls}
 
     # Add sorting
     if sorts:

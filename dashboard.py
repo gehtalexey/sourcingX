@@ -5125,6 +5125,12 @@ with tab_search:
             )
             if _st_sheet_url:
                 st.session_state['user_sheet_url'] = _st_sheet_url
+                # If the user pasted a different URL, clear stale exclusions so they reload
+                if st.session_state.get('_search_exclusions_loaded_from') != _st_sheet_url:
+                    for _stale_key in ('nr_for_search', 'blacklist_for_search',
+                                       'past_candidates_urls_for_search', 'past_candidates_names_for_search'):
+                        st.session_state.pop(_stale_key, None)
+                    st.session_state['_search_exclusions_loaded_from'] = _st_sheet_url
                 _st_gspread = get_gspread_client()
                 if _st_gspread:
                     # Not-relevant companies

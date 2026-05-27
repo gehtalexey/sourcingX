@@ -5178,7 +5178,7 @@ with tab_search:
                                     st.session_state['past_candidates_urls_for_search'] = _pc_urls
 
                             # Names → post-search filter fallback
-                            _pc_name_col = _find_pc_col(['Name', 'Full Name', 'full_name', 'FullName'])
+                            _pc_name_col = _find_pc_col(['Name', 'Full Name', 'full_name', 'FullName', 'Candidate Name'])
                             if _pc_name_col:
                                 _pc_names = [str(n).strip().lower() for n in _pc_df[_pc_name_col].dropna() if n and str(n).strip()]
                                 if _pc_names:

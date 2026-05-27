@@ -5121,7 +5121,7 @@ with tab_search:
                 value=st.session_state.get('user_sheet_url', ''),
                 placeholder="https://docs.google.com/spreadsheets/d/...",
                 key="search_tab_nr_sheet_url",
-                help="Paste your sheet URL. Reads 'NotRelevant Companies', 'Blacklist', and 'Past Candidates' tabs.",
+                help="Paste your sheet URL. Tab names are read from your configured sheet settings.",
             )
             if _st_sheet_url:
                 st.session_state['user_sheet_url'] = _st_sheet_url
@@ -5133,9 +5133,14 @@ with tab_search:
                     st.session_state['_search_exclusions_loaded_from'] = _st_sheet_url
                 _st_gspread = get_gspread_client()
                 if _st_gspread:
+                    # Use the same tab names as the Filter tab so renamed tabs still work
+                    _fs_cfg = get_filter_sheets_config()
+                    _nr_tab = _fs_cfg.get('not_relevant', 'NotRelevant Companies')
+                    _bl_tab = _fs_cfg.get('blacklist', 'Blacklist')
+                    _pc_tab = _fs_cfg.get('past_candidates', 'Past Candidates')
                     # Not-relevant companies
                     if not st.session_state.get('nr_for_search'):
-                        _nr_df = load_sheet_as_df(_st_sheet_url, 'NotRelevant Companies')
+                        _nr_df = load_sheet_as_df(_st_sheet_url, _nr_tab)
                         if _nr_df is not None and len(_nr_df.columns) > 0:
                             _nr_list = []
                             for _col in _nr_df.columns:
@@ -5143,7 +5148,7 @@ with tab_search:
                             st.session_state['nr_for_search'] = list(set(_nr_list))
                     # Blacklist
                     if not st.session_state.get('blacklist_for_search'):
-                        _bl_df = load_sheet_as_df(_st_sheet_url, 'Blacklist')
+                        _bl_df = load_sheet_as_df(_st_sheet_url, _bl_tab)
                         if _bl_df is not None and len(_bl_df.columns) > 0:
                             _bl_list = []
                             for _col in _bl_df.columns:
@@ -5155,7 +5160,7 @@ with tab_search:
                         not st.session_state.get('past_candidates_names_for_search')
                     )
                     if _pc_needs_load:
-                        _pc_df = load_sheet_as_df(_st_sheet_url, 'Past Candidates')
+                        _pc_df = load_sheet_as_df(_st_sheet_url, _pc_tab)
                         if _pc_df is not None:
                             _pc_col_lower = {c.lower(): c for c in _pc_df.columns}
 

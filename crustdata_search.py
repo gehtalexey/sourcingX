@@ -617,20 +617,13 @@ def build_filters(
 
     # Exclude not-relevant companies (current and past employers).
     # not_in is exact/case-sensitive — "Microsoft" won't catch "Microsoft Israel".
-    # The post-search fuzzy filter in the Filters tab handles variants; this
-    # is a best-effort credit-saver that eliminates exact-name matches early.
-    # Two separate conditions: all_employers is returned data, not a searchable
-    # column — use current_employers and past_employers instead.
+    # Current-employer-only exclusion matches the Filter tab's default behaviour.
+    # The post-search fuzzy filter in the Filters tab handles name variants.
     if not_relevant_companies:
         clean_nr = [n.strip().strip('"').strip() for n in not_relevant_companies if n and n.strip()]
         if clean_nr:
             conditions.append({
                 "column": "current_employers.name",
-                "type": "not_in",
-                "value": clean_nr
-            })
-            conditions.append({
-                "column": "past_employers.name",
                 "type": "not_in",
                 "value": clean_nr
             })

@@ -5112,7 +5112,8 @@ with tab_search:
         _any_loaded = (
             st.session_state.get('nr_for_search') or
             st.session_state.get('blacklist_for_search') or
-            st.session_state.get('past_candidates_urls_for_search')
+            st.session_state.get('past_candidates_urls_for_search') or
+            st.session_state.get('past_candidates_names_for_search')
         )
         with st.expander("Search exclusions (not-relevant, blacklist, past candidates)", expanded=not _any_loaded):
             _st_sheet_url = st.text_input(
@@ -5142,25 +5143,52 @@ with tab_search:
                             for _col in _bl_df.columns:
                                 _bl_list.extend(_bl_df[_col].dropna().tolist())
                             st.session_state['blacklist_for_search'] = list(set(_bl_list))
-                    # Past candidates — extract LinkedIn URLs
-                    if not st.session_state.get('past_candidates_urls_for_search'):
+                    # Past candidates — extract LinkedIn URLs (API exclusion) + names (post-filter fallback)
+                    _pc_needs_load = (
+                        not st.session_state.get('past_candidates_urls_for_search') and
+                        not st.session_state.get('past_candidates_names_for_search')
+                    )
+                    if _pc_needs_load:
                         _pc_df = load_sheet_as_df(_st_sheet_url, 'Past Candidates')
                         if _pc_df is not None:
-                            _pc_url_candidates = [
+                            _pc_col_lower = {c.lower(): c for c in _pc_df.columns}
+
+                            def _find_pc_col(candidates):
+                                for c in candidates:
+                                    if c in _pc_df.columns:
+                                        return c
+                                    if c.lower() in _pc_col_lower:
+                                        return _pc_col_lower[c.lower()]
+                                return None
+
+                            # LinkedIn URLs → API-level exclusion
+                            _pc_linkedin_col = _find_pc_col([
                                 'LinkedIn', 'linkedin_url', 'LinkedIn URL', 'LinkedIn Profile URL',
                                 'linkedinUrl', 'profileUrl', 'profile_url', 'URL',
-                            ]
-                            _pc_col_lower = {c.lower(): c for c in _pc_df.columns}
-                            _pc_linkedin_col = next(
-                                (c for c in _pc_url_candidates if c in _pc_df.columns or c.lower() in _pc_col_lower),
-                                None
-                            )
+                            ])
                             if _pc_linkedin_col:
-                                if _pc_linkedin_col not in _pc_df.columns:
-                                    _pc_linkedin_col = _pc_col_lower[_pc_linkedin_col.lower()]
                                 _pc_urls = [u.strip() for u in _pc_df[_pc_linkedin_col].dropna() if u and str(u).strip()]
                                 if _pc_urls:
                                     st.session_state['past_candidates_urls_for_search'] = _pc_urls
+
+                            # Names → post-search filter fallback
+                            _pc_name_col = _find_pc_col(['Name', 'Full Name', 'full_name', 'FullName'])
+                            if _pc_name_col:
+                                _pc_names = [str(n).strip().lower() for n in _pc_df[_pc_name_col].dropna() if n and str(n).strip()]
+                                if _pc_names:
+                                    st.session_state['past_candidates_names_for_search'] = _pc_names
+                            else:
+                                # Try First Name + Last Name columns
+                                _pc_first_col = _find_pc_col(['First Name', 'first_name', 'FirstName', 'first'])
+                                _pc_last_col = _find_pc_col(['Last Name', 'last_name', 'LastName', 'last'])
+                                if _pc_first_col and _pc_last_col:
+                                    _pc_names = [
+                                        f"{str(r[_pc_first_col]).strip()} {str(r[_pc_last_col]).strip()}".strip().lower()
+                                        for _, r in _pc_df[[_pc_first_col, _pc_last_col]].dropna().iterrows()
+                                        if str(r[_pc_first_col]).strip() or str(r[_pc_last_col]).strip()
+                                    ]
+                                    if _pc_names:
+                                        st.session_state['past_candidates_names_for_search'] = _pc_names
 
             # Status row
             _st_cols = st.columns(3)
@@ -5175,8 +5203,11 @@ with tab_search:
                 elif _st_sheet_url:
                     st.caption("Blacklist: not loaded")
             with _st_cols[2]:
-                if st.session_state.get('past_candidates_urls_for_search'):
-                    st.success(f"{len(st.session_state['past_candidates_urls_for_search'])} past candidates")
+                _pc_url_count = len(st.session_state.get('past_candidates_urls_for_search') or [])
+                _pc_name_count = len(st.session_state.get('past_candidates_names_for_search') or [])
+                if _pc_url_count or _pc_name_count:
+                    _pc_detail = f"{_pc_url_count} by URL, {_pc_name_count} by name"
+                    st.success(f"Past candidates: {_pc_detail}")
                 elif _st_sheet_url:
                     st.caption("Past candidates: not loaded")
 
@@ -5668,6 +5699,14 @@ with tab_search:
                             else:
                                 break
 
+                        # Post-filter by past candidate names (catches those without a LinkedIn URL)
+                        _pc_names_set = set(st.session_state.get('past_candidates_names_for_search') or [])
+                        if _pc_names_set:
+                            all_profiles = [
+                                p for p in all_profiles
+                                if (p.get('name') or f"{p.get('first_name','')} {p.get('last_name','')}").strip().lower() not in _pc_names_set
+                            ]
+
                         loaded_count = len(all_profiles)
                         st.session_state['crustdata_search_results'] = all_profiles
                         st.session_state['crustdata_search_cursor'] = cursor
@@ -5990,6 +6029,13 @@ with tab_search:
                                     # Append to existing results
                                     current_results = st.session_state.get('crustdata_search_results', [])
                                     new_profiles = more_results['profiles']
+                                    # Post-filter by past candidate names
+                                    _lm_names_set = set(st.session_state.get('past_candidates_names_for_search') or [])
+                                    if _lm_names_set:
+                                        new_profiles = [
+                                            p for p in new_profiles
+                                            if (p.get('name') or f"{p.get('first_name','')} {p.get('last_name','')}").strip().lower() not in _lm_names_set
+                                        ]
                                     st.session_state['crustdata_search_results'] = current_results + new_profiles
                                     st.session_state['crustdata_search_cursor'] = more_results.get('cursor')
                                     st.session_state['crustdata_search_credits_used'] = (

@@ -5155,8 +5155,10 @@ with tab_search:
                                 _bl_list.extend(_bl_df[_col].dropna().tolist())
                             st.session_state['blacklist_for_search'] = list(set(_bl_list))
                     # Past candidates — extract LinkedIn URLs (API exclusion) + names (post-filter fallback)
+                    # Guard each half independently: a sheet may have URLs but no name column
+                    # (or vice versa), and the AND guard would block the missing half from ever loading.
                     _pc_needs_load = (
-                        not st.session_state.get('past_candidates_urls_for_search') and
+                        not st.session_state.get('past_candidates_urls_for_search') or
                         not st.session_state.get('past_candidates_names_for_search')
                     )
                     if _pc_needs_load:
@@ -6105,14 +6107,20 @@ with tab_search:
                                     emp = pick_current_employer(p.get('current_employers'))
                                     return (emp.get('employer_name') or emp.get('name', '')) if emp else ''
 
+                                def _lm_is_excluded(p):
+                                    co = _lm_get_co(p)
+                                    if _lm_bl_raw and co and _company_matches_filter_list(co, _lm_bl_raw):
+                                        return True
+                                    if _lm_nr_raw and co and _company_matches_filter_list(co, _lm_nr_raw):
+                                        return True
+                                    return False
+
                                 def _lm_clean(profiles):
                                     out = profiles
                                     if _lm_names_set:
                                         out = [p for p in out if _lm_norm_name(p.get('name') or f"{p.get('first_name','')} {p.get('last_name','')}") not in _lm_names_set]
-                                    if _lm_bl_raw:
-                                        out = [p for p in out if not (_lm_get_co(p) and _company_matches_filter_list(_lm_get_co(p), _lm_bl_raw))]
-                                    if _lm_nr_raw:
-                                        out = [p for p in out if not (_lm_get_co(p) and _company_matches_filter_list(_lm_get_co(p), _lm_nr_raw))]
+                                    if _lm_bl_raw or _lm_nr_raw:
+                                        out = [p for p in out if not _lm_is_excluded(p)]
                                     return out
 
                                 # Keep fetching until we have at least one valid profile or run out of pages

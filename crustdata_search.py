@@ -615,28 +615,21 @@ def build_filters(
             "value": min_connections
         })
 
-    # Exclude not-relevant companies (current and past employers).
-    # not_in is exact/case-sensitive — "Microsoft" won't catch "Microsoft Israel".
-    # Current-employer-only exclusion matches the Filter tab's default behaviour.
-    # The post-search fuzzy filter in the Filters tab handles name variants.
+    # Exclude not-relevant and blacklisted companies (current employer only).
+    # Both lists are merged into a single not_in to avoid ambiguity if the API
+    # treats two conditions on the same column with OR rather than AND semantics.
+    # not_in is exact/case-sensitive; the post-search fuzzy filter handles variants.
+    _excl_set = set()
     if not_relevant_companies:
-        clean_nr = [n.strip().strip('"').strip() for n in not_relevant_companies if n and n.strip()]
-        if clean_nr:
-            conditions.append({
-                "column": "current_employers.name",
-                "type": "not_in",
-                "value": clean_nr
-            })
-
-    # Exclude blacklisted companies (current employer only)
+        _excl_set.update(n.strip().strip('"').strip() for n in not_relevant_companies if n and n.strip())
     if blacklist_companies:
-        clean_bl = [n.strip().strip('"').strip() for n in blacklist_companies if n and n.strip()]
-        if clean_bl:
-            conditions.append({
-                "column": "current_employers.name",
-                "type": "not_in",
-                "value": clean_bl
-            })
+        _excl_set.update(n.strip().strip('"').strip() for n in blacklist_companies if n and n.strip())
+    if _excl_set:
+        conditions.append({
+            "column": "current_employers.name",
+            "type": "not_in",
+            "value": sorted(_excl_set)
+        })
 
     # Return combined filter
     if not conditions:

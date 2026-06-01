@@ -5734,14 +5734,24 @@ with tab_search:
                             co = _get_co(p)
                             return bool(co) and _company_matches_filter_list(co, _nr_raw)
 
+                        # Track why profiles get removed so the user sees the breakdown
+                        # instead of an unexplained drop (e.g. 706 matching -> 570 loaded).
+                        _removed_counts = {'past_candidates': 0, 'blacklist': 0, 'not_relevant': 0}
+
                         def _clean_page(profiles):
                             out = profiles
                             if _pc_names_set:
+                                _before = len(out)
                                 out = [p for p in out if _name_of(p) not in _pc_names_set]
+                                _removed_counts['past_candidates'] += _before - len(out)
                             if _bl_raw:
+                                _before = len(out)
                                 out = [p for p in out if not _is_bl(p)]
+                                _removed_counts['blacklist'] += _before - len(out)
                             if _nr_raw:
+                                _before = len(out)
                                 out = [p for p in out if not _is_nr(p)]
+                                _removed_counts['not_relevant'] += _before - len(out)
                             return out
 
                         all_profiles = _clean_page(results['profiles'])
@@ -5810,7 +5820,19 @@ with tab_search:
                         }
                         # Defer DB save to after rerun so results render immediately
                         st.session_state['_pending_initial_save'] = True
-                        st.session_state['_search_loaded_msg'] = f"Loaded **{loaded_count:,}** profiles (of {total_count:,} total matching)"
+                        _removed_total = sum(_removed_counts.values())
+                        if _removed_total > 0:
+                            _parts = []
+                            if _removed_counts['past_candidates']:
+                                _parts.append(f"{_removed_counts['past_candidates']:,} past candidates")
+                            if _removed_counts['blacklist']:
+                                _parts.append(f"{_removed_counts['blacklist']:,} blacklisted companies")
+                            if _removed_counts['not_relevant']:
+                                _parts.append(f"{_removed_counts['not_relevant']:,} not-relevant companies")
+                            _removed_note = f" — {_removed_total:,} removed ({', '.join(_parts)})"
+                        else:
+                            _removed_note = ""
+                        st.session_state['_search_loaded_msg'] = f"Loaded **{loaded_count:,}** profiles (of {total_count:,} total matching){_removed_note}"
                     else:
                         progress_placeholder.empty()
                         st.session_state['crustdata_search_results'] = []

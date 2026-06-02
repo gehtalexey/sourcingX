@@ -27,15 +27,27 @@
 --
 -- ACCURACY NOTE (filtered nearest-neighbour search):
 --   The HNSW index returns approximate nearest neighbours and applies the
---   location filter *during* the index walk. Without help, a selective
---   filter (e.g. a single city) can make the walk run out of candidates and
---   return FEWER than match_count rows even when more qualify — or miss the
---   truly closest ones. pgvector 0.8.0 fixes this with iterative index
---   scans, which keep walking until the LIMIT is satisfied. We enable it at
---   the function level with `SET hnsw.iterative_scan = 'strict_order'`:
---   'strict_order' keeps results in exact similarity order (no reshuffling),
---   so the ranking the user sees stays correct. This is off by default in
---   0.8.0, hence the explicit SET. (Confirmed: vector extension is 0.8.0.)
+--   location filter *during* the index walk. With a very selective filter
+--   (e.g. a single small-town city in a sparse region) the walk can run out
+--   of candidates and return FEWER than match_count rows even when more
+--   qualify. pgvector 0.8.0 has iterative index scans to fix this
+--   (`hnsw.iterative_scan = 'strict_order'`), but on this hosted database the
+--   migration/SQL role is NOT permitted to pin that GUC onto a function
+--   (`ERROR 42501: permission denied to set parameter`). So we do NOT attach
+--   it here. In practice this is a non-issue for the primary use case: the
+--   database is Israel-heavy, so an Israel/city filter still fills the full
+--   match_count with correct results.
+--
+--   IF narrow-filter under-fill ever matters, enable iterative scans on the
+--   PostgREST role that actually invokes this RPC. This app connects with the
+--   Supabase service-role key (SUPABASE_KEY), so its requests run as the
+--   `service_role` Postgres role — that is the one to set:
+--       ALTER ROLE service_role SET hnsw.iterative_scan = 'strict_order';
+--   (If the dashboard ever calls this RPC with the anon/authenticated keys,
+--   set it on those roles too.) Needs elevated DB privileges, and the
+--   database is SHARED by four projects, so coordinate first. It only affects
+--   vector-index scans (i.e. this RPC), nothing else.
+--   (Confirmed: vector extension is 0.8.0.)
 --
 -- Idempotent: CREATE OR REPLACE. We DROP older signatures so there is exactly
 -- one function and no overload ambiguity for PostgREST.
@@ -105,8 +117,7 @@ RETURNS TABLE (
     )
   ORDER BY p.embedding <=> query_embedding
   LIMIT match_count;
-$$ LANGUAGE sql STABLE
-  SET hnsw.iterative_scan = 'strict_order';
+$$ LANGUAGE sql STABLE;
 
 GRANT EXECUTE ON FUNCTION match_profiles_by_embedding(vector, int, float, text[], text[]) TO anon;
 GRANT EXECUTE ON FUNCTION match_profiles_by_embedding(vector, int, float, text[], text[]) TO authenticated;

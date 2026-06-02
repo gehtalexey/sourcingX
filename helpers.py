@@ -216,6 +216,15 @@ def profile_to_display_row(profile: dict) -> dict:
         all_titles_list = profile.get('all_titles') or []
         all_titles_str = ', '.join(s for s in all_titles_list if s) if isinstance(all_titles_list, list) else str(all_titles_list or '')
 
+    # Normalize connections to int across both branches — the raw-data path
+    # yields an int while the no-raw-data path yields '', and a mixed batch
+    # would crash PyArrow on the connections column (same class of bug as
+    # all_schools/all_employers above).
+    try:
+        connections = int(connections)
+    except (ValueError, TypeError):
+        connections = 0
+
     # Past positions as full JSON from Crustdata
     import json
     past_positions = json.dumps(past_employers, ensure_ascii=False) if past_employers else ''

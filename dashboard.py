@@ -11189,7 +11189,16 @@ with tab_similar:
             )
 
             if not matches:
-                st.info("No similar profiles found above the minimum-similarity threshold. Try lowering the slider.")
+                _loc_active = bool(st.session_state.get("similar_country")) or bool((st.session_state.get("similar_city") or "").strip())
+                if _loc_active:
+                    st.info(
+                        "No matches in that location above the minimum-similarity "
+                        "threshold. Try lowering the slider, widening the location "
+                        "(clear the city, or pick the country instead), or removing "
+                        "the location filter."
+                    )
+                else:
+                    st.info("No similar profiles found above the minimum-similarity threshold. Try lowering the slider.")
             else:
                 import pandas as _pd
                 df = _pd.DataFrame([

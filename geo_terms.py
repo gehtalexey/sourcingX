@@ -172,7 +172,13 @@ COUNTRY_TERMS: dict[str, list[str]] = {
 
 
 def _normalize(text: str) -> str:
-    return (text or "").strip().lower()
+    # Lowercase + trim, and drop SQL LIKE wildcards (% _ \). Location names
+    # never contain them; left in, a typed "%" would turn the DB match into a
+    # match-anything wildcard. Stripping keeps the "contains" filter literal.
+    cleaned = (text or "").strip().lower()
+    for ch in ("%", "_", "\\"):
+        cleaned = cleaned.replace(ch, "")
+    return cleaned.strip()
 
 
 def expand_country(country: str | None) -> list[str]:

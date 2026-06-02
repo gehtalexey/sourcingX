@@ -21,11 +21,17 @@
 --   "herzliya", ...). The database just does the OR-contains match. Keeping
 --   the term list in Python means we can grow coverage without a migration.
 --
--- ACCURACY NOTE:
---   When a location filter is present the planner filters first and orders
---   the (smaller) qualifying set by exact cosine distance — so we get the
---   true nearest neighbours within the chosen region, never an HNSW
---   approximation that might under-fill. At our row count this is fast.
+-- ACCURACY NOTE (filtered nearest-neighbour search):
+--   The HNSW index returns approximate nearest neighbours and applies the
+--   location filter *during* the index walk. Without help, a selective
+--   filter (e.g. a single city) can make the walk run out of candidates and
+--   return FEWER than match_count rows even when more qualify — or miss the
+--   truly closest ones. pgvector 0.8.0 fixes this with iterative index
+--   scans, which keep walking until the LIMIT is satisfied. We enable it at
+--   the function level with `SET hnsw.iterative_scan = 'strict_order'`:
+--   'strict_order' keeps results in exact similarity order (no reshuffling),
+--   so the ranking the user sees stays correct. This is off by default in
+--   0.8.0, hence the explicit SET. (Confirmed: vector extension is 0.8.0.)
 --
 -- Idempotent: CREATE OR REPLACE. We DROP the old 3-arg signature so there is
 -- exactly one function and no overload ambiguity for PostgREST.
@@ -82,7 +88,8 @@ RETURNS TABLE (
     )
   ORDER BY p.embedding <=> query_embedding
   LIMIT match_count;
-$$ LANGUAGE sql STABLE;
+$$ LANGUAGE sql STABLE
+  SET hnsw.iterative_scan = 'strict_order';
 
 GRANT EXECUTE ON FUNCTION match_profiles_by_embedding(vector, int, float, text[]) TO anon;
 GRANT EXECUTE ON FUNCTION match_profiles_by_embedding(vector, int, float, text[]) TO authenticated;

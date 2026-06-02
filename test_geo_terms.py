@@ -73,6 +73,12 @@ def test_uncurated_city_falls_back_to_literal_text():
     assert expand_city("Reykjavik") == ["reykjavik"]
 
 
+def test_like_wildcards_are_stripped_from_typed_city():
+    # A typed "%" / "_" must not become a SQL LIKE wildcard.
+    assert "%" not in "".join(expand_location_terms(city="100%remote_x"))
+    assert "_" not in "".join(expand_location_terms(city="100%remote_x"))
+
+
 def test_empty_city_returns_nothing():
     assert expand_city("") == []
     assert expand_city(None) == []

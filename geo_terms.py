@@ -102,13 +102,18 @@ CITY_TERMS: dict[str, list[str]] = {
 # matches its own name.
 # ---------------------------------------------------------------------------
 def _israel_terms() -> list[str]:
-    terms = ["israel", "isr", "central district", "tel aviv district",
+    # NOTE: keep terms specific enough that "%term%" doesn't match foreign
+    # places. Deliberately excluded as too-short/ambiguous: "lod" (matches
+    # "Lodz, Poland"), "arad" (matches "Arad, Romania"), "acre" (matches
+    # "Acre, Brazil" and even mid-word in "Massacre"). Akko/Lod/Arad are
+    # small; if needed, a recruiter can type the city explicitly.
+    terms = ["israel", "central district", "tel aviv district",
              "southern district", "northern district", "haifa district",
-             "jerusalem district", "kiryat", "modiin", "sderot",
-             "or yehuda", "yehud", "rosh haayin", "rosh ha'ayin",
+             "jerusalem district", "modiin", "sderot",
+             "or yehuda", "rosh haayin", "rosh ha'ayin",
              "kiryat ono", "kiryat gat", "kiryat shmona", "afula",
-             "karmiel", "nahariya", "acre", "akko", "lod", "ramla",
-             "dimona", "arad", "tirat carmel", "nesher", "migdal haemek",
+             "karmiel", "nahariya", "akko", "ramla",
+             "dimona", "tirat carmel", "nesher", "migdal haemek",
              "zichron yaakov", "pardes hanna", "hadera", "even yehuda",
              "tel mond", "shoham"]
     # Fold in every curated Israeli city's variations too.

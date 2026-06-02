@@ -43,6 +43,21 @@ def test_country_israel_includes_city_spelling_variants():
     assert "be'er sheva" in terms or "beer sheva" in terms
 
 
+def test_israel_terms_do_not_match_foreign_cities():
+    # Substring matching must not pull foreign places into an Israel filter.
+    terms = expand_country("Israel")
+    foreign = ["lodz, poland", "arad, romania", "acre, brazil", "massacre bay"]
+    for loc in foreign:
+        hits = [t for t in terms if t in loc]
+        assert hits == [], f"{loc!r} wrongly matched Israel terms: {hits}"
+
+
+def test_israel_still_matches_real_israeli_cities():
+    terms = expand_country("Israel")
+    for loc in ["tel aviv, israel", "haifa", "hadera, israel", "akko"]:
+        assert any(t in loc for t in terms), f"{loc!r} should match Israel"
+
+
 def test_unknown_country_falls_back_to_its_name():
     # Not curated, but should still match the literal country text.
     assert expand_country("Venezuela") == ["venezuela"]

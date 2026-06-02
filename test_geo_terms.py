@@ -76,6 +76,23 @@ def test_uncurated_dropdown_country_matches_name_only():
     assert "tokyo" not in expand_country("Japan")
 
 
+def test_non_israel_countries_are_name_only_no_city_collisions():
+    # Only Israel is curated with cities; every other country matches its name
+    # only, so city substrings can't drag in the wrong country.
+    us = expand_country("United States")
+    uk = expand_country("United Kingdom")
+    assert us == ["united states"]
+    assert uk == ["united kingdom"]
+    # The previously-leaking terms are gone.
+    for bad in ("america", "usa", "cambridge", "oxford", "washington"):
+        assert bad not in us and bad not in uk
+
+    # And a contains-match against foreign cities no longer fires.
+    assert not any(t in "cambridge, massachusetts" for t in uk)
+    assert not any(t in "south america" for t in us)
+    assert not any(t in "waterloo, belgium" for t in expand_country("Canada"))
+
+
 # ---------------------------------------------------------------------------
 # City expansion
 # ---------------------------------------------------------------------------

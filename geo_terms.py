@@ -95,11 +95,23 @@ CITY_TERMS: dict[str, list[str]] = {
 
 
 # ---------------------------------------------------------------------------
-# Country → terms (the country's own names + its major cities).
+# Country → terms.
 #
-# Keyed by the EXACT label used in the Country dropdown. Israel is exhaustive;
-# the hub countries get their major cities; every other country at least
-# matches its own name.
+# ONLY Israel is curated with its cities. Every other country deliberately
+# falls back (via expand_country) to matching its own name.
+#
+# WHY only Israel: the country filter uses substring "contains" matching, and
+# city names collide badly across countries — "Cambridge, Massachusetts" would
+# match the UK, "South America" would match the US, and "usa" even appears
+# inside "Jerusalem". Listing a country's cities here reintroduces those
+# wrong-country matches. Israel is the curated domain and its city list is
+# precision-checked (see _israel_terms). For any other country, scope by the
+# country name and use the City box for a specific city (CITY_TERMS still
+# gives rich expansion for the major global hubs there).
+#
+# Residual: matching the bare country name is itself a substring, so rare
+# overlaps remain (e.g. "india" inside "Indiana"). Accepted as a minor,
+# documented limitation — far rarer than the city collisions above.
 # ---------------------------------------------------------------------------
 def _israel_terms() -> list[str]:
     # NOTE: keep terms specific enough that "%term%" doesn't match foreign
@@ -131,48 +143,8 @@ def _israel_terms() -> list[str]:
 
 COUNTRY_TERMS: dict[str, list[str]] = {
     "Israel": _israel_terms(),
-    "United States": [
-        "united states", "usa", "u.s.", "u.s.a", ", us", "america",
-        "new york", "nyc", "san francisco", "bay area", "silicon valley",
-        "los angeles", "seattle", "boston", "austin", "chicago", "denver",
-        "atlanta", "washington", "dallas", "houston", "miami", "san diego",
-        "san jose", "palo alto", "mountain view", "portland", "philadelphia",
-    ],
-    "United Kingdom": [
-        "united kingdom", "uk", "u.k.", "england", "scotland", "wales",
-        "london", "manchester", "cambridge", "oxford", "edinburgh",
-        "bristol", "leeds", "birmingham", "glasgow",
-    ],
-    "Germany": [
-        "germany", "deutschland", "berlin", "munich", "münchen", "munchen",
-        "hamburg", "frankfurt", "cologne", "köln", "koln", "stuttgart",
-    ],
-    "France": [
-        "france", "paris", "île-de-france", "ile-de-france", "lyon",
-        "toulouse", "marseille", "bordeaux", "lille",
-    ],
-    "Netherlands": [
-        "netherlands", "holland", "amsterdam", "rotterdam", "the hague",
-        "utrecht", "eindhoven",
-    ],
-    "Ireland": ["ireland", "dublin", "cork", "galway"],
-    "Canada": [
-        "canada", "toronto", "vancouver", "montreal", "ottawa", "waterloo",
-        "calgary",
-    ],
-    "India": [
-        "india", "bengaluru", "bangalore", "hyderabad", "mumbai", "pune",
-        "delhi", "gurgaon", "gurugram", "noida", "chennai",
-    ],
-    "Spain": ["spain", "madrid", "barcelona", "valencia", "málaga", "malaga"],
-    "Poland": ["poland", "warsaw", "kraków", "krakow", "wrocław", "wroclaw", "gdańsk", "gdansk"],
-    "Switzerland": ["switzerland", "zurich", "zürich", "geneva", "lausanne", "basel"],
-    "Sweden": ["sweden", "stockholm", "gothenburg", "malmö", "malmo"],
-    "Australia": ["australia", "sydney", "melbourne", "brisbane", "perth"],
-    "Singapore": ["singapore"],
-    "Ukraine": ["ukraine", "kyiv", "kiev", "lviv", "kharkiv", "dnipro", "odesa", "odessa"],
-    "Portugal": ["portugal", "lisbon", "lisboa", "porto"],
-    "Brazil": ["brazil", "são paulo", "sao paulo", "rio de janeiro", "belo horizonte"],
+    # All other countries intentionally omitted — they fall back to a
+    # country-name match in expand_country(). See the note above.
 }
 
 

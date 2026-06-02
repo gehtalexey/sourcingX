@@ -11116,17 +11116,19 @@ with tab_similar:
                 options=_SIM_COUNTRIES,
                 index=0,
                 key="similar_country",
-                help="Limit matches to this country. For Israel and the major "
-                     "tech hubs the app also searches that country's cities "
-                     "automatically; other countries match on the country name.",
+                help="Limit matches to this country. For Israel the app also "
+                     "searches all its cities automatically; other countries "
+                     "match on the country name (use the City box for a "
+                     "specific city anywhere).",
             )
         with cl2:
             sim_city = st.text_input(
                 "City / area (optional)",
                 key="similar_city",
                 placeholder="e.g., Tel Aviv",
-                help="Type one city. The app also matches its other spellings "
-                     "and nearby areas automatically.",
+                help="Type one city. For major cities the app also matches "
+                     "other spellings and nearby areas; smaller places match "
+                     "the name you type.",
             )
 
         sim_button = st.button("Find similar", type="primary", key="similar_run_btn")

@@ -120,7 +120,7 @@ def stub_db(monkeypatch):
         client.upsert("profiles", row)
         return row
 
-    def fake_find_similar(client, query_embedding, match_count, min_similarity):
+    def fake_find_similar(client, query_embedding, match_count, min_similarity, country_terms=None, city_terms=None):
         # Return two stub matches plus the query row, so exclude_self has work.
         return [
             {"linkedin_url": "https://www.linkedin.com/in/jane", "similarity": 1.0},

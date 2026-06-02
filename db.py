@@ -2619,12 +2619,22 @@ def find_similar_profiles_rpc(
     query_embedding: list,
     match_count: int = 20,
     min_similarity: float = 0.0,
+    country_terms: list | None = None,
+    city_terms: list | None = None,
 ) -> list:
     """Return profiles ranked by cosine similarity to ``query_embedding``.
 
     Wraps the ``match_profiles_by_embedding`` Postgres function defined in
-    migration 019. Returns a list of dicts with the lightweight profile
-    columns plus a ``similarity`` float in [0, 1] (1 = identical).
+    migration 019 (location filter added in migration 021). Returns a list of
+    dicts with the lightweight profile columns plus a ``similarity`` float in
+    [0, 1] (1 = identical).
+
+    ``country_terms`` and ``city_terms`` are optional lists of lowercase
+    substrings. They combine as AND between the two groups, OR within each:
+    a profile qualifies if its free-text ``location`` contains at least one
+    country term AND at least one city term. An empty/None group adds no
+    constraint, so passing neither reproduces the original (unfiltered)
+    behaviour.
 
     Raises ``SimilarityRPCError`` on transport errors, HTTP failures, or
     unexpected response shapes. An empty list is reserved for the genuine
@@ -2638,6 +2648,8 @@ def find_similar_profiles_rpc(
                 "query_embedding": query_embedding,
                 "match_count": match_count,
                 "min_similarity": min_similarity,
+                "country_terms": country_terms or [],
+                "city_terms": city_terms or [],
             },
             timeout=30,
         )

@@ -182,8 +182,10 @@ def profile_to_display_row(profile: dict) -> dict:
         education = display['education']
         skills_str = display['skills_str']
         connections = display['connections']
-        all_schools = display['all_schools']
-        all_employers_str = display['all_employers']
+        all_schools_list = display['all_schools']
+        all_schools = ', '.join(s for s in all_schools_list if s) if isinstance(all_schools_list, list) else str(all_schools_list or '')
+        all_employers_list = display['all_employers']
+        all_employers_str = ', '.join(s for s in all_employers_list if s) if isinstance(all_employers_list, list) else str(all_employers_list or '')
         all_titles_list = display.get('all_titles') or []
         all_titles_str = ', '.join(s for s in all_titles_list if s) if isinstance(all_titles_list, list) else str(all_titles_list or '')
         num_positions = display['num_positions']
@@ -213,6 +215,15 @@ def profile_to_display_row(profile: dict) -> dict:
 
         all_titles_list = profile.get('all_titles') or []
         all_titles_str = ', '.join(s for s in all_titles_list if s) if isinstance(all_titles_list, list) else str(all_titles_list or '')
+
+    # Normalize connections to int across both branches — the raw-data path
+    # yields an int while the no-raw-data path yields '', and a mixed batch
+    # would crash PyArrow on the connections column (same class of bug as
+    # all_schools/all_employers above).
+    try:
+        connections = int(connections)
+    except (ValueError, TypeError):
+        connections = 0
 
     # Past positions as full JSON from Crustdata
     import json

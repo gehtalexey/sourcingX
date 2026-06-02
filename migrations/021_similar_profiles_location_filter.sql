@@ -38,12 +38,15 @@
 --   database is Israel-heavy, so an Israel/city filter still fills the full
 --   match_count with correct results.
 --
---   IF narrow-filter under-fill ever matters, enable iterative scans at the
---   connection-role level (needs elevated DB privileges, and the database is
---   SHARED by four projects so coordinate first):
---       ALTER ROLE authenticated SET hnsw.iterative_scan = 'strict_order';
---       ALTER ROLE anon          SET hnsw.iterative_scan = 'strict_order';
---   This only affects vector-index scans (i.e. this RPC), nothing else.
+--   IF narrow-filter under-fill ever matters, enable iterative scans on the
+--   PostgREST role that actually invokes this RPC. This app connects with the
+--   Supabase service-role key (SUPABASE_KEY), so its requests run as the
+--   `service_role` Postgres role — that is the one to set:
+--       ALTER ROLE service_role SET hnsw.iterative_scan = 'strict_order';
+--   (If the dashboard ever calls this RPC with the anon/authenticated keys,
+--   set it on those roles too.) Needs elevated DB privileges, and the
+--   database is SHARED by four projects, so coordinate first. It only affects
+--   vector-index scans (i.e. this RPC), nothing else.
 --   (Confirmed: vector extension is 0.8.0.)
 --
 -- Idempotent: CREATE OR REPLACE. We DROP older signatures so there is exactly

@@ -11080,7 +11080,7 @@ with tab_similar:
             key="similar_input_url",
             placeholder="https://www.linkedin.com/in/jane-doe/",
         )
-        c1, c2, c3 = st.columns([1, 1, 1])
+        c1, c2 = st.columns([1, 1])
         with c1:
             sim_top_n = st.number_input(
                 "How many matches", min_value=5, max_value=100, value=20, step=5,
@@ -11093,8 +11093,42 @@ with tab_similar:
                 key="similar_min_score",
                 help="0 = show everything ranked; 0.5 = clearly related; 0.8 = near-duplicates",
             )
-        with c3:
-            sim_button = st.button("Find similar", type="primary", key="similar_run_btn")
+
+        # Location filter — pick a country and/or type a city. You type one
+        # plain word ("Israel" / "Tel Aviv"); the app expands it to every
+        # related term (cities, spellings, metro areas) behind the scenes.
+        _SIM_COUNTRIES = [
+            "", "Argentina", "Australia", "Bangladesh", "Belgium", "Brazil",
+            "Canada", "Chile", "China", "Colombia", "Denmark", "Ecuador",
+            "Egypt", "France", "Germany", "India", "Indonesia", "Iran",
+            "Ireland", "Israel", "Italy", "Japan", "Kenya", "Malaysia",
+            "Mexico", "Morocco", "Netherlands", "New Zealand", "Nigeria",
+            "Norway", "Pakistan", "Peru", "Philippines", "Poland", "Portugal",
+            "Romania", "Russia", "Saudi Arabia", "Singapore", "South Africa",
+            "South Korea", "Spain", "Sweden", "Switzerland", "Thailand",
+            "Turkey", "Ukraine", "United Arab Emirates", "United Kingdom",
+            "United States", "Venezuela",
+        ]
+        cl1, cl2 = st.columns([1, 1])
+        with cl1:
+            sim_country = st.selectbox(
+                "Country (optional)",
+                options=_SIM_COUNTRIES,
+                index=0,
+                key="similar_country",
+                help="Limit matches to this country. Just pick it — the app "
+                     "searches all of its cities for you.",
+            )
+        with cl2:
+            sim_city = st.text_input(
+                "City / area (optional)",
+                key="similar_city",
+                placeholder="e.g., Tel Aviv",
+                help="Type one city. The app also matches its other spellings "
+                     "and nearby areas automatically.",
+            )
+
+        sim_button = st.button("Find similar", type="primary", key="similar_run_btn")
 
         if sim_button:
             if not sim_url.strip():
@@ -11120,6 +11154,8 @@ with tab_similar:
                                 min_similarity=float(sim_min_score),
                                 exclude_self=True,
                                 crustdata_key=_crustdata_key or None,
+                                country=(sim_country or None),
+                                city=(sim_city.strip() or None),
                             )
 
                         st.session_state["similar_last_result"] = result

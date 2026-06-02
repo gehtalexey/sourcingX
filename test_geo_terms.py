@@ -68,6 +68,14 @@ def test_empty_country_returns_nothing():
     assert expand_country(None) == []
 
 
+def test_uncurated_dropdown_country_matches_name_only():
+    # Japan is in the dropdown but not curated — it matches the country name,
+    # not its cities. This pins the documented limitation (and the honest UI
+    # copy that goes with it).
+    assert expand_country("Japan") == ["japan"]
+    assert "tokyo" not in expand_country("Japan")
+
+
 # ---------------------------------------------------------------------------
 # City expansion
 # ---------------------------------------------------------------------------
@@ -122,9 +130,10 @@ def test_combined_city_only():
 
 
 # ---------------------------------------------------------------------------
-# Wiring: search_similar must forward expanded terms to the RPC.
+# Wiring: search_similar must forward country and city as SEPARATE groups,
+# so the RPC can AND them (city narrows within country).
 # ---------------------------------------------------------------------------
-def test_search_similar_forwards_location_terms(monkeypatch):
+def test_search_similar_forwards_country_and_city_separately(monkeypatch):
     import similar_profiles as sp
 
     captured = {}
@@ -132,8 +141,9 @@ def test_search_similar_forwards_location_terms(monkeypatch):
     def fake_get_or_build(db_client, openai_client, url, crustdata_key=None):
         return ([0.1] * 1536, {"linkedin_url": "https://www.linkedin.com/in/me/"}, "cached")
 
-    def fake_rpc(db_client, query_embedding, match_count, min_similarity, location_terms):
-        captured["location_terms"] = location_terms
+    def fake_rpc(db_client, query_embedding, match_count, min_similarity, country_terms, city_terms):
+        captured["country_terms"] = country_terms
+        captured["city_terms"] = city_terms
         return [
             {"linkedin_url": "https://www.linkedin.com/in/a/", "location": "Tel Aviv, Israel", "similarity": 0.9},
         ]
@@ -150,11 +160,14 @@ def test_search_similar_forwards_location_terms(monkeypatch):
         city="Tel Aviv",
     )
 
-    assert "tel aviv" in captured["location_terms"]
-    assert "haifa" in captured["location_terms"]
+    # Country group carries the country's cities; city group carries only the
+    # city variations — they are NOT merged into one OR-list.
+    assert "haifa" in captured["country_terms"]
+    assert "tel aviv" in captured["city_terms"]
+    assert "haifa" not in captured["city_terms"]
 
 
-def test_search_similar_no_location_passes_empty_terms(monkeypatch):
+def test_search_similar_no_location_passes_empty_groups(monkeypatch):
     import similar_profiles as sp
 
     captured = {}
@@ -164,8 +177,9 @@ def test_search_similar_no_location_passes_empty_terms(monkeypatch):
         lambda *a, **k: ([0.1] * 1536, {"linkedin_url": "u"}, "cached"),
     )
 
-    def fake_rpc(db_client, query_embedding, match_count, min_similarity, location_terms):
-        captured["location_terms"] = location_terms
+    def fake_rpc(db_client, query_embedding, match_count, min_similarity, country_terms, city_terms):
+        captured["country_terms"] = country_terms
+        captured["city_terms"] = city_terms
         return []
 
     monkeypatch.setattr(sp, "find_similar_profiles_rpc", fake_rpc)
@@ -174,13 +188,14 @@ def test_search_similar_no_location_passes_empty_terms(monkeypatch):
         db_client=None, openai_client=None,
         linkedin_url="https://www.linkedin.com/in/me/",
     )
-    assert captured["location_terms"] == []
+    assert captured["country_terms"] == []
+    assert captured["city_terms"] == []
 
 
 # ---------------------------------------------------------------------------
-# Wiring: the RPC client must include location_terms in the request body.
+# Wiring: the RPC client must include both term groups in the request body.
 # ---------------------------------------------------------------------------
-def test_rpc_includes_location_terms_in_payload(monkeypatch):
+def test_rpc_includes_term_groups_in_payload(monkeypatch):
     import db
 
     captured = {}
@@ -201,12 +216,13 @@ def test_rpc_includes_location_terms_in_payload(monkeypatch):
     client = SimpleNamespace(url="https://fake.supabase.co", headers={})
     db.find_similar_profiles_rpc(
         client, [0.1] * 1536, match_count=5,
-        location_terms=["israel", "tel aviv"],
+        country_terms=["israel"], city_terms=["tel aviv"],
     )
-    assert captured["json"]["location_terms"] == ["israel", "tel aviv"]
+    assert captured["json"]["country_terms"] == ["israel"]
+    assert captured["json"]["city_terms"] == ["tel aviv"]
 
 
-def test_rpc_defaults_location_terms_to_empty_list(monkeypatch):
+def test_rpc_defaults_term_groups_to_empty_lists(monkeypatch):
     import db
 
     captured = {}
@@ -227,4 +243,5 @@ def test_rpc_defaults_location_terms_to_empty_list(monkeypatch):
 
     client = SimpleNamespace(url="https://fake.supabase.co", headers={})
     db.find_similar_profiles_rpc(client, [0.1] * 1536, match_count=5)
-    assert captured["json"]["location_terms"] == []
+    assert captured["json"]["country_terms"] == []
+    assert captured["json"]["city_terms"] == []

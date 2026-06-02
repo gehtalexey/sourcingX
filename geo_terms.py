@@ -186,6 +186,18 @@ def _normalize(text: str) -> str:
     return cleaned.strip()
 
 
+def _clean_terms(terms: list[str]) -> list[str]:
+    """Normalize, drop empties, and de-dupe while preserving order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for term in terms:
+        t = _normalize(term)
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
 def expand_country(country: str | None) -> list[str]:
     """Return all match terms for a dropdown country, or [] if none/unknown.
 
@@ -196,7 +208,7 @@ def expand_country(country: str | None) -> list[str]:
         return []
     label = country.strip()
     if label in COUNTRY_TERMS:
-        return list(COUNTRY_TERMS[label])
+        return _clean_terms(COUNTRY_TERMS[label])
     norm = _normalize(label)
     return [norm] if norm else []
 
@@ -213,28 +225,24 @@ def expand_city(city: str | None) -> list[str]:
     if not norm:
         return []
     if norm in CITY_TERMS:
-        return list(CITY_TERMS[norm])
+        return _clean_terms(CITY_TERMS[norm])
     # Try a light fuzzy hit: typed "tel-aviv" or "telaviv" → "tel aviv".
     collapsed = norm.replace("-", " ").replace(".", " ")
     collapsed = " ".join(collapsed.split())
     if collapsed in CITY_TERMS:
-        return list(CITY_TERMS[collapsed])
+        return _clean_terms(CITY_TERMS[collapsed])
     return [norm]
 
 
 def expand_location_terms(country: str | None = None, city: str | None = None) -> list[str]:
     """Combine country + city into one deduped, lowercased term list.
 
-    Returns the full set of substring terms to OR-match against a profile's
-    free-text ``location``. Empty list means "no location filter".
+    NOTE: this OR-flattens both groups into one list — a profile matches if it
+    contains ANY term. Callers that need country AND city to *both* hold (the
+    "narrow within country" behaviour) must use ``expand_country`` and
+    ``expand_city`` separately and intersect. ``search_similar`` does this.
+    Kept for the simple single-group case and for tests.
 
     Order is preserved (country terms first, then city), duplicates removed.
     """
-    seen: set[str] = set()
-    out: list[str] = []
-    for term in expand_country(country) + expand_city(city):
-        t = _normalize(term)
-        if t and t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
+    return _clean_terms(expand_country(country) + expand_city(city))

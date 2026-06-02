@@ -30,7 +30,7 @@ from embeddings import (
     compute_input_hash,
     embed_text,
 )
-from geo_terms import expand_location_terms
+from geo_terms import expand_city, expand_country
 from normalizers import normalize_linkedin_url
 
 
@@ -202,9 +202,10 @@ def search_similar(
 
     ``country`` (a dropdown label like "Israel") and ``city`` (free text like
     "Tel Aviv") are optional location filters. The caller passes the raw user
-    input; this function expands them into all the related location terms via
-    ``geo_terms.expand_location_terms`` and the database keeps only matches
-    whose location contains one of those terms.
+    input; this function expands each into its related location terms via
+    ``geo_terms`` and the database keeps matches whose location satisfies BOTH
+    groups (country AND city) — so a city narrows within the country rather
+    than widening the search. Either group may be omitted.
 
     Returns a dict::
 
@@ -220,7 +221,8 @@ def search_similar(
         db_client, openai_client, linkedin_url, crustdata_key=crustdata_key
     )
 
-    location_terms = expand_location_terms(country=country, city=city)
+    country_terms = expand_country(country)
+    city_terms = expand_city(city)
 
     # Ask for one extra so we can drop the self-match without coming up short.
     rpc_count = match_count + 1 if exclude_self else match_count
@@ -231,7 +233,8 @@ def search_similar(
             query_embedding=embedding,
             match_count=rpc_count,
             min_similarity=min_similarity,
-            location_terms=location_terms,
+            country_terms=country_terms,
+            city_terms=city_terms,
         )
     except SimilarityRPCError as e:
         raise SimilarProfileError(str(e)) from e

@@ -2619,7 +2619,8 @@ def find_similar_profiles_rpc(
     query_embedding: list,
     match_count: int = 20,
     min_similarity: float = 0.0,
-    location_terms: list | None = None,
+    country_terms: list | None = None,
+    city_terms: list | None = None,
 ) -> list:
     """Return profiles ranked by cosine similarity to ``query_embedding``.
 
@@ -2628,9 +2629,12 @@ def find_similar_profiles_rpc(
     dicts with the lightweight profile columns plus a ``similarity`` float in
     [0, 1] (1 = identical).
 
-    ``location_terms`` is an optional list of lowercase substrings; a profile
-    only qualifies if its free-text ``location`` contains at least one of
-    them. Empty/None means no location filter (original behaviour).
+    ``country_terms`` and ``city_terms`` are optional lists of lowercase
+    substrings. They combine as AND between the two groups, OR within each:
+    a profile qualifies if its free-text ``location`` contains at least one
+    country term AND at least one city term. An empty/None group adds no
+    constraint, so passing neither reproduces the original (unfiltered)
+    behaviour.
 
     Raises ``SimilarityRPCError`` on transport errors, HTTP failures, or
     unexpected response shapes. An empty list is reserved for the genuine
@@ -2644,7 +2648,8 @@ def find_similar_profiles_rpc(
                 "query_embedding": query_embedding,
                 "match_count": match_count,
                 "min_similarity": min_similarity,
-                "location_terms": location_terms or [],
+                "country_terms": country_terms or [],
+                "city_terms": city_terms or [],
             },
             timeout=30,
         )

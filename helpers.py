@@ -8,6 +8,39 @@ If Crustdata changes their API, update only this file.
 from normalizers import pick_current_employer
 
 
+def coerce_str_list(items) -> list:
+    """Flatten a list that may hold plain strings OR Crustdata objects into clean text.
+
+    Crustdata sometimes returns all_employers / all_titles / all_schools as a list of
+    rich dicts (each with a 'name'/'title' field) instead of a list of plain strings.
+    Joining that directly with ", ".join(...) raises
+    "sequence item 0: expected str instance, dict found". This coerces every item to a
+    display string and drops empties, so the join is safe for both shapes.
+    """
+    if not isinstance(items, list):
+        return [str(items)] if items else []
+    out = []
+    for item in items:
+        if not item:
+            continue
+        if isinstance(item, str):
+            out.append(item)
+        elif isinstance(item, dict):
+            val = (
+                item.get('name')
+                or item.get('title')
+                or item.get('employer_name')
+                or item.get('company_name')
+                or item.get('school_name')
+                or item.get('school')
+            )
+            if val:
+                out.append(str(val))
+        else:
+            out.append(str(item))
+    return out
+
+
 def extract_display_fields(raw_data: dict) -> dict:
     """Extract display fields from Crustdata raw response.
 
@@ -64,7 +97,7 @@ def extract_display_fields(raw_data: dict) -> dict:
 
         # Single values for display
         'education': education,
-        'skills_str': ', '.join(cd.get('skills') or [])[:200],
+        'skills_str': ', '.join(coerce_str_list(cd.get('skills') or []))[:200],
         'connections': cd.get('num_of_connections') or cd.get('connections_count') or 0,
         'followers': cd.get('followers_count') or 0,
         'profile_picture': cd.get('profile_pic_url') or cd.get('profile_picture_url') or '',
@@ -183,11 +216,11 @@ def profile_to_display_row(profile: dict) -> dict:
         skills_str = display['skills_str']
         connections = display['connections']
         all_schools_list = display['all_schools']
-        all_schools = ', '.join(s for s in all_schools_list if s) if isinstance(all_schools_list, list) else str(all_schools_list or '')
+        all_schools = ', '.join(coerce_str_list(all_schools_list)) if isinstance(all_schools_list, list) else str(all_schools_list or '')
         all_employers_list = display['all_employers']
-        all_employers_str = ', '.join(s for s in all_employers_list if s) if isinstance(all_employers_list, list) else str(all_employers_list or '')
+        all_employers_str = ', '.join(coerce_str_list(all_employers_list)) if isinstance(all_employers_list, list) else str(all_employers_list or '')
         all_titles_list = display.get('all_titles') or []
-        all_titles_str = ', '.join(s for s in all_titles_list if s) if isinstance(all_titles_list, list) else str(all_titles_list or '')
+        all_titles_str = ', '.join(coerce_str_list(all_titles_list)) if isinstance(all_titles_list, list) else str(all_titles_list or '')
         num_positions = display['num_positions']
         past_employers = display.get('past_employers') or []
     else:
@@ -205,16 +238,16 @@ def profile_to_display_row(profile: dict) -> dict:
 
         # Skills and employers from DB columns (arrays) — filter None values from DB arrays
         skills_list = profile.get('skills') or []
-        skills_str = ', '.join(s for s in skills_list[:20] if s) if isinstance(skills_list, list) else str(skills_list or '')
+        skills_str = ', '.join(coerce_str_list(skills_list[:20])) if isinstance(skills_list, list) else str(skills_list or '')
 
         all_employers_list = profile.get('all_employers') or []
-        all_employers_str = ', '.join(s for s in all_employers_list if s) if isinstance(all_employers_list, list) else str(all_employers_list or '')
+        all_employers_str = ', '.join(coerce_str_list(all_employers_list)) if isinstance(all_employers_list, list) else str(all_employers_list or '')
 
         all_schools_list = profile.get('all_schools') or []
-        all_schools = ', '.join(s for s in all_schools_list if s) if isinstance(all_schools_list, list) else str(all_schools_list or '')
+        all_schools = ', '.join(coerce_str_list(all_schools_list)) if isinstance(all_schools_list, list) else str(all_schools_list or '')
 
         all_titles_list = profile.get('all_titles') or []
-        all_titles_str = ', '.join(s for s in all_titles_list if s) if isinstance(all_titles_list, list) else str(all_titles_list or '')
+        all_titles_str = ', '.join(coerce_str_list(all_titles_list)) if isinstance(all_titles_list, list) else str(all_titles_list or '')
 
     # Normalize connections to int across both branches — the raw-data path
     # yields an int while the no-raw-data path yields '', and a mixed batch

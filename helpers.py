@@ -68,10 +68,13 @@ def extract_display_fields(raw_data: dict) -> dict:
         first_name = parts[0]
         last_name = parts[1] if len(parts) > 1 else ''
 
-    # Education - get first school
+    # Education - get first school. Coerce in case all_schools holds Crustdata
+    # objects (same object-vs-string shape drift seen on all_employers) so the
+    # 'education' column never carries a raw dict into the display DataFrame.
     all_schools = cd.get('all_schools') or []
     education_background = cd.get('education_background') or []
-    education = all_schools[0] if all_schools else ''
+    _schools_clean = coerce_str_list(all_schools)
+    education = _schools_clean[0] if _schools_clean else ''
 
     return {
         # Basic info

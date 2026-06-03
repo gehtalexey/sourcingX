@@ -87,6 +87,8 @@ try:
         get_usage_by_date, get_enriched_urls, get_recently_enriched_urls,
         get_setting, save_setting,
         get_search_history, save_search_history_entry, delete_search_history_entry,
+        hash_search_filters, summarize_search_filters, record_people_search,
+        find_people_search, list_people_searches, delete_people_search,
         match_profiles_by_urls_rpc,
         save_failed_enrichments_batch, get_not_found_urls,
         update_profile_email, update_profile_emails_batch, get_profile,
@@ -5371,6 +5373,87 @@ with tab_search:
                                   on_click=_clear_expanded, args=(expanded_key,),
                                   help="Clear suggestions", use_container_width=True)
 
+        # ===== Your recent searches (auto-saved history) =====
+        # Rendered ABOVE the filter widgets so the "Load" handler can write the
+        # widgets' session_state keys before those widgets are instantiated this
+        # run (Streamlit forbids setting a widget key after it's built).
+        _ps_username = st.session_state.get('username') or 'default'
+        _ps_db = _get_db_client() if HAS_DATABASE else None
+
+        # Multiselect option lists — used to drop any stored value no longer valid.
+        _PS_MS_OPTIONS = {
+            'crust_search_seniority': SENIORITY_LEVELS,
+            'crust_search_headcount': HEADCOUNT_RANGES,
+            'crust_search_function': FUNCTION_CATEGORIES,
+            'crust_search_industry': COMPANY_INDUSTRIES,
+        }
+        # Text field → its AI-expansion state keys (cleared on load so the stored,
+        # already-merged text isn't doubled by stale AI selections).
+        _PS_AI_EXPANDED = {
+            'crust_search_title': 'expanded_titles',
+            'crust_search_company': 'expanded_companies',
+            'crust_search_location': 'expanded_locations',
+            'crust_search_keywords': 'expanded_keywords',
+            'crust_search_skills': 'expanded_skills',
+            'crust_search_past_titles': 'expanded_past_titles',
+            'crust_search_past_companies': 'expanded_past_companies',
+            'crust_search_school': 'expanded_schools',
+        }
+
+        def _load_people_search_into_form(stored_filters):
+            """Refill the Search-tab widgets from a saved search's stored filters."""
+            for _ek in _PS_AI_EXPANDED.values():
+                for _k in (_ek, f'sel_{_ek}', f'custom_{_ek}'):
+                    st.session_state.pop(_k, None)
+            for _key, _val in (stored_filters or {}).items():
+                if _key in _PS_MS_OPTIONS:
+                    _opts = _PS_MS_OPTIONS[_key]
+                    _val = [v for v in (_val or []) if v in _opts]
+                st.session_state[_key] = _val
+
+        if st.session_state.get('_ps_loaded_msg'):
+            st.success(st.session_state.pop('_ps_loaded_msg'))
+
+        if _ps_db:
+            _recent_searches = list_people_searches(_ps_db, _ps_username, limit=25)
+            if _recent_searches:
+                with st.expander(f"⭐ Your recent searches ({len(_recent_searches)})", expanded=False):
+                    st.caption(
+                        "Auto-saved each time you run a search. Click one to refill the "
+                        "filters, then Search — or delete it."
+                    )
+                    for _rs in _recent_searches:
+                        _rs_id = _rs.get('id')
+                        _summary = _rs.get('summary') or 'All profiles (no filters)'
+                        _when = (_rs.get('last_run_at') or '')[:10]
+                        _rc = _rs.get('result_count')
+                        _runs = _rs.get('run_count') or 1
+                        _meta = []
+                        if _when:
+                            _meta.append(_when)
+                        if _rc is not None:
+                            _meta.append(f"{_rc:,} results")
+                        if _runs > 1:
+                            _meta.append(f"run {_runs}×")
+                        _row_load, _row_del = st.columns([6, 1])
+                        with _row_load:
+                            if st.button(
+                                f"↻ {_summary}",
+                                key=f"ps_load_{_rs_id}",
+                                use_container_width=True,
+                                help=" · ".join(_meta) if _meta else None,
+                            ):
+                                _load_people_search_into_form(_rs.get('filters') or {})
+                                st.session_state['_ps_loaded_msg'] = f"Loaded filters from: {_summary}"
+                                st.rerun()
+                        with _row_del:
+                            if st.button("\U0001f5d1", key=f"ps_del_{_rs_id}",
+                                         use_container_width=True, help="Delete this saved search"):
+                                delete_people_search(_ps_db, _rs_id)
+                                st.rerun()
+                        if _meta:
+                            st.caption(" · ".join(_meta))
+
         st.markdown("##### Search Filters")
 
         # Row 1: Title, Company, Location (each with AI button below)
@@ -5586,6 +5669,30 @@ with tab_search:
             with btn_col2:
                 clear_submitted = st.button("Clear Filters", use_container_width=True)
 
+        # Repeat-search guard prompt — set when the user tries to re-run filters
+        # they've already searched before. Asks for confirmation instead of
+        # silently re-spending effort/credits on the same search.
+        if st.session_state.get('_people_search_repeat'):
+            _psr = st.session_state['_people_search_repeat']
+            _psr_when = (_psr.get('last_run_at') or '')[:10]
+            _psr_msg = "⚠️ You already ran this exact search"
+            if _psr_when:
+                _psr_msg += f" on {_psr_when}"
+            if _psr.get('result_count') is not None:
+                _psr_msg += f" — {_psr['result_count']:,} results"
+            _psr_msg += ". Run it again anyway?"
+            st.warning(_psr_msg)
+            _psr_c1, _psr_c2, _psr_c3 = st.columns([1, 1, 3])
+            with _psr_c1:
+                if st.button("Run anyway", type="primary", key="ps_run_anyway", use_container_width=True):
+                    st.session_state['_people_search_force_run'] = _psr['hash']
+                    st.session_state.pop('_people_search_repeat', None)
+                    st.rerun()
+            with _psr_c2:
+                if st.button("Cancel", key="ps_cancel_repeat", use_container_width=True):
+                    st.session_state.pop('_people_search_repeat', None)
+                    st.rerun()
+
         # --- Helper to get effective value for a field ---
         def _effective_val(input_key, expanded_key):
             """Merge text input + AI multiselect selections. Both contribute."""
@@ -5631,8 +5738,10 @@ with tab_search:
                     del st.session_state[key]
             st.rerun()
 
-        # Handle search
-        if search_submitted:
+        # Handle search. A confirmed re-run arrives via the force flag (set by the
+        # "Run anyway" button) rather than the transient Search button press.
+        _ps_force_hash = st.session_state.pop('_people_search_force_run', None)
+        if search_submitted or _ps_force_hash:
             effective_title = _effective_val('crust_search_title', 'expanded_titles')
             effective_company = _effective_val('crust_search_company', 'expanded_companies')
             effective_location = _effective_val('crust_search_location', 'expanded_locations')
@@ -5666,6 +5775,53 @@ with tab_search:
             if not has_filters:
                 st.warning("Please provide at least one search filter.")
             else:
+                # Snapshot the filters for history + the repeat guard. Keyed by the
+                # Search-tab widget keys so a saved search reloads one-to-one.
+                _ps_filters_state = {
+                    'crust_search_title': effective_title,
+                    'crust_search_company': effective_company,
+                    'crust_search_location': effective_location,
+                    'crust_search_keywords': effective_keywords,
+                    'crust_search_skills': effective_skills,
+                    'crust_search_past_titles': effective_past_titles,
+                    'crust_search_past_companies': effective_past_companies,
+                    'crust_search_school': effective_school,
+                    'crust_search_geo_city': search_geo_city,
+                    'crust_search_seniority': search_seniority,
+                    'crust_search_headcount': search_headcount,
+                    'crust_search_function': search_function,
+                    'crust_search_industry': search_industry,
+                    'crust_search_country': search_country,
+                    'crust_search_continent': search_continent,
+                    'crust_search_exact_company': search_exact_company,
+                    'crust_search_recently_changed': search_recently_changed,
+                    'crust_search_has_email': search_has_email,
+                    'crust_search_geo_radius': search_geo_radius,
+                    'crust_search_exp_min': search_exp_min,
+                    'crust_search_exp_max': search_exp_max,
+                    'crust_search_min_connections': search_min_connections,
+                    'crust_search_sort': search_sort,
+                    'crust_search_limit': search_limit,
+                }
+                _ps_hash = hash_search_filters(_ps_filters_state)
+                _ps_summary = summarize_search_filters(_ps_filters_state)
+
+                # Repeat guard: if these exact filters were run before AND this
+                # isn't a confirmed re-run, show the warning and stop here.
+                if _ps_force_hash != _ps_hash:
+                    _ps_prior = find_people_search(_ps_db, _ps_username, _ps_hash) if _ps_db else None
+                    if _ps_prior:
+                        st.session_state['_people_search_repeat'] = {
+                            'hash': _ps_hash,
+                            'summary': _ps_summary,
+                            'last_run_at': _ps_prior.get('last_run_at'),
+                            'result_count': _ps_prior.get('result_count'),
+                            'run_count': _ps_prior.get('run_count'),
+                        }
+                        st.rerun()
+                else:
+                    st.session_state.pop('_people_search_repeat', None)
+
                 filters = build_search_filters(
                     title=effective_title if effective_title else None,
                     company=effective_company if effective_company else None,
@@ -5838,6 +5994,16 @@ with tab_search:
                         st.session_state['crustdata_search_results'] = []
                         st.session_state['crustdata_search_total'] = 0
                         st.info("No profiles found matching your criteria. Try adjusting your filters.")
+
+                    # Auto-save this search to history (deduped per user by hash;
+                    # a repeat just bumps run_count + last_run_at). Never fatal.
+                    try:
+                        record_people_search(
+                            _ps_db, _ps_username, _ps_filters_state, _ps_hash, _ps_summary,
+                            int(st.session_state.get('crustdata_search_total') or 0),
+                        )
+                    except Exception:
+                        pass
 
                     _get_crustdata_credits_cached.clear()
                     progress_placeholder.empty()

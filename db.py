@@ -2575,6 +2575,189 @@ def delete_search_history_entry(client: SupabaseClient, agent_id: str, csv_name:
 
 
 # ============================================================================
+# PEOPLE-DB SEARCH HISTORY (Search tab) — migration 023
+# ----------------------------------------------------------------------------
+# Per-user history of Crustdata People-DB searches. Lets the Search tab show
+# "your recent searches" and warn before re-running an identical one. Distinct
+# from `search_history` above (PhantomBuster launches). Privacy is per-user at
+# the app layer — every query filters on `username`.
+# ============================================================================
+
+# Filter keys that change how many / how ordered, not WHO matches — so they are
+# excluded from the dedup hash (same people criteria = same search).
+_PEOPLE_SEARCH_HASH_IGNORE_KEYS = {'crust_search_sort', 'crust_search_limit'}
+
+
+def _canonicalize_search_value(value):
+    """Normalize one filter value for stable hashing/equality.
+
+    Returns None for anything that means "unset" (empty string, 0, False, empty
+    list) so it drops out of the hash. Text is lowercased; comma-lists and real
+    lists are made order-insensitive so "react, node" == "node, react".
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return True if value else None
+    if isinstance(value, (int, float)):
+        return value if value else None
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if ',' in s:
+            parts = sorted({p.strip().lower() for p in s.split(',') if p.strip()})
+            return ','.join(parts) if parts else None
+        return s.lower()
+    if isinstance(value, (list, tuple)):
+        items = sorted({str(v).strip().lower() for v in value if str(v).strip()})
+        return items or None
+    return value
+
+
+def hash_search_filters(filters: dict) -> str:
+    """Stable sha256 of the *matching* filters (sort/limit and empty fields excluded).
+
+    Two searches with the same people-matching criteria hash identically, even if
+    typed in a different order/case or with a different results-limit or sort.
+    """
+    canon = {}
+    for k, v in (filters or {}).items():
+        if k in _PEOPLE_SEARCH_HASH_IGNORE_KEYS:
+            continue
+        cv = _canonicalize_search_value(v)
+        if cv is None or cv == [] or cv == '':
+            continue
+        canon[k] = cv
+    blob = json.dumps(canon, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(blob.encode('utf-8')).hexdigest()
+
+
+def summarize_search_filters(filters: dict) -> str:
+    """Short human label for a saved search, e.g. 'team lead · @Wiz · Tel Aviv · Senior'."""
+    f = filters or {}
+
+    def _txt(key):
+        val = f.get(key)
+        if isinstance(val, (list, tuple)):
+            return ', '.join(str(x) for x in val if str(x).strip())
+        if val in (None, '', 0, False):
+            return ''
+        return str(val).strip()
+
+    parts = []
+    title = _txt('crust_search_title')
+    if title:
+        parts.append(title)
+    company = _txt('crust_search_company')
+    if company:
+        parts.append(f"@{company}")
+    location = _txt('crust_search_location') or _txt('crust_search_country') or _txt('crust_search_geo_city')
+    if location:
+        parts.append(location)
+    seniority = _txt('crust_search_seniority')
+    if seniority:
+        parts.append(seniority)
+    skills = _txt('crust_search_skills')
+    if skills:
+        parts.append(skills)
+
+    summary = ' · '.join(parts)
+    if len(summary) > 140:
+        summary = summary[:139] + '…'
+    return summary or 'All profiles (no filters)'
+
+
+def record_people_search(client: SupabaseClient, username: str, filters: dict,
+                         filters_hash: str, summary: str, result_count: int) -> bool:
+    """Upsert a People-DB search into people_search_history (deduped per user by hash).
+
+    Re-running the same search bumps run_count + last_run_at instead of creating a
+    duplicate row. Never raises — a logging failure must not break the search.
+    """
+    if not client or not username:
+        return False
+    try:
+        now = datetime.utcnow().isoformat()
+        existing = client.select(
+            'people_search_history', 'id,run_count',
+            filters={'username': f'eq.{username}', 'filters_hash': f'eq.{filters_hash}'},
+            limit=1,
+        )
+        if existing:
+            row = existing[0]
+            client.update(
+                'people_search_history',
+                {
+                    'last_run_at': now,
+                    'result_count': result_count,
+                    'summary': summary,
+                    'filters': filters,
+                    'run_count': (row.get('run_count') or 1) + 1,
+                },
+                {'id': row['id']},
+            )
+        else:
+            client.insert('people_search_history', {
+                'username': username,
+                'filters_hash': filters_hash,
+                'filters': filters,
+                'summary': summary,
+                'result_count': result_count,
+                'run_count': 1,
+                'first_run_at': now,
+                'last_run_at': now,
+            })
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to record people search: {e}")
+        return False
+
+
+def find_people_search(client: SupabaseClient, username: str, filters_hash: str) -> Optional[dict]:
+    """Return the user's prior search row matching this exact filters_hash, or None."""
+    if not client or not username:
+        return None
+    try:
+        rows = client.select(
+            'people_search_history', '*',
+            filters={'username': f'eq.{username}', 'filters_hash': f'eq.{filters_hash}'},
+            limit=1,
+        )
+        return rows[0] if rows else None
+    except Exception as e:
+        print(f"[DB] Failed to look up people search: {e}")
+        return None
+
+
+def list_people_searches(client: SupabaseClient, username: str, limit: int = 25) -> list:
+    """Return the user's most recent searches, newest first."""
+    if not client or not username:
+        return []
+    try:
+        return client.select(
+            'people_search_history', '*',
+            filters={'username': f'eq.{username}'},
+            order_by='last_run_at.desc', limit=limit,
+        )
+    except Exception as e:
+        print(f"[DB] Failed to list people searches: {e}")
+        return []
+
+
+def delete_people_search(client: SupabaseClient, search_id: str) -> bool:
+    """Delete one saved search by id. Returns True on success."""
+    if not client or not search_id:
+        return False
+    try:
+        client.delete('people_search_history', {'id': search_id})
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to delete people search: {e}")
+        return False
+
+
+# ============================================================================
 # SEMANTIC SEARCH (embeddings) — migration 019
 # ============================================================================
 

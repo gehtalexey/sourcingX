@@ -323,8 +323,13 @@ def _prepare_profile_row(linkedin_url: str, crustdata_response: dict, original_u
         last_name = cd.get('last_name') or ''
         name = f"{first_name} {last_name}".strip()
 
-    # Extract location
-    location = cd.get('location') or ''
+    # Extract location. Fall back to `region` when Crustdata returns no explicit
+    # `location` — otherwise profiles whose location only comes back as a region
+    # (e.g. location=null, region="Tel Aviv District, Israel") get saved with a
+    # blank location and silently vanish from every location-gated search. This
+    # mirrors the existing fallback in the normalizer. SHARED save path — keep
+    # identical across all sibling pipelines (this is the canonical copy).
+    location = cd.get('location') or cd.get('region') or ''
 
     # Extract only title/company for indexed filtering
     current_title = None

@@ -5775,6 +5775,12 @@ with tab_search:
             if not has_filters:
                 st.warning("Please provide at least one search filter.")
             else:
+                # Geo only affects results when BOTH city and radius are set —
+                # build_search_filters drops it otherwise. Mirror that here so a
+                # leftover city with radius 0 doesn't make an otherwise-identical
+                # search hash differently (and miss the repeat guard).
+                _ps_geo_active = bool(search_geo_city) and int(search_geo_radius or 0) > 0
+
                 # Snapshot the filters for history + the repeat guard. Keyed by the
                 # Search-tab widget keys so a saved search reloads one-to-one.
                 _ps_filters_state = {
@@ -5786,7 +5792,7 @@ with tab_search:
                     'crust_search_past_titles': effective_past_titles,
                     'crust_search_past_companies': effective_past_companies,
                     'crust_search_school': effective_school,
-                    'crust_search_geo_city': search_geo_city,
+                    'crust_search_geo_city': search_geo_city if _ps_geo_active else '',
                     'crust_search_seniority': search_seniority,
                     'crust_search_headcount': search_headcount,
                     'crust_search_function': search_function,
@@ -5796,7 +5802,7 @@ with tab_search:
                     'crust_search_exact_company': search_exact_company,
                     'crust_search_recently_changed': search_recently_changed,
                     'crust_search_has_email': search_has_email,
-                    'crust_search_geo_radius': search_geo_radius,
+                    'crust_search_geo_radius': search_geo_radius if _ps_geo_active else 0,
                     'crust_search_exp_min': search_exp_min,
                     'crust_search_exp_max': search_exp_max,
                     'crust_search_min_connections': search_min_connections,

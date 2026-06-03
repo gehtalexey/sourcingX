@@ -6753,7 +6753,13 @@ with tab_upload:
                                             _merged = _matched - _people
                                             _not_in_db = len(_not_found_urls)
                                             _uploaded = len(_enrich_urls)
-                                            _new_count = len(_unmatched_csv_rows)
+                                            # Base "still need enrichment" on the genuinely-new
+                                            # URLs the Enrich button actually acts on (_new_urls),
+                                            # NOT _unmatched_csv_rows — the latter also includes the
+                                            # not-in-DB rows, which can't be enriched and are already
+                                            # reported on their own line. Using it would tell the
+                                            # user to enrich profiles we just listed as skipped.
+                                            _new_count = len(_new_urls)
 
                                             _match_line = f"- **{_matched:,}** already in your database"
                                             if _merged > 0:

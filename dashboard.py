@@ -5799,7 +5799,9 @@ with tab_search:
                     'crust_search_industry': search_industry,
                     'crust_search_country': search_country,
                     'crust_search_continent': search_continent,
-                    'crust_search_exact_company': search_exact_company,
+                    # exact_company only matters when a company is set — build_search_filters
+                    # ignores it otherwise, so don't let a stray checkbox split the hash.
+                    'crust_search_exact_company': bool(search_exact_company) and bool(effective_company),
                     'crust_search_recently_changed': search_recently_changed,
                     'crust_search_has_email': search_has_email,
                     'crust_search_geo_radius': search_geo_radius if _ps_geo_active else 0,

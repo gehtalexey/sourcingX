@@ -23,8 +23,15 @@ ALTER TABLE profiles ADD COLUMN IF NOT EXISTS skills_blob text;
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS titles_blob text;
 
 -- 3. Extend the shared trigger to maintain the two blobs on insert/update.
---    This is the EXISTING update_search_text() body verbatim, with only the two
---    NEW.*_blob assignments added before RETURN NEW. search_text is unchanged.
+--    This is the CURRENT LIVE update_search_text() body, captured verbatim via
+--    pg_get_functiondef, with only the two NEW.*_blob assignments added before
+--    RETURN NEW. The search_text expression is byte-for-byte the live one and is
+--    deliberately NOT changed here.
+--    NB: the live body includes `current_company` TWICE (a pre-existing quirk
+--    introduced by a migration after 019_add_certifications_to_search.sql) — that
+--    duplicate is preserved on purpose. Removing it would CHANGE the live trigger's
+--    search_text output for all future writes (a real behaviour change to shared
+--    full-text search), which is explicitly out of scope for this mirror/record.
 CREATE OR REPLACE FUNCTION public.update_search_text()
 RETURNS trigger
 LANGUAGE plpgsql

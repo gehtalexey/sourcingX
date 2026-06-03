@@ -6744,24 +6744,46 @@ with tab_upload:
                                                 p.get('linkedin_url', ''): p for p in _existing_profiles if p.get('raw_data')
                                             }
                                             save_session_state()
-                                            _dedup_note = (
-                                                f" ({len(_existing_urls) - len(_existing_df)} CSV URLs resolved to "
-                                                f"the same profiles)"
-                                                if len(_existing_df) < len(_existing_urls) else ""
-                                            )
+                                            # Build a plain-English breakdown so the working-set
+                                            # number is never a surprise: uploaded links → matched
+                                            # in DB → unique people (some links were the same
+                                            # person) → not-in-DB → still-need-enrichment.
+                                            _people = len(_existing_df)
+                                            _matched = len(_existing_urls)
+                                            _merged = _matched - _people
+                                            _not_in_db = len(_not_found_urls)
+                                            _uploaded = len(_enrich_urls)
                                             _new_count = len(_unmatched_csv_rows)
-                                            _new_note = (
-                                                f" {_new_count} profiles still need enrichment — "
-                                                "click *Enrich N profiles* below."
-                                                if _new_count > 0 else ""
-                                            )
+
+                                            _match_line = f"- **{_matched:,}** already in your database"
+                                            if _merged > 0:
+                                                _match_line += (
+                                                    f" → merged to **{_people:,}** unique people "
+                                                    f"({_merged:,} were the same person under different links)"
+                                                )
+                                            else:
+                                                _match_line += f" → **{_people:,}** unique people"
+
+                                            _lines = [
+                                                f"**{_people:,} unique people loaded into the Filter tab.**",
+                                                "",
+                                                f"From **{_uploaded:,}** links in your upload:",
+                                                _match_line,
+                                            ]
+                                            if _not_in_db > 0:
+                                                _lines.append(
+                                                    f"- **{_not_in_db:,}** not in the database "
+                                                    "(no Crustdata data — skipped)"
+                                                )
+                                            if _new_count > 0:
+                                                _lines.append(
+                                                    f"- **{_new_count:,}** still need enrichment — "
+                                                    "click *Enrich* below"
+                                                )
                                             # Store message in session_state — st.success
                                             # doesn't survive st.rerun(), so without this the
                                             # user sees no confirmation that the load worked.
-                                            st.session_state['_load_existing_message'] = (
-                                                f"Loaded {len(_existing_df)} profiles into the Filter tab"
-                                                + _dedup_note + "." + _new_note
-                                            )
+                                            st.session_state['_load_existing_message'] = "\n".join(_lines)
                                             st.rerun()
                                         else:
                                             st.warning("Could not load any profiles from DB.")

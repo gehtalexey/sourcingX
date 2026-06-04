@@ -2661,6 +2661,11 @@ def summarize_search_filters(filters: dict) -> str:
     skills = _txt('crust_search_skills')
     if skills:
         parts.append(skills)
+    keywords = _txt('crust_search_keywords')
+    if keywords:
+        # Free-text keywords are the usual differentiator between two searches
+        # with the same title + location, so quote them to stand out in the label.
+        parts.append(f'"{keywords}"')
 
     summary = ' · '.join(parts)
     if len(summary) > 140:

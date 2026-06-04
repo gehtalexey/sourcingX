@@ -2670,6 +2670,10 @@ def summarize_search_filters(filters: dict) -> str:
     summary = ' · '.join(parts)
     if len(summary) > 140:
         summary = summary[:139] + '…'
+        if summary.count('"') % 2:
+            # The cut landed inside the quoted keywords — close the quote so
+            # the label never ends on a dangling '"'.
+            summary = summary[:138] + '…"'
     return summary or 'All profiles (no filters)'
 
 

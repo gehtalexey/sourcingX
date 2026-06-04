@@ -82,7 +82,11 @@ def extract_display_fields(raw_data: dict) -> dict:
         'first_name': first_name,
         'last_name': last_name,
         'headline': cd.get('headline', ''),
-        'location': cd.get('location', ''),
+        # Crustdata returns the location string under `region`; `location` is
+        # often null. Fall back to `region` so DB-loaded profiles show a
+        # location (matches the save path in db.py and the autopilots'
+        # core/normalizers.py, which already use this same fallback).
+        'location': cd.get('location') or cd.get('region') or '',
         'summary': cd.get('summary', ''),
 
         # Current position

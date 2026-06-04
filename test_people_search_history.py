@@ -112,6 +112,18 @@ def test_summary_truncates_when_very_long():
     assert s.endswith('…')
 
 
+def test_summary_keywords_quoted():
+    s = summarize_search_filters({'crust_search_keywords': 'rust, kernel'})
+    assert '"rust, kernel"' in s
+
+
+def test_summary_long_keywords_never_leave_dangling_quote():
+    # A trim landing inside the quoted keywords must not orphan the open quote.
+    s = summarize_search_filters({'crust_search_keywords': 'a ' * 200})
+    assert len(s) <= 140
+    assert s.count('"') % 2 == 0
+
+
 # --- record_people_search: result_urls storage (migration 024) ---------------
 # A tiny fake REST client captures the insert/update payloads so we can assert
 # the new result_urls handling without a live Supabase connection.

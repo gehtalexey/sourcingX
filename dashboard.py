@@ -5499,7 +5499,14 @@ with tab_search:
                                         clear_results_derived_state(st.session_state)
                                         st.session_state['enriched_df'] = _saved_df
                                         st.session_state['results_df'] = _saved_df
-                                        st.session_state['original_results_df'] = _saved_df.copy()
+                                        # original_results_df marks a CSV upload. Setting it made
+                                        # the header banner mislabel these DB-loaded people as
+                                        # "uploaded from CSV". Clear it instead (don't just skip
+                                        # setting it): a stale value from an earlier CSV this
+                                        # session would keep the wrong banner count AND make Reset
+                                        # Filters restore the old CSV. With it cleared, the first
+                                        # Apply Filters re-baselines Reset to this saved set.
+                                        st.session_state.pop('original_results_df', None)
                                         st.session_state['enriched_profiles_raw'] = {
                                             p.get('linkedin_url', ''): p
                                             for p in _saved_profiles if p.get('raw_data')

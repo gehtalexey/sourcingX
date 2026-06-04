@@ -52,6 +52,8 @@ def test_location_falls_back_to_region():
     often null. The display must fall back to `region` so DB-loaded profiles
     aren't shown with a blank location."""
     assert extract_display_fields({'region': 'Tel Aviv, Israel'})['location'] == 'Tel Aviv, Israel'
+    # Empty-string location (not just missing) also falls back.
+    assert extract_display_fields({'location': '', 'region': 'Berlin'})['location'] == 'Berlin'
     # Explicit location wins when present.
     assert extract_display_fields(
         {'location': 'Haifa', 'region': 'Tel Aviv'}

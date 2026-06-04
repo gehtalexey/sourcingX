@@ -5513,8 +5513,9 @@ with tab_search:
                                         }
                                         save_session_state()
                                         st.session_state['_ps_loaded_msg'] = (
-                                            f"Loaded {len(_saved_df):,} saved profiles into the "
-                                            f"Filter tab from: {_summary} — no Crustdata credits used."
+                                            f"Loaded {len(_saved_df):,} saved profiles from: {_summary} "
+                                            f"— no Crustdata credits used. See them in the **1. Load** "
+                                            f"tab; filter them in **2. Filter**."
                                         )
                                     else:
                                         st.session_state['_ps_loaded_msg'] = (

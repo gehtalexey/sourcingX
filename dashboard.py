@@ -88,6 +88,7 @@ try:
         get_setting, save_setting,
         get_search_history, save_search_history_entry, delete_search_history_entry,
         hash_search_filters, summarize_search_filters, record_people_search,
+        update_people_search_urls,
         find_people_search, list_people_searches, delete_people_search,
         match_profiles_by_urls_rpc,
         save_failed_enrichments_batch, get_not_found_urls,
@@ -5470,6 +5471,27 @@ with tab_search:
                                         _saved_profiles = _fetch_candidate_profiles_for_urls(
                                             _ps_db, _rs_urls, '*', _cut
                                         )
+                                    # Strict-filter to the saved URL set (drop suffix-pass
+                                    # extras that point at different people with similar
+                                    # slugs) — same overlap check the CSV "already in DB"
+                                    # path uses, so we never load unrelated profiles.
+                                    _saved_norm_set = {
+                                        normalize_linkedin_url(_u) for _u in _rs_urls if _u
+                                    }
+                                    _saved_norm_set.discard(None)
+                                    _saved_norm_set.discard('')
+                                    _saved_profiles = [
+                                        _p for _p in (_saved_profiles or [])
+                                        if any(
+                                            normalize_linkedin_url(_u) in _saved_norm_set
+                                            for _u in (
+                                                _p.get('linkedin_url'),
+                                                _p.get('original_url'),
+                                                *(_p.get('original_urls') or []),
+                                            )
+                                            if _u
+                                        )
+                                    ]
                                     if _saved_profiles:
                                         _saved_df = profiles_to_dataframe(_saved_profiles)
                                         # Mirror the proven "Load existing from DB" writes so
@@ -6080,6 +6102,12 @@ with tab_search:
                             int(st.session_state.get('crustdata_search_total') or 0),
                             result_urls=_ps_result_urls or None,
                         )
+                        # Remember this search's history identity so Load More can
+                        # refresh its saved result_urls with the extra pages it pulls.
+                        st.session_state['_ps_history_ref'] = {
+                            'username': _ps_username,
+                            'filters_hash': _ps_hash,
+                        }
                     except Exception:
                         pass
 
@@ -6429,6 +6457,33 @@ with tab_search:
                                             st.session_state['_load_more_save_msg'] = f"Saved {bulk_result['saved']}/{len(new_profiles)} to database"
                                     except Exception as db_err:
                                         st.session_state['_load_more_save_msg'] = f"DB save skipped: {db_err}"
+
+                                    # Refresh the saved-search row's result_urls so
+                                    # "Load saved (free)" restores the full set including
+                                    # these extra pages, not just the first page.
+                                    try:
+                                        _ref = st.session_state.get('_ps_history_ref') or {}
+                                        if _ref.get('filters_hash'):
+                                            _lm_urls = []
+                                            _lm_seen = set()
+                                            for _p in (st.session_state.get('crustdata_search_results') or []):
+                                                _raw_u = (
+                                                    _p.get('linkedin_flagship_url')
+                                                    or _p.get('flagship_profile_url')
+                                                    or _p.get('linkedin_profile_url')
+                                                    or _p.get('linkedin_url')
+                                                )
+                                                _nu = normalize_linkedin_url(_raw_u) if _raw_u else None
+                                                if _nu and _nu not in _lm_seen:
+                                                    _lm_seen.add(_nu)
+                                                    _lm_urls.append(_nu)
+                                            if _lm_urls:
+                                                update_people_search_urls(
+                                                    _get_db_client(), _ref['username'],
+                                                    _ref['filters_hash'], _lm_urls,
+                                                )
+                                    except Exception:
+                                        pass
                                     _get_crustdata_credits_cached.clear()
                                     st.rerun()
                                 else:

@@ -2700,7 +2700,16 @@ def record_people_search(client: SupabaseClient, username: str, filters: dict,
             }
             if result_urls is not None:
                 updates['result_urls'] = result_urls
-            client.update('people_search_history', updates, {'id': row['id']})
+            try:
+                client.update('people_search_history', updates, {'id': row['id']})
+            except Exception:
+                # Optional column may not be migrated yet (024). Retry without it
+                # so the core history write still succeeds rather than regressing.
+                if 'result_urls' in updates:
+                    updates.pop('result_urls', None)
+                    client.update('people_search_history', updates, {'id': row['id']})
+                else:
+                    raise
         else:
             new_row = {
                 'username': username,
@@ -2714,10 +2723,40 @@ def record_people_search(client: SupabaseClient, username: str, filters: dict,
             }
             if result_urls is not None:
                 new_row['result_urls'] = result_urls
-            client.insert('people_search_history', new_row)
+            try:
+                client.insert('people_search_history', new_row)
+            except Exception:
+                # Optional column may not be migrated yet (024). Retry without it.
+                if 'result_urls' in new_row:
+                    new_row.pop('result_urls', None)
+                    client.insert('people_search_history', new_row)
+                else:
+                    raise
         return True
     except Exception as e:
         print(f"[DB] Failed to record people search: {e}")
+        return False
+
+
+def update_people_search_urls(client: SupabaseClient, username: str,
+                              filters_hash: str, result_urls: list) -> bool:
+    """Refresh only the stored result_urls for an existing saved search.
+
+    Used after Load More so the free-reload list covers the extra pages it
+    pulled, without bumping run_count (Load More is not a re-run). Never raises;
+    if column 024 isn't migrated yet the write simply fails and is swallowed.
+    """
+    if not client or not username or result_urls is None:
+        return False
+    try:
+        client.update(
+            'people_search_history',
+            {'result_urls': result_urls},
+            {'username': username, 'filters_hash': filters_hash},
+        )
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to update people search urls: {e}")
         return False
 
 

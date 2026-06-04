@@ -2669,11 +2669,16 @@ def summarize_search_filters(filters: dict) -> str:
 
 
 def record_people_search(client: SupabaseClient, username: str, filters: dict,
-                         filters_hash: str, summary: str, result_count: int) -> bool:
+                         filters_hash: str, summary: str, result_count: int,
+                         result_urls: list = None) -> bool:
     """Upsert a People-DB search into people_search_history (deduped per user by hash).
 
     Re-running the same search bumps run_count + last_run_at instead of creating a
     duplicate row. Never raises — a logging failure must not break the search.
+
+    result_urls: normalized LinkedIn URLs the run loaded, stored so the search can
+    later be reloaded from the profiles table for free. When None (older callers or
+    a DB without the column), the link list is simply left untouched.
     """
     if not client or not username:
         return False
@@ -2686,19 +2691,27 @@ def record_people_search(client: SupabaseClient, username: str, filters: dict,
         )
         if existing:
             row = existing[0]
-            client.update(
-                'people_search_history',
-                {
-                    'last_run_at': now,
-                    'result_count': result_count,
-                    'summary': summary,
-                    'filters': filters,
-                    'run_count': (row.get('run_count') or 1) + 1,
-                },
-                {'id': row['id']},
-            )
+            updates = {
+                'last_run_at': now,
+                'result_count': result_count,
+                'summary': summary,
+                'filters': filters,
+                'run_count': (row.get('run_count') or 1) + 1,
+            }
+            if result_urls is not None:
+                updates['result_urls'] = result_urls
+            try:
+                client.update('people_search_history', updates, {'id': row['id']})
+            except Exception:
+                # Optional column may not be migrated yet (024). Retry without it
+                # so the core history write still succeeds rather than regressing.
+                if 'result_urls' in updates:
+                    updates.pop('result_urls', None)
+                    client.update('people_search_history', updates, {'id': row['id']})
+                else:
+                    raise
         else:
-            client.insert('people_search_history', {
+            new_row = {
                 'username': username,
                 'filters_hash': filters_hash,
                 'filters': filters,
@@ -2707,10 +2720,43 @@ def record_people_search(client: SupabaseClient, username: str, filters: dict,
                 'run_count': 1,
                 'first_run_at': now,
                 'last_run_at': now,
-            })
+            }
+            if result_urls is not None:
+                new_row['result_urls'] = result_urls
+            try:
+                client.insert('people_search_history', new_row)
+            except Exception:
+                # Optional column may not be migrated yet (024). Retry without it.
+                if 'result_urls' in new_row:
+                    new_row.pop('result_urls', None)
+                    client.insert('people_search_history', new_row)
+                else:
+                    raise
         return True
     except Exception as e:
         print(f"[DB] Failed to record people search: {e}")
+        return False
+
+
+def update_people_search_urls(client: SupabaseClient, username: str,
+                              filters_hash: str, result_urls: list) -> bool:
+    """Refresh only the stored result_urls for an existing saved search.
+
+    Used after Load More so the free-reload list covers the extra pages it
+    pulled, without bumping run_count (Load More is not a re-run). Never raises;
+    if column 024 isn't migrated yet the write simply fails and is swallowed.
+    """
+    if not client or not username or result_urls is None:
+        return False
+    try:
+        client.update(
+            'people_search_history',
+            {'result_urls': result_urls},
+            {'username': username, 'filters_hash': filters_hash},
+        )
+        return True
+    except Exception as e:
+        print(f"[DB] Failed to update people search urls: {e}")
         return False
 
 

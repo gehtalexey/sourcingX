@@ -88,6 +88,7 @@ try:
         get_setting, save_setting,
         get_search_history, save_search_history_entry, delete_search_history_entry,
         hash_search_filters, summarize_search_filters, record_people_search,
+        update_people_search_urls,
         find_people_search, list_people_searches, delete_people_search,
         match_profiles_by_urls_rpc,
         save_failed_enrichments_batch, get_not_found_urls,
@@ -5419,8 +5420,10 @@ with tab_search:
             if _recent_searches:
                 with st.expander(f"⭐ Your recent searches ({len(_recent_searches)})", expanded=False):
                     st.caption(
-                        "Auto-saved each time you run a search. Click one to refill the "
-                        "filters, then Search — or delete it."
+                        "Auto-saved each time you run a search. **📥 Load saved (free)** "
+                        "pulls the same people back from your database with no Crustdata "
+                        "credits. **↻** refills the filters so you can Search again for new "
+                        "people. The trash icon deletes the saved search."
                     )
                     for _rs in _recent_searches:
                         _rs_id = _rs.get('id')
@@ -5435,7 +5438,8 @@ with tab_search:
                             _meta.append(f"{_rc:,} results")
                         if _runs > 1:
                             _meta.append(f"run {_runs}×")
-                        _row_load, _row_del = st.columns([6, 1])
+                        _rs_urls = _rs.get('result_urls') or []
+                        _row_load, _row_get, _row_del = st.columns([5, 2, 1])
                         with _row_load:
                             if st.button(
                                 f"↻ {_summary}",
@@ -5446,6 +5450,73 @@ with tab_search:
                                 _load_people_search_into_form(_rs.get('filters') or {})
                                 st.session_state['_ps_loaded_msg'] = f"Loaded filters from: {_summary}"
                                 st.rerun()
+                        with _row_get:
+                            # Free reload: pull the exact people this search found from the
+                            # profiles table — no Crustdata call. Only offered for searches
+                            # recorded with stored links (older rows have none).
+                            if _rs_urls and st.button(
+                                f"📥 Load {len(_rs_urls):,} saved (free)",
+                                key=f"ps_get_{_rs_id}",
+                                use_container_width=True,
+                                help="Load the exact people this search found, straight from "
+                                     "your database — no Crustdata credits used.",
+                            ):
+                                try:
+                                    # Generous window so older saved searches still return
+                                    # their people (cutoff filters on save date).
+                                    _cut = (datetime.utcnow() - timedelta(days=3650)).isoformat()
+                                    with st.spinner(
+                                        f"Loading {len(_rs_urls):,} saved profiles from your database..."
+                                    ):
+                                        _saved_profiles = _fetch_candidate_profiles_for_urls(
+                                            _ps_db, _rs_urls, '*', _cut
+                                        )
+                                    # Strict-filter to the saved URL set (drop suffix-pass
+                                    # extras that point at different people with similar
+                                    # slugs) — same overlap check the CSV "already in DB"
+                                    # path uses, so we never load unrelated profiles.
+                                    _saved_norm_set = {
+                                        normalize_linkedin_url(_u) for _u in _rs_urls if _u
+                                    }
+                                    _saved_norm_set.discard(None)
+                                    _saved_norm_set.discard('')
+                                    _saved_profiles = [
+                                        _p for _p in (_saved_profiles or [])
+                                        if any(
+                                            normalize_linkedin_url(_u) in _saved_norm_set
+                                            for _u in (
+                                                _p.get('linkedin_url'),
+                                                _p.get('original_url'),
+                                                *(_p.get('original_urls') or []),
+                                            )
+                                            if _u
+                                        )
+                                    ]
+                                    if _saved_profiles:
+                                        _saved_df = profiles_to_dataframe(_saved_profiles)
+                                        # Mirror the proven "Load existing from DB" writes so
+                                        # the Filter/Screen tabs behave identically.
+                                        clear_results_derived_state(st.session_state)
+                                        st.session_state['enriched_df'] = _saved_df
+                                        st.session_state['results_df'] = _saved_df
+                                        st.session_state['original_results_df'] = _saved_df.copy()
+                                        st.session_state['enriched_profiles_raw'] = {
+                                            p.get('linkedin_url', ''): p
+                                            for p in _saved_profiles if p.get('raw_data')
+                                        }
+                                        save_session_state()
+                                        st.session_state['_ps_loaded_msg'] = (
+                                            f"Loaded {len(_saved_df):,} saved profiles into the "
+                                            f"Filter tab from: {_summary} — no Crustdata credits used."
+                                        )
+                                    else:
+                                        st.session_state['_ps_loaded_msg'] = (
+                                            f"No saved profiles are still in your database for: "
+                                            f"{_summary}. Run the search to fetch them again."
+                                        )
+                                    st.rerun()
+                                except Exception as _e:
+                                    st.warning(f"Could not load saved results: {str(_e)[:120]}")
                         with _row_del:
                             if st.button("\U0001f5d1", key=f"ps_del_{_rs_id}",
                                          use_container_width=True, help="Delete this saved search"):
@@ -6003,13 +6074,40 @@ with tab_search:
                         st.session_state['crustdata_search_total'] = 0
                         st.info("No profiles found matching your criteria. Try adjusting your filters.")
 
+                    # Collect the links of the profiles this run actually loaded, so the
+                    # search can later be reloaded straight from the profiles table for
+                    # free (no Crustdata call). Same URL precedence as save_enriched_*.
+                    _ps_result_urls = []
+                    try:
+                        _ps_seen_u = set()
+                        for _p in (st.session_state.get('crustdata_search_results') or []):
+                            _raw_u = (
+                                _p.get('linkedin_flagship_url')
+                                or _p.get('flagship_profile_url')
+                                or _p.get('linkedin_profile_url')
+                                or _p.get('linkedin_url')
+                            )
+                            _nu = normalize_linkedin_url(_raw_u) if _raw_u else None
+                            if _nu and _nu not in _ps_seen_u:
+                                _ps_seen_u.add(_nu)
+                                _ps_result_urls.append(_nu)
+                    except Exception:
+                        _ps_result_urls = []
+
                     # Auto-save this search to history (deduped per user by hash;
                     # a repeat just bumps run_count + last_run_at). Never fatal.
                     try:
                         record_people_search(
                             _ps_db, _ps_username, _ps_filters_state, _ps_hash, _ps_summary,
                             int(st.session_state.get('crustdata_search_total') or 0),
+                            result_urls=_ps_result_urls or None,
                         )
+                        # Remember this search's history identity so Load More can
+                        # refresh its saved result_urls with the extra pages it pulls.
+                        st.session_state['_ps_history_ref'] = {
+                            'username': _ps_username,
+                            'filters_hash': _ps_hash,
+                        }
                     except Exception:
                         pass
 
@@ -6359,6 +6457,33 @@ with tab_search:
                                             st.session_state['_load_more_save_msg'] = f"Saved {bulk_result['saved']}/{len(new_profiles)} to database"
                                     except Exception as db_err:
                                         st.session_state['_load_more_save_msg'] = f"DB save skipped: {db_err}"
+
+                                    # Refresh the saved-search row's result_urls so
+                                    # "Load saved (free)" restores the full set including
+                                    # these extra pages, not just the first page.
+                                    try:
+                                        _ref = st.session_state.get('_ps_history_ref') or {}
+                                        if _ref.get('filters_hash'):
+                                            _lm_urls = []
+                                            _lm_seen = set()
+                                            for _p in (st.session_state.get('crustdata_search_results') or []):
+                                                _raw_u = (
+                                                    _p.get('linkedin_flagship_url')
+                                                    or _p.get('flagship_profile_url')
+                                                    or _p.get('linkedin_profile_url')
+                                                    or _p.get('linkedin_url')
+                                                )
+                                                _nu = normalize_linkedin_url(_raw_u) if _raw_u else None
+                                                if _nu and _nu not in _lm_seen:
+                                                    _lm_seen.add(_nu)
+                                                    _lm_urls.append(_nu)
+                                            if _lm_urls:
+                                                update_people_search_urls(
+                                                    _get_db_client(), _ref['username'],
+                                                    _ref['filters_hash'], _lm_urls,
+                                                )
+                                    except Exception:
+                                        pass
                                     _get_crustdata_credits_cached.clear()
                                     st.rerun()
                                 else:

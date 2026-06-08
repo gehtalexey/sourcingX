@@ -1,22 +1,29 @@
+# OpenWolf
+
+@.wolf/OPENWOLF.md
+
+This project uses OpenWolf for context management. Read and follow .wolf/OPENWOLF.md every session. Check .wolf/cerebrum.md before generating code. Check .wolf/anatomy.md before reading files.
+
+
 # SourcingX — AI-Powered Recruiting Automation
 
 ## Workflow Rules
 
-- **Desktop (Claude Code CLI):** Before the **first** change on `master` in a session, confirm with Alexey once and offer a feature branch. After he confirms, treat subsequent edits, commits, and pushes to `master` in that same session as authorized — don't re-prompt for each one. The confirmation resets at the start of a new session.
-- **Mobile (Claude app):** Branches are created automatically - safe by default.
-- **Codex code review:** Codex (second AI coding agent) reviews all code Claude writes in this project. Flow: Claude opens a PR against `master` → Codex finds the latest open SourcingX PR and posts its review directly on GitHub → Claude reads the PR comments/reviews (via `gh pr view --comments`, `gh api`, or equivalent) and applies fixes on the same branch. Codex does not edit files; Alexey does not relay feedback by hand. Before applying Codex's fixes, re-read the file in case state has changed since the review.
+- **Desktop (Codex CLI):** Before the **first** change on `master` in a session, confirm with Alexey once and offer a feature branch. After he confirms, treat subsequent edits, commits, and pushes to `master` in that same session as authorized — don't re-prompt for each one. The confirmation resets at the start of a new session.
+- **Mobile (Codex app):** Branches are created automatically - safe by default.
+- **Codex code review:** Codex reviews all PRs Codex opens in this project via the `codex-pr-review` skill (installed Codex plugin). Flow: Codex opens a PR → immediately invokes the `codex-pr-review` skill with the PR URL → applies each finding as its own commit → pushes → repeats until clean → tells Alexey "ready to merge." Codex does not edit files; Alexey does not relay feedback by hand.
 
 ## AI coding workflow
 
-This repo uses GitHub PRs as the coordination layer between Claude (the code-writing agent), Codex (the reviewing agent), and Alexey. Default rules:
+This repo uses GitHub PRs as the coordination layer between Codex (the code-writing agent), Codex (the reviewing agent), and Alexey. Default rules:
 
-1. **Feature branches only.** Claude implements changes on a feature branch named `<type>/<short-slug>` (e.g. `fix/profiles-status`, `chore/ai-pr-workflow`). Direct commits to `master` are only allowed for the explicit session exception above.
-2. **PR is the unit of review.** When a feature branch is ready, open a PR against `master`. The PR description states what changed, why, and what was tested. Codex reviews the PR, Claude applies fixes on the same branch, and Alexey merges.
-3. **Reference REVIEW.md.** Both Claude (self-review before pushing) and Codex (reviewing the PR) use the checklist in `REVIEW.md` as the criteria. New PRs that touch production code paths should pass that checklist before merge.
+1. **Feature branches only.** Codex implements changes on a feature branch named `<type>/<short-slug>` (e.g. `fix/profiles-status`, `chore/ai-pr-workflow`). Direct commits to `master` are only allowed for the explicit session exception above.
+2. **PR is the unit of review.** When a feature branch is ready, open a PR against `master`. The PR description states what changed, why, and what was tested. Codex reviews the PR, Codex applies fixes on the same branch, and Alexey merges.
+3. **Reference REVIEW.md.** Both Codex (self-review before pushing) and Codex (reviewing the PR) use the checklist in `REVIEW.md` as the criteria. New PRs that touch production code paths should pass that checklist before merge.
 4. **CI is required.** The GitHub Actions workflow under `.github/workflows/test.yml` runs focused tests on every push and PR targeting `master`. PRs do not merge until CI is green.
 5. **No auto-merge.** Merges are manual. Alexey reviews the final state and clicks merge himself.
 6. **No broad write permissions for CI.** The workflow declares `permissions: contents: read` explicitly. Any future job that needs write access must be added narrowly and reviewed.
-7. **No secrets in the repo.** Real API keys live in `config.json` (gitignored) or GitHub Actions secrets, never in source. Test code uses placeholder keys (`"test-key"`) which the workflow injects via env. Local agent state such as `.claude/settings.local.json`, `.claude/launch.json`, `.claude/scheduled_tasks.lock`, `.claude/worktrees/`, `.agent/`, `.agents/`, `.continue/`, and scratch JSON/CSV outputs is gitignored and must never be committed. Tracked project skill files under `.claude/skills/` are allowed only when intentionally maintained as repo instructions.
+7. **No secrets in the repo.** Real API keys live in `config.json` (gitignored) or GitHub Actions secrets, never in source. Test code uses placeholder keys (`"test-key"`) which the workflow injects via env. Local agent state such as `.Codex/settings.local.json`, `.Codex/launch.json`, `.Codex/scheduled_tasks.lock`, `.Codex/worktrees/`, `.agent/`, `.agents/`, `.continue/`, and scratch JSON/CSV outputs is gitignored and must never be committed. Tracked project skill files under `.Codex/skills/` are allowed only when intentionally maintained as repo instructions.
 
 ### Commit messages
 
@@ -30,9 +37,9 @@ SourcingX is a Streamlit-based recruiting automation platform that screens Linke
 
 - **Frontend/Backend**: Streamlit (Python) — single-file app in `dashboard.py`
 - **Database**: Supabase (PostgreSQL via REST API) — stores enriched profiles, NOT screening results
-- **AI Screening**: OpenAI `gpt-4o-mini` (default), `gpt-4o`, or Claude Haiku (`anthropic`)
+- **AI Screening**: OpenAI `gpt-4o-mini` (default), `gpt-4o`, or Codex Haiku (`anthropic`)
 - **Profile Data**: Crustdata API (enrichment), PhantomBuster (scraping)
-- **Email Lookup**: SalesQL API — **before touching SalesQL code or debugging email hit-rate, read `.claude/skills/salesql-api/SKILL.md`** (URL format rules — hash-suffix URLs are valid, don't strip them; coverage-vs-URL-bug distinction; credit accounting; gotchas)
+- **Email Lookup**: SalesQL API — **before touching SalesQL code or debugging email hit-rate, read `.Codex/skills/salesql-api/SKILL.md`** (URL format rules — hash-suffix URLs are valid, don't strip them; coverage-vs-URL-bug distinction; credit accounting; gotchas)
 - **Config**: Google Sheets (company lists, universities, blacklists) + local CSV filters
 
 ## Project Structure
@@ -61,7 +68,7 @@ sourcingX/
 ├── test_mocking_services.py  # External service mocking tests
 ├── test_screening_fixes.py   # Regression tests for screening helpers
 ├── test_screening_parameterized.py  # Parameterized screening tests
-├── .claude/skills/           # Claude Code skills (5 skills)
+├── .Codex/skills/           # Codex skills (5 skills)
 ├── skills/                   # Additional skills (email-subject-line, email-personal-note)
 ├── .devcontainer/            # Dev container config (Python 3.11, port 8501)
 ├── .streamlit/               # Streamlit config (dark theme)
@@ -125,7 +132,7 @@ sourcingX/
 
 | Function | Purpose |
 |----------|---------|
-| `screen_profile()` | Screens a single profile against JD via OpenAI/Claude |
+| `screen_profile()` | Screens a single profile against JD via OpenAI/Codex |
 | `screen_profiles_batch()` | Parallel screening with ThreadPoolExecutor |
 | `compute_role_durations()` | Pre-calculates per-role durations (Xy Ym) + stability verdict from raw JSON |
 | `trim_raw_profile()` | Strips logos/IDs/long descriptions from raw JSON (54-64% token savings) |
@@ -199,7 +206,7 @@ Only reject titles the JD EXPLICITLY lists. "Team Lead" is NOT overqualified unl
 `normalize_crustdata_profile()` exists in both `normalizers.py` (canonical) and `dashboard.py` (inline copy). The canonical version in `normalizers.py` is the source of truth.
 
 ### URL matching & "already enriched" counts
-**READ `.claude/skills/url-flow/SKILL.md` FIRST** when debugging URL issues.
+**READ `.Codex/skills/url-flow/SKILL.md` FIRST** when debugging URL issues.
 
 - **Crustdata echoes input**: `query_linkedin_profile_urn_or_slug` field returns our exact input URL — this is the PRIMARY matching method (Tier 1)
 - **Problem**: Crustdata's `linkedin_flagship_url` is often different from input (e.g., `yderman` for `yoav-derman-365736152`)
@@ -209,25 +216,25 @@ Only reject titles the JD EXPLICITLY lists. "Team Lead" is NOT overqualified unl
 - **Debug**: Check debug expander in Enrich tab, search DB by name, verify `original_url` is set
 - **Fix pattern**: Update `original_url` in DB if profile was saved without it
 
-## Skills (Claude Code)
+## Skills (Codex)
 
 | Skill | Path | Purpose |
 |-------|------|---------|
-| `/screen` | `.claude/skills/screen/SKILL.md` | Team leader: coordinates parallel screening agents |
-| `/email-opener` | `.claude/skills/email-opener/SKILL.md` | Generate personalized outreach emails |
-| `/pre-filter-candidates` | `.claude/skills/pre-filter-candidates/SKILL.md` | Pre-filter profiles before screening |
-| `/filter-csv-columns` | `.claude/skills/filter-csv-columns/SKILL.md` | CSV column filtering for recruiter review |
-| `/phantom-pre-filter` | `.claude/skills/phantom-pre-filter/SKILL.md` | Pre-filter raw PhantomBuster CSV before enrichment |
+| `/screen` | `.Codex/skills/screen/SKILL.md` | Team leader: coordinates parallel screening agents |
+| `/email-opener` | `.Codex/skills/email-opener/SKILL.md` | Generate personalized outreach emails |
+| `/pre-filter-candidates` | `.Codex/skills/pre-filter-candidates/SKILL.md` | Pre-filter profiles before screening |
+| `/filter-csv-columns` | `.Codex/skills/filter-csv-columns/SKILL.md` | CSV column filtering for recruiter review |
+| `/phantom-pre-filter` | `.Codex/skills/phantom-pre-filter/SKILL.md` | Pre-filter raw PhantomBuster CSV before enrichment |
 | (email-personal-note) | `skills/email-personal-note/SKILL.md` | Generate personal notes for follow-up emails |
 | (email-subject-line) | `skills/email-subject-line/SKILL.md` | Generate email subject lines with angle variation |
 
 ### Reference Skills (Auto-Consult)
 
-These skills are NOT user-invocable. Claude should automatically read them when working on related issues:
+These skills are NOT user-invocable. Codex should automatically read them when working on related issues:
 
 | Skill | Path | When to Consult |
 |-------|------|-----------------|
-| url-flow | `.claude/skills/url-flow/SKILL.md` | **URL matching bugs**, "already enriched" count wrong, profiles not deduping, enrichment URL mismatches, `original_url` issues |
+| url-flow | `.Codex/skills/url-flow/SKILL.md` | **URL matching bugs**, "already enriched" count wrong, profiles not deduping, enrichment URL mismatches, `original_url` issues |
 
 ## Prompt Templates (prompts.py)
 
@@ -259,7 +266,7 @@ This Supabase database is shared by THREE projects:
 - **Before changing how SourcingX writes or searches profiles** (the `profiles` table — columns written, field extraction from the Crustdata response, timestamp format, URL normalization, `original_urls` array handling, search/filter query patterns), remember the change must be mirrored into both autopilot projects. Flag it so the ports stay in sync.
 - SourcingX wins ties — it is the reference implementation. But a change here is not "done" until the autopilots match.
 
-The global `~/.claude/CLAUDE.md` and each project's `CLAUDE.md` repeat this rule — keep all four copies in agreement.
+The global `~/.Codex/AGENTS.md` and each project's `AGENTS.md` repeat this rule — keep all four copies in agreement.
 
 ## Database Schema (Supabase)
 
@@ -307,8 +314,8 @@ Run tests with: `pytest`
 
 ## Conventions
 
-- Screening happens through OpenAI API or Claude Haiku (anthropic) for the dashboard
-- Claude Code skills (`/screen`, `/email-opener`) use Claude for agent-based workflows
+- Screening happens through OpenAI API or Codex Haiku (anthropic) for the dashboard
+- Codex skills (`/screen`, `/email-opener`) use Codex for agent-based workflows
 - Config lives in `config.json` — never commit API keys
 - CSV exports use UTF-8-BOM for Excel compatibility
 - LinkedIn URLs are normalized before storage (`normalize_linkedin_url()` in `normalizers.py`)

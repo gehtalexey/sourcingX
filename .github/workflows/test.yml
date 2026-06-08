@@ -52,12 +52,10 @@ jobs:
             test_screening_policy_consolidation.py \
             test_tenure_constraint_override.py \
             test_pick_current_employer.py \
-            test_reenrich_sparse_profiles.py \
             test_ai_screen_excludes_army.py \
             test_helpers_extract_display_fields.py \
             test_db_search_ai_expansion.py \
             test_db_search_company_substring.py \
-            test_check_monthly_credit_budget.py \
             test_geo_aware_ai_expansion.py \
             test_api_key_strip.py \
             test_filter_funnel_breakdown.py \

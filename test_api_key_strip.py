@@ -19,7 +19,6 @@ These tests pin that behaviour for every loader the cron / dashboard touches:
 * ``crustdata_search._load_api_key``
 * ``dashboard.load_openai_key`` (and the shared ``_strip_secret`` helper)
 * ``db.get_supabase_client`` (URL + key, all three sources)
-* ``scripts.reenrich_sparse_profiles._load_crustdata_api_key``
 
 All external services are mocked. No real network calls.
 """
@@ -374,70 +373,3 @@ class TestSupabaseLoader:
             pass
 
         assert db.get_supabase_client() is None
-
-
-# ---------------------------------------------------------------------------
-# scripts.reenrich_sparse_profiles._load_crustdata_api_key
-# ---------------------------------------------------------------------------
-
-
-class TestReenrichLoader:
-    """The cron's own Crustdata loader also strips surrounding whitespace."""
-
-    @pytest.fixture(scope="class")
-    def script(self):
-        script_path = REPO_ROOT / "scripts" / "reenrich_sparse_profiles.py"
-        spec = importlib.util.spec_from_file_location(
-            "reenrich_sparse_profiles", script_path
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    def test_trailing_newline_stripped_from_env(self, script, monkeypatch):
-        # Force the loader to skip config.json (REPO_ROOT in the module
-        # points at the real repo; patch the constant so config.json is not
-        # accidentally read).
-        monkeypatch.setattr(
-            script, "REPO_ROOT", Path("/nonexistent-path-for-test-only"),
-            raising=False,
-        )
-        monkeypatch.setenv("CRUSTDATA_API_KEY", "real-key\n")
-
-        result = script._load_crustdata_api_key()
-        assert result == "real-key"
-        assert not _has_header_breaking_chars(result)
-
-    def test_leading_trailing_spaces_stripped_from_env(self, script, monkeypatch):
-        monkeypatch.setattr(
-            script, "REPO_ROOT", Path("/nonexistent-path-for-test-only"),
-            raising=False,
-        )
-        monkeypatch.setenv("CRUSTDATA_API_KEY", "   real-key   ")
-        assert script._load_crustdata_api_key() == "real-key"
-
-    def test_clean_env_passes_through(self, script, monkeypatch):
-        monkeypatch.setattr(
-            script, "REPO_ROOT", Path("/nonexistent-path-for-test-only"),
-            raising=False,
-        )
-        monkeypatch.setenv("CRUSTDATA_API_KEY", "clean-key")
-        assert script._load_crustdata_api_key() == "clean-key"
-
-    def test_missing_key_still_raises(self, script, monkeypatch):
-        monkeypatch.setattr(
-            script, "REPO_ROOT", Path("/nonexistent-path-for-test-only"),
-            raising=False,
-        )
-        monkeypatch.delenv("CRUSTDATA_API_KEY", raising=False)
-        with pytest.raises(RuntimeError):
-            script._load_crustdata_api_key()
-
-    def test_empty_string_in_env_still_raises(self, script, monkeypatch):
-        monkeypatch.setattr(
-            script, "REPO_ROOT", Path("/nonexistent-path-for-test-only"),
-            raising=False,
-        )
-        monkeypatch.setenv("CRUSTDATA_API_KEY", "")
-        with pytest.raises(RuntimeError):
-            script._load_crustdata_api_key()

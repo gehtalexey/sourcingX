@@ -317,51 +317,16 @@ Run tests with: `pytest`
 - Filter CSVs live in `filters/` directory
 - Streamlit theme: dark mode with purple primary (`#615fff`)
 
-## Scheduled Jobs / DB Refresh
+## Scheduled Jobs / DB Refresh — RETIRED (moved to Supanova)
 
-### What runs daily
+The old daily `db-refresh.yml` workflow and its scripts
+(`scripts/reenrich_sparse_profiles.py`, `scripts/check_monthly_credit_budget.py`)
+were **removed on 2026-06-08**. They re-enriched stale profiles at 3 credits *per
+profile*, which is ~100× more expensive than needed.
 
-`.github/workflows/db-refresh.yml` runs at **03:00 UTC every day** (and can be triggered manually with `gh workflow run db-refresh.yml`). It re-enriches stale, sparse profiles via `scripts/reenrich_sparse_profiles.py` so the dashboard always reads up-to-date current-employer data.
-
-### Guardrails
-
-1. **Daily cap:** the workflow passes `--limit 250` to the refresh script. At Crustdata's 3-credits-per-profile rate that's ~750 credits/day. To change, edit `DAILY_LIMIT` and `PROJECTED_DAILY_SPEND` in the workflow's `env:` block.
-2. **Monthly cap:** the workflow runs `scripts/check_monthly_credit_budget.py` first. That script reads `api_usage_logs` from Supabase, sums `credits_used` for `provider='crustdata'` since the first instant of the current calendar month (UTC), and refuses to proceed if `mtd_spend + projected_spend > MONTHLY_CAP`. Today `MONTHLY_CAP=22000`. The preflight exits **75 (`EX_TEMPFAIL`)** to signal "skip this run, don't fail the workflow"; the workflow catches that and exits cleanly.
-
-The monthly cap is a **shared budget** — it counts every Crustdata credit, not only auto-refresh credits. That's intentional: if humans burn the budget on manual searches, the auto-refresh yields rather than racing. See the docstring in `scripts/check_monthly_credit_budget.py` for the full rationale.
-
-### One-time setup
-
-1. **Create the tracking issue (once):**
-   ```bash
-   gh issue create --title "DB refresh log" \
-     --body "Daily auto-refresh runs append a comment here." \
-     --label "automation"
-   ```
-   Note the issue number it prints.
-2. **Set the repo variable so the workflow knows where to comment:**
-   ```bash
-   gh variable set DB_REFRESH_ISSUE_NUMBER --body "<issue-number>"
-   ```
-3. **Add four GitHub Actions secrets** (Settings → Secrets and variables → Actions):
-   - `CRUSTDATA_API_KEY` — Crustdata API token.
-   - `SUPABASE_URL` — Supabase project URL.
-   - `SUPABASE_KEY` — Supabase service-role key (needs read on `api_usage_logs` and read/write on `profiles`).
-   - `OPENAI_API_KEY` — needed only because some transitive imports may touch it; can be a placeholder until you decide otherwise.
-
-The workflow's `permissions:` block grants `issues: write` only — the narrow escape hatch to the repo's default `contents: read` posture. It does this so the daily summary can be posted to the tracking issue. No other write scopes are granted.
-
-### Adjusting caps
-
-All knobs live in `.github/workflows/db-refresh.yml`'s `env:` block:
-- `DAILY_LIMIT` and `PROJECTED_DAILY_SPEND` — keep these in sync (3 credits per profile).
-- `MONTHLY_CAP` — the hard ceiling the preflight enforces.
-- `MAX_AGE_DAYS`, `MIN_CURRENT_EMPLOYERS`, `BATCH_SIZE` — staleness filter and Crustdata batch size, forwarded to the refresh script.
-
-### Triggering manually
-
-```bash
-gh workflow run db-refresh.yml
-```
-Watch the tracking issue for the new comment, or open the run in the Actions tab for full logs.
+Database refresh + growth now live in the **Supanova** repo
+(`github.com/gehtalexey/supanova`). Supanova refreshes profiles by Crustdata
+`person_id` via `people_search_db` (3 credits per *100*, no enrichment) and pulls
+new profiles for active `pipeline_positions`, on a monthly schedule. Do not
+re-add a refresh job here.
 

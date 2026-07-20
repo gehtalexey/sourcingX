@@ -221,6 +221,7 @@ class TestSemanticProfileShim:
         assert shim["all_schools"] == ["Technion"]
         assert shim["crustdata_person_id"] == 123
         assert shim["_fit"] == "strong"
+        assert shim["_semantic_incomplete"] is True
 
     def test_aliases_company_headcount_latest_to_range(self):
         """The legacy display/normalize code reads company_headcount_range;
@@ -264,3 +265,23 @@ class TestSemanticProfileShim:
         assert row["seniority"] == "Senior"
         assert row["company_size"] == "11-50"
         assert row["skills"] == "Python, Kubernetes"
+
+    def test_shimmed_profile_is_flagged_as_needing_enrichment(self):
+        """Description search doesn't return skills/summary/experience, and
+        the AI screening prompt treats missing skills as a hard FAIL rather
+        than "unknown". Rows from it must be flagged so they land in the
+        normal enrichment queue instead of going straight to AI Screen."""
+        shim = semantic_profile_to_legacy_shape(_SAMPLE_V2_PROFILE)
+        df = normalize_search_results_to_df([shim])
+        assert bool(df.iloc[0]["_needs_enrichment"]) is True
+
+    def test_regular_filter_search_profile_still_marked_complete(self):
+        """A normal (non-semantic) search result has no _semantic_incomplete
+        marker and must keep _needs_enrichment=False, as before — this
+        change must not affect the existing filter search path."""
+        filter_profile = {
+            "name": "John Smith",
+            "flagship_profile_url": "https://www.linkedin.com/in/johnsmith",
+        }
+        df = normalize_search_results_to_df([filter_profile])
+        assert bool(df.iloc[0]["_needs_enrichment"]) is False

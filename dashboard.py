@@ -128,6 +128,8 @@ try:
         normalize_search_results_to_df,
         check_credits as check_crustdata_credits,
         expand_variations,
+        search_people_semantic,
+        semantic_profile_to_legacy_shape,
         SENIORITY_LEVELS,
         HEADCOUNT_RANGES,
         FUNCTION_CATEGORIES,
@@ -5533,6 +5535,114 @@ with tab_search:
                         if _meta:
                             st.caption(" · ".join(_meta))
 
+        # ===== Search by description (beta) =====
+        # Crustdata's newer natural-language search: type a plain description
+        # instead of filling in filters, and get people ranked by how well
+        # their whole profile matches. Feeds the exact same results table /
+        # selection / CSV export / "add to pipeline" code as the regular
+        # filter search below, via semantic_profile_to_legacy_shape().
+        with st.expander("🔍 Search by description (beta)", expanded=False):
+            st.caption(
+                "Type who you're looking for in plain language — e.g. \"founding "
+                "engineers at developer-tools startups in Israel\" — instead of "
+                "filling in the filters below. Crustdata ranks people by how well "
+                "they match. This is a new, beta feature of Crustdata, so quality "
+                "can vary — each result costs the same credits as a regular search "
+                "(0.03 credits per result)."
+            )
+            semantic_query = st.text_area(
+                "Describe who you're looking for",
+                key="crust_semantic_query",
+                placeholder="e.g. senior backend engineers with Kubernetes experience in Tel Aviv",
+                height=80,
+            )
+            sem_col1, sem_col2 = st.columns([1, 3])
+            with sem_col1:
+                semantic_limit = st.number_input(
+                    "Results", min_value=5, max_value=100, value=20, step=5,
+                    key="crust_semantic_limit",
+                    help="Max 100 per search (Crustdata beta limit).",
+                )
+            with sem_col2:
+                st.write("")  # vertical spacer to align button with the number input
+                semantic_submitted = st.button(
+                    "Search by description", key="crust_semantic_search_btn",
+                )
+
+            if semantic_submitted:
+                if not semantic_query or not semantic_query.strip():
+                    st.warning("Type a description first.")
+                else:
+                    try:
+                        sem_progress = st.empty()
+                        sem_progress.info("Searching Crustdata by description...")
+                        sem_results = search_people_semantic(
+                            semantic_query.strip(),
+                            limit=int(semantic_limit),
+                            api_key=api_key,
+                        )
+                        sem_shimmed = [
+                            semantic_profile_to_legacy_shape(p)
+                            for p in (sem_results.get("profiles") or [])
+                        ]
+
+                        # Apply the same past-candidates / blacklist / not-relevant
+                        # exclusions the filter search applies, so description
+                        # search doesn't resurface people already ruled out.
+                        _sem_pc_names = {
+                            str(n).lower().strip()
+                            for n in (st.session_state.get('past_candidates_names_for_search') or [])
+                        }
+                        _sem_bl = [
+                            c for c in (st.session_state.get('blacklist_for_search') or [])
+                            if c and str(c).strip() and len(str(c).strip()) >= 3
+                        ]
+                        _sem_nr = [
+                            c for c in (st.session_state.get('nr_for_search') or [])
+                            if c and str(c).strip() and len(str(c).strip()) >= 3
+                        ]
+
+                        def _sem_name_of(p):
+                            n = str(p.get('name') or '').lower().strip()
+                            return ' '.join(re.sub(r'[^\w\s]', '', n).split())
+
+                        def _sem_company_of(p):
+                            emp = pick_current_employer(p.get('current_employers'))
+                            return (emp.get('name') or '') if emp else ''
+
+                        _sem_removed = 0
+                        _sem_clean = []
+                        for p in sem_shimmed:
+                            if not p:
+                                continue
+                            if _sem_pc_names and _sem_name_of(p) in _sem_pc_names:
+                                _sem_removed += 1
+                                continue
+                            _sem_co = _sem_company_of(p)
+                            if _sem_co and _sem_bl and _company_matches_filter_list(_sem_co, _sem_bl):
+                                _sem_removed += 1
+                                continue
+                            if _sem_co and _sem_nr and _company_matches_filter_list(_sem_co, _sem_nr):
+                                _sem_removed += 1
+                                continue
+                            _sem_clean.append(p)
+
+                        st.session_state['crustdata_search_results'] = _sem_clean
+                        st.session_state['crustdata_search_cursor'] = sem_results.get('cursor')
+                        st.session_state['crustdata_search_total'] = sem_results.get('total_count', len(_sem_clean))
+                        st.session_state['crustdata_search_credits_used'] = sem_results.get('credits_used', 0)
+                        st.session_state['crustdata_search_selected'] = list(range(len(_sem_clean)))
+                        _sem_note = f" ({_sem_removed} already-seen removed)" if _sem_removed else ""
+                        st.session_state['_search_loaded_msg'] = (
+                            f"Found **{len(_sem_clean):,}** profiles matching your description{_sem_note}. "
+                            f"Read the **Fit** column (strong/possible/weak) — description search always "
+                            f"returns results, so a low count doesn't mean poor quality and a high count "
+                            f"doesn't guarantee good matches."
+                        )
+                        st.rerun()
+                    except Exception as _sem_e:
+                        st.error(f"Description search failed: {str(_sem_e)[:300]}")
+
         st.markdown("##### Search Filters")
 
         # Row 1: Title, Company, Location (each with AI button below)
@@ -6254,6 +6364,7 @@ with tab_search:
                 display_data.append({
                     "idx": i,
                     "Select": i in st.session_state.get('crustdata_search_selected', []),
+                    "Fit": profile.get("_fit", ""),
                     "Name": profile.get("name", ""),
                     "Headline": headline[:60] + "..." if len(headline) > 60 else headline,
                     "Title": current_title,
@@ -6279,6 +6390,13 @@ with tab_search:
             # Display with data_editor for selection
             _compact_cols = ["Select", "Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn"]
             _all_cols = ["Select", "Name", "Title", "Headline", "Company", "All Employers", "Location", "Country", "Seniority", "Function", "Industry", "Size", "Exp", "Connections", "All Skills", "Summary", "Work History", "LinkedIn"]
+            # "Fit" (Crustdata's relevance tier: strong/possible/weak) is only
+            # populated for description-search results — only show the column
+            # when at least one row actually has a value, so filter search
+            # results don't display an all-blank column.
+            if display_df.get("Fit", pd.Series(dtype=str)).astype(str).str.strip().any():
+                _compact_cols.insert(1, "Fit")
+                _all_cols.insert(1, "Fit")
             _show_cols = _all_cols if show_all_cols else _compact_cols
 
             edited_df = st.data_editor(
@@ -6287,6 +6405,7 @@ with tab_search:
                 use_container_width=True,
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Select", default=True),
+                    "Fit": st.column_config.TextColumn("Fit", width="small", help="Crustdata's relevance tier for description search: strong/possible/weak"),
                     "Name": st.column_config.TextColumn("Name", width="small"),
                     "Title": st.column_config.TextColumn("Title", width="small"),
                     "Headline": st.column_config.TextColumn("Headline", width="medium"),
@@ -6306,7 +6425,7 @@ with tab_search:
                     "Summary": st.column_config.TextColumn("Summary", width="large"),
                     "Work History": st.column_config.TextColumn("Work History", width="large"),
                 },
-                disabled=["Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn",
+                disabled=["Fit", "Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn",
                           "Country", "Seniority", "Function", "Industry", "Connections", "All Skills", "All Employers", "Summary", "Work History"],
                 key="crust_results_editor"
             )

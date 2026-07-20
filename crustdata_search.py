@@ -52,6 +52,18 @@ from normalizers import normalize_linkedin_url, clean_value, is_nan_or_none, pic
 CRUSTDATA_SEARCH_ENDPOINT = "https://api.crustdata.com/screener/persondb/search"
 CRUSTDATA_CREDITS_ENDPOINT = "https://api.crustdata.com/account/credits"
 
+# Natural-language ("semantic") people search — Crustdata's newer v2025-11-01
+# API. Same /person/search dataset as the filter search above, but ranks
+# people by how well their whole profile matches a plain-language query
+# instead of exact filter conditions. Verified against the live Crustdata
+# docs (docs.crustdata.com/person-docs/search/introduction) on 2026-07-20 —
+# request body is {"search": {"query", "mode"}, "mode": "exact"|"managed",
+# "limit"}, auth is "Authorization: Bearer <key>" + "x-api-version" header
+# (both different from the legacy endpoint above, which still uses "Token").
+CRUSTDATA_SEMANTIC_SEARCH_ENDPOINT = "https://api.crustdata.com/person/search"
+CRUSTDATA_API_VERSION = "2025-11-01"
+CREDITS_PER_RESULT_SEMANTIC = 0.03
+
 # Seniority levels supported by Crustdata.
 # Canonical values verified via crustdata_autocomplete_person on 2026-05-17.
 # Previously this list used "Manager", "Senior", "Entry", "Training" which
@@ -876,6 +888,138 @@ def check_credits(api_key: str = None) -> Dict[str, Any]:
         )
 
 
+@retry_with_backoff(
+    max_retries=3,
+    base_delay=2.0,
+    retryable_exceptions=(RateLimitError, ServiceUnavailableError, ConnectionError, TimeoutError),
+)
+def search_people_semantic(
+    query: str,
+    limit: int = 20,
+    cursor: str = None,
+    search_mode: str = "hybrid",
+    recall_mode: str = "managed",
+    api_key: str = None,
+) -> Dict[str, Any]:
+    """
+    Natural-language ("search by description") people search — beta.
+
+    Instead of building filter conditions, pass a plain-language description
+    of who you're looking for (a role, a persona, or a pasted JD) and get
+    back people ranked by how well their whole profile matches it. Each
+    result carries a "fit" tier (strong/possible/weak) in the raw profile —
+    read it to judge quality; total_count is the size of the ranked pool,
+    not a count of good matches.
+
+    Args:
+        query: Plain-language description, e.g. "founding engineers at
+            developer-tools startups in Israel".
+        limit: Results to return (1-100, default 20).
+        cursor: Pagination cursor from a previous response.
+        search_mode: "hybrid" (default, keyword+vector), "lexical" (exact
+            terms only), or "semantic" (vector/meaning only).
+        recall_mode: "managed" (default — query is the main signal) or
+            "exact" (only used if filters are added later; kept here so
+            callers can opt in without a signature change).
+        api_key: Optional API key (loads from config.json / env var if omitted).
+
+    Returns:
+        {
+            "profiles": [...],   # raw nested v2 profile dicts (see
+                                  # semantic_profile_to_legacy_shape() to adapt
+                                  # them for the rest of the pipeline)
+            "cursor": "...",
+            "total_count": N,
+            "credits_used": N,   # 0.03 credits per result returned
+            "response_time_ms": N,
+        }
+    """
+    if not query or not query.strip():
+        raise ValueError("query is required for semantic search")
+
+    if not api_key:
+        api_key = _load_api_key()
+    limiter = get_rate_limiter('crustdata')
+
+    body = {
+        "search": {"query": query.strip(), "mode": search_mode},
+        "limit": max(1, min(limit, 100)),
+    }
+    if recall_mode == "exact":
+        body["mode"] = "exact"
+    if cursor:
+        body["cursor"] = cursor
+
+    try:
+        limiter.wait_if_needed()
+    except RateLimitExceeded as e:
+        raise RateLimitError("Crustdata", message=str(e))
+
+    start_time = time.time()
+
+    try:
+        response = requests.post(
+            CRUSTDATA_SEMANTIC_SEARCH_ENDPOINT,
+            json=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "x-api-version": CRUSTDATA_API_VERSION,
+            },
+            timeout=60,
+        )
+
+        limiter.record_request()
+
+        if response.status_code == 401:
+            raise AuthenticationError("Crustdata")
+        elif response.status_code == 429:
+            retry_after = response.headers.get('Retry-After')
+            raise RateLimitError(
+                "Crustdata",
+                retry_after=float(retry_after) if retry_after else None
+            )
+        elif response.status_code >= 500:
+            raise ServiceUnavailableError(
+                "Crustdata",
+                status_code=response.status_code,
+                response_body=response.text[:500]
+            )
+        elif response.status_code >= 400:
+            raise ExternalServiceError(
+                "Crustdata",
+                message=f"Semantic search failed: {response.text[:500]}",
+                status_code=response.status_code,
+                response_body=response.text
+            )
+
+        data = response.json()
+        profiles = data.get("profiles", [])
+        next_cursor = data.get("next_cursor")
+        total_count = data.get("total_count", len(profiles))
+        credits_used = round(len(profiles) * CREDITS_PER_RESULT_SEMANTIC, 2)
+
+        return {
+            "profiles": profiles,
+            "cursor": next_cursor,
+            "total_count": total_count,
+            "credits_used": credits_used,
+            "response_time_ms": int((time.time() - start_time) * 1000),
+        }
+
+    except requests.exceptions.Timeout:
+        raise ExternalServiceError(
+            "Crustdata",
+            message="Semantic search request timed out",
+            status_code=504
+        )
+    except requests.exceptions.ConnectionError as e:
+        raise ServiceUnavailableError(
+            "Crustdata",
+            message=f"Connection error: {str(e)[:200]}"
+        )
+
+
 # =============================================================================
 # NORMALIZATION
 # =============================================================================
@@ -1070,6 +1214,72 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
         '_source': 'crustdata_search',
         '_needs_enrichment': False,  # compact=false returns full profile
         '_raw_search_result': profile,  # Keep raw for debugging
+    }
+
+
+def semantic_profile_to_legacy_shape(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Adapt one nested v2025-11-01 person-search profile (as returned by
+    search_people_semantic) to the flat legacy profile shape that
+    normalize_search_result() and the Search tab's results table already
+    know how to read (current_employers/past_employers as lists of
+    {name, title, ...}, top-level headline/region/summary, etc.).
+
+    This lets semantic search results flow through the exact same
+    display, selection, CSV export, and pipeline code as the regular
+    filter search — no parallel code path needed.
+
+    Verified response field paths against the live Crustdata docs on
+    2026-07-20 (basic_profile.location.{raw,country}, experience
+    .employment_details.{current,past}, social_handles
+    .professional_network_identifier.profile_url, education.schools,
+    skills.professional_network_skills, professional_network.connections).
+    """
+    if not profile:
+        return {}
+
+    basic = profile.get('basic_profile') or {}
+    location = basic.get('location') or {}
+    employment = (profile.get('experience') or {}).get('employment_details') or {}
+    schools = (profile.get('education') or {}).get('schools') or []
+    skills = (profile.get('skills') or {}).get('professional_network_skills') or []
+    connections = (profile.get('professional_network') or {}).get('connections')
+    social_id = (profile.get('social_handles') or {}).get('professional_network_identifier') or {}
+
+    def _employer_entries(raw_entries):
+        # v2 uses "company_headcount_latest"; the legacy code this profile
+        # feeds into reads "company_headcount_range" — alias it across so
+        # company size still shows up without touching that shared code.
+        out = []
+        for entry in (raw_entries or []):
+            if not isinstance(entry, dict):
+                continue
+            entry = dict(entry)
+            if 'company_headcount_range' not in entry and 'company_headcount_latest' in entry:
+                entry['company_headcount_range'] = entry['company_headcount_latest']
+            out.append(entry)
+        return out
+
+    return {
+        'name': basic.get('name', ''),
+        'headline': basic.get('headline', ''),
+        'region': location.get('raw', ''),
+        'location_country': location.get('country', ''),
+        'summary': basic.get('summary', ''),
+        'flagship_profile_url': social_id.get('profile_url'),
+        'current_employers': _employer_entries(employment.get('current')),
+        'past_employers': _employer_entries(employment.get('past')),
+        'skills': skills,
+        'num_of_connections': connections,
+        'years_of_experience_raw': profile.get('years_of_experience_raw'),
+        'all_schools': [
+            s.get('school') for s in schools if isinstance(s, dict) and s.get('school')
+        ],
+        'crustdata_person_id': profile.get('crustdata_person_id'),
+        # Crustdata's relevance tier for this result: strong/possible/weak.
+        # Not part of the legacy shape — carried through as an extra field
+        # so the results table can show it.
+        '_fit': profile.get('fit', ''),
     }
 
 
@@ -1339,13 +1549,16 @@ __all__ = [
     'SENIORITY_LEVELS',
     'HEADCOUNT_RANGES',
     'CREDITS_PER_100_RESULTS',
+    'CREDITS_PER_RESULT_SEMANTIC',
     # Main functions
     'search_people_db',
     'build_filters',
     'check_credits',
+    'search_people_semantic',
     # Normalization
     'normalize_search_result',
     'normalize_search_results_to_df',
+    'semantic_profile_to_legacy_shape',
     # Usage tracking
     'log_search_usage',
     # AI expansion

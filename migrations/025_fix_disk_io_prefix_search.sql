@@ -26,6 +26,19 @@
 -- CONCURRENTLY avoids taking a write lock during the build/drop.
 --
 -- Idempotent: IF NOT EXISTS / IF EXISTS throughout.
+--
+-- *** DO NOT RUN THIS FILE AS ONE PASTED BLOCK / ONE TRANSACTION. ***
+-- CONCURRENTLY cannot run inside a transaction — Postgres rejects it with
+-- "CREATE INDEX CONCURRENTLY cannot run inside a transaction block". Any tool
+-- that submits this whole file as a single statement or wraps it in
+-- BEGIN...COMMIT (a naive migration runner, or pasting the whole file into a
+-- SQL editor that auto-wraps) will fail and silently apply NONE of the
+-- statements below. Each statement below must be run separately, with
+-- autocommit on (Supabase SQL Editor's default "Run" behaviour is fine one
+-- statement at a time; so is `psql -f` with default autocommit; this repo's
+-- db_migrations.py runner does not yet execute CONCURRENTLY-safe statement-
+-- by-statement, so this migration must be applied manually, one statement at
+-- a time, until that runner is updated to support it).
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_profiles_linkedin_url_pattern
   ON public.profiles (linkedin_url text_pattern_ops);

@@ -1008,6 +1008,23 @@ def prepare_df_for_export(df: pd.DataFrame) -> pd.DataFrame:
     return blank_tenure_sentinel(out)
 
 
+def build_full_details_export_df(raw_profiles: list) -> pd.DataFrame:
+    """Build the export-ready DataFrame for the Database tab's full-details CSV.
+
+    Takes profiles that were fetched WITH raw_data (so ``summary`` and the full
+    ``past_positions`` job-description text are populated) and runs them through
+    the same ``profiles_to_dataframe`` -> ``prepare_df_for_export`` composition
+    every other CSV export uses, so the column ordering stays consistent.
+
+    Pure/transient by design: it returns a fresh DataFrame and never touches
+    session state or the shared listing — the caller stashes only the resulting
+    CSV bytes, not this DataFrame or the raw profile dicts.
+    """
+    from db import profiles_to_dataframe
+    df = profiles_to_dataframe(raw_profiles)
+    return prepare_df_for_export(df)
+
+
 # ===== Session Persistence =====
 # On Streamlit Cloud, use /tmp which is writable (but ephemeral across reboots)
 # Locally, use .sessions in app directory
@@ -11440,7 +11457,7 @@ with tab_database:
                                 st.rerun()
 
                     # Action buttons
-                    btn_col1, btn_col2 = st.columns(2)
+                    btn_col1, btn_col2, btn_col3 = st.columns(3)
                     with btn_col1:
                         export_filtered_df = prepare_df_for_export(filtered_df)
                         st.download_button(
@@ -11450,6 +11467,52 @@ with tab_database:
                             "text/csv",
                             key="db_download_btn"
                         )
+                    with btn_col3:
+                        # Opt-in full-details export. The on-screen listing never
+                        # loads raw_data (kept lightweight for large lists), so the
+                        # normal CSV above is missing summary + job descriptions.
+                        # Only on click do we fetch raw_data for the FILTERED rows,
+                        # build the CSV, and stash ONLY the CSV bytes (never the raw
+                        # profile dicts) — so the persistent listing stays lean.
+                        if len(filtered_df) > 0:
+                            if st.button(
+                                f"📄 Full Details CSV ({len(filtered_df)})",
+                                key="db_full_details_btn"
+                            ):
+                                urls = filtered_df['linkedin_url'].tolist()
+                                with st.spinner(f"Fetching full details for {len(urls)} profiles..."):
+                                    profiles_with_raw = get_profiles_by_urls(db_client, urls, include_raw_data=True)
+                                if profiles_with_raw:
+                                    export_df = build_full_details_export_df(profiles_with_raw)
+                                    st.session_state['db_full_details_csv'] = export_df.to_csv(index=False).encode('utf-8-sig')
+                                    # Fingerprint the exact filtered set this CSV covers,
+                                    # so the download button below hides itself instead
+                                    # of silently offering a stale file once the user
+                                    # changes filters (a different row count/set).
+                                    st.session_state['db_full_details_csv_urls'] = frozenset(urls)
+                                    st.rerun()
+                                else:
+                                    st.warning("Could not load full details for these profiles.")
+                            st.caption(
+                                "Includes summary + full job descriptions. Pulls raw data "
+                                "live, so a large filtered set can take a bit longer."
+                            )
+                            # After the rerun, offer the prepared CSV for download — but
+                            # only while it still matches the current filtered set. If the
+                            # user changed filters since generating it, hide it rather than
+                            # offer a CSV for the wrong people.
+                            _fd_current_urls = frozenset(filtered_df['linkedin_url'].tolist())
+                            if (
+                                st.session_state.get('db_full_details_csv') is not None
+                                and st.session_state.get('db_full_details_csv_urls') == _fd_current_urls
+                            ):
+                                st.download_button(
+                                    "⬇️ Download full details",
+                                    st.session_state['db_full_details_csv'],
+                                    "database_full_details.csv",
+                                    "text/csv",
+                                    key="db_full_details_download_btn"
+                                )
                     with btn_col2:
                         if len(filtered_df) > 0:
                             if st.button(f"Send {len(filtered_df)} to Filter", key="db_to_filter_btn", type="primary"):

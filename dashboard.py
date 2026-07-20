@@ -128,6 +128,8 @@ try:
         normalize_search_results_to_df,
         check_credits as check_crustdata_credits,
         expand_variations,
+        search_people_semantic,
+        semantic_profile_to_legacy_shape,
         SENIORITY_LEVELS,
         HEADCOUNT_RANGES,
         FUNCTION_CATEGORIES,
@@ -5533,6 +5535,138 @@ with tab_search:
                         if _meta:
                             st.caption(" · ".join(_meta))
 
+        # ===== Search by description (beta) =====
+        # Crustdata's newer natural-language search: type a plain description
+        # instead of filling in filters, and get people ranked by how well
+        # their whole profile matches. Feeds the exact same results table /
+        # selection / CSV export / "add to pipeline" code as the regular
+        # filter search below, via semantic_profile_to_legacy_shape().
+        with st.expander("🔍 Search by description (beta)", expanded=False):
+            st.caption(
+                "Type who you're looking for in plain language — e.g. \"founding "
+                "engineers at developer-tools startups in Israel\" — instead of "
+                "filling in the filters below. Crustdata ranks people by how well "
+                "they match. This is a new, beta feature of Crustdata, so quality "
+                "can vary — each result costs the same credits as a regular search "
+                "(0.03 credits per result)."
+            )
+            semantic_query = st.text_area(
+                "Describe who you're looking for",
+                key="crust_semantic_query",
+                placeholder="e.g. senior backend engineers with Kubernetes experience in Tel Aviv",
+                height=80,
+            )
+            sem_col1, sem_col2 = st.columns([1, 3])
+            with sem_col1:
+                semantic_limit = st.number_input(
+                    "Results", min_value=5, max_value=100, value=20, step=5,
+                    key="crust_semantic_limit",
+                    help="Max 100 per search (Crustdata beta limit).",
+                )
+            with sem_col2:
+                st.write("")  # vertical spacer to align button with the number input
+                semantic_submitted = st.button(
+                    "Search by description", key="crust_semantic_search_btn",
+                )
+
+            if semantic_submitted:
+                if not semantic_query or not semantic_query.strip():
+                    st.warning("Type a description first.")
+                else:
+                    try:
+                        sem_progress = st.empty()
+                        sem_progress.info("Searching Crustdata by description...")
+                        sem_results = search_people_semantic(
+                            semantic_query.strip(),
+                            limit=int(semantic_limit),
+                            api_key=api_key,
+                        )
+                        sem_shimmed = [
+                            semantic_profile_to_legacy_shape(p)
+                            for p in (sem_results.get("profiles") or [])
+                        ]
+
+                        # Apply the same past-candidates / blacklist / not-relevant
+                        # exclusions the filter search applies, so description
+                        # search doesn't resurface people already ruled out.
+                        _sem_pc_names = {
+                            str(n).lower().strip()
+                            for n in (st.session_state.get('past_candidates_names_for_search') or [])
+                        }
+                        # The filter search excludes these URLs server-side (exclude_profiles);
+                        # search_people_semantic has no equivalent param, so past candidates
+                        # known only by URL (no matching name) must be filtered here too.
+                        _sem_pc_urls = {
+                            normalize_linkedin_url(u)
+                            for u in (st.session_state.get('past_candidates_urls_for_search') or [])
+                            if u
+                        }
+                        _sem_pc_urls.discard(None)
+                        _sem_bl = [
+                            c for c in (st.session_state.get('blacklist_for_search') or [])
+                            if c and str(c).strip() and len(str(c).strip()) >= 3
+                        ]
+                        _sem_nr = [
+                            c for c in (st.session_state.get('nr_for_search') or [])
+                            if c and str(c).strip() and len(str(c).strip()) >= 3
+                        ]
+
+                        def _sem_name_of(p):
+                            n = str(p.get('name') or '').lower().strip()
+                            return ' '.join(re.sub(r'[^\w\s]', '', n).split())
+
+                        def _sem_url_of(p):
+                            raw = p.get('flagship_profile_url')
+                            return normalize_linkedin_url(raw) if raw else None
+
+                        def _sem_company_of(p):
+                            emp = pick_current_employer(p.get('current_employers'))
+                            return (emp.get('name') or '') if emp else ''
+
+                        _sem_removed = 0
+                        _sem_clean = []
+                        for p in sem_shimmed:
+                            if not p:
+                                continue
+                            if _sem_pc_names and _sem_name_of(p) in _sem_pc_names:
+                                _sem_removed += 1
+                                continue
+                            if _sem_pc_urls and _sem_url_of(p) in _sem_pc_urls:
+                                _sem_removed += 1
+                                continue
+                            _sem_co = _sem_company_of(p)
+                            if _sem_co and _sem_bl and _company_matches_filter_list(_sem_co, _sem_bl):
+                                _sem_removed += 1
+                                continue
+                            if _sem_co and _sem_nr and _company_matches_filter_list(_sem_co, _sem_nr):
+                                _sem_removed += 1
+                                continue
+                            _sem_clean.append(p)
+
+                        st.session_state['crustdata_search_results'] = _sem_clean
+                        st.session_state['crustdata_search_cursor'] = sem_results.get('cursor')
+                        st.session_state['crustdata_search_total'] = sem_results.get('total_count', len(_sem_clean))
+                        st.session_state['crustdata_search_credits_used'] = sem_results.get('credits_used', 0)
+                        st.session_state['crustdata_search_selected'] = list(range(len(_sem_clean)))
+                        # Tells Load More which endpoint/cursor pairing to use — the cursor
+                        # above comes from the semantic endpoint, not the filter-search one,
+                        # so Load More must keep calling search_people_semantic with it.
+                        st.session_state['crustdata_search_mode'] = 'semantic'
+                        st.session_state['_last_semantic_params'] = {
+                            'query': semantic_query.strip(),
+                            'limit': int(semantic_limit),
+                        }
+                        _sem_note = f" ({_sem_removed} already-seen removed)" if _sem_removed else ""
+                        st.session_state['_search_loaded_msg'] = (
+                            f"Found **{len(_sem_clean):,}** profiles matching your description{_sem_note}. "
+                            f"Read the **Fit** column (strong/possible/weak) — description search always "
+                            f"returns results, so a low count doesn't mean poor quality and a high count "
+                            f"doesn't guarantee good matches."
+                        )
+                        st.rerun()
+                    except Exception as _sem_e:
+                        st.error(f"Description search failed: {str(_sem_e)[:300]}")
+
         st.markdown("##### Search Filters")
 
         # Row 1: Title, Company, Location (each with AI button below)
@@ -5798,7 +5932,8 @@ with tab_search:
             keys_to_clear = [
                 'crustdata_search_results', 'crustdata_search_cursor',
                 'crustdata_search_total', 'crustdata_search_selected',
-                'crustdata_search_credits_used',
+                'crustdata_search_credits_used', 'crustdata_search_mode',
+                '_last_semantic_params',
                 'crust_search_exact_company', 'crust_search_function', 'crust_search_industry',
                 'crust_search_sort', 'crust_search_country', 'crust_search_continent',
                 'crust_search_geo_city', 'crust_search_geo_radius', 'crust_search_min_connections',
@@ -6028,6 +6163,9 @@ with tab_search:
                         st.session_state['crustdata_search_total'] = total_count
                         st.session_state['crustdata_search_credits_used'] = total_credits
                         st.session_state['crustdata_search_selected'] = list(range(loaded_count))
+                        # Tells Load More which endpoint/cursor pairing to use — this is a
+                        # filter search, not a description (semantic) search.
+                        st.session_state['crustdata_search_mode'] = 'filter'
                         # Persist effective filter values so Load More uses the same payload
                         st.session_state['_last_search_params'] = {
                             'title': effective_title,
@@ -6254,6 +6392,7 @@ with tab_search:
                 display_data.append({
                     "idx": i,
                     "Select": i in st.session_state.get('crustdata_search_selected', []),
+                    "Fit": profile.get("_fit", ""),
                     "Name": profile.get("name", ""),
                     "Headline": headline[:60] + "..." if len(headline) > 60 else headline,
                     "Title": current_title,
@@ -6279,6 +6418,13 @@ with tab_search:
             # Display with data_editor for selection
             _compact_cols = ["Select", "Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn"]
             _all_cols = ["Select", "Name", "Title", "Headline", "Company", "All Employers", "Location", "Country", "Seniority", "Function", "Industry", "Size", "Exp", "Connections", "All Skills", "Summary", "Work History", "LinkedIn"]
+            # "Fit" (Crustdata's relevance tier: strong/possible/weak) is only
+            # populated for description-search results — only show the column
+            # when at least one row actually has a value, so filter search
+            # results don't display an all-blank column.
+            if display_df.get("Fit", pd.Series(dtype=str)).astype(str).str.strip().any():
+                _compact_cols.insert(1, "Fit")
+                _all_cols.insert(1, "Fit")
             _show_cols = _all_cols if show_all_cols else _compact_cols
 
             edited_df = st.data_editor(
@@ -6287,6 +6433,7 @@ with tab_search:
                 use_container_width=True,
                 column_config={
                     "Select": st.column_config.CheckboxColumn("Select", default=True),
+                    "Fit": st.column_config.TextColumn("Fit", width="small", help="Crustdata's relevance tier for description search: strong/possible/weak"),
                     "Name": st.column_config.TextColumn("Name", width="small"),
                     "Title": st.column_config.TextColumn("Title", width="small"),
                     "Headline": st.column_config.TextColumn("Headline", width="medium"),
@@ -6306,7 +6453,7 @@ with tab_search:
                     "Summary": st.column_config.TextColumn("Summary", width="large"),
                     "Work History": st.column_config.TextColumn("Work History", width="large"),
                 },
-                disabled=["Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn",
+                disabled=["Fit", "Name", "Title", "Headline", "Company", "Location", "Size", "Exp", "Skills", "LinkedIn",
                           "Country", "Seniority", "Function", "Industry", "Connections", "All Skills", "All Employers", "Summary", "Work History"],
                 key="crust_results_editor"
             )
@@ -6356,43 +6503,91 @@ with tab_search:
                     if st.button("Load More", use_container_width=True, key="crust_load_more"):
                         with st.spinner("Loading more results..."):
                             try:
-                                # Use persisted effective params from initial search so pagination
-                                # uses the same filters including AI-expanded values, not raw widgets.
+                                # Which search produced the current results decides which
+                                # endpoint/cursor pairing Load More must keep using — the
+                                # semantic endpoint's cursor is not valid on the filter
+                                # endpoint (and vice versa).
+                                _lm_mode = st.session_state.get('crustdata_search_mode', 'filter')
                                 _lm_p = st.session_state.get('_last_search_params', {})
-                                filters = build_search_filters(
-                                    title=_lm_p.get('title'),
-                                    company=_lm_p.get('company'),
-                                    location=_lm_p.get('location'),
-                                    seniority=_lm_p.get('seniority'),
-                                    headcount=_lm_p.get('headcount'),
-                                    experience_min=_lm_p.get('experience_min'),
-                                    experience_max=_lm_p.get('experience_max'),
-                                    skill_groups=_lm_p.get('skill_groups'),
-                                    keywords=_lm_p.get('keywords'),
-                                    past_companies=_lm_p.get('past_companies'),
-                                    past_titles=_lm_p.get('past_titles'),
-                                    school=_lm_p.get('school'),
-                                    recently_changed_jobs=_lm_p.get('recently_changed_jobs'),
-                                    has_verified_email=_lm_p.get('has_verified_email'),
-                                    function_categories=_lm_p.get('function_categories'),
-                                    industries=_lm_p.get('industries'),
-                                    country=_lm_p.get('country'),
-                                    continent=_lm_p.get('continent'),
-                                    geo_city=_lm_p.get('geo_city'),
-                                    geo_radius_km=_lm_p.get('geo_radius_km'),
-                                    min_connections=_lm_p.get('min_connections'),
-                                    exact_company=_lm_p.get('exact_company', False),
-                                    # not_relevant and blacklist applied client-side in _lm_clean()
-                                )
 
-                                more_results = search_people_db(
-                                    filters,
-                                    limit=_lm_p.get('limit', 100),
-                                    cursor=cursor,
-                                    sorts=_lm_p.get('sorts'),
-                                    api_key=api_key,
-                                    exclude_profiles=_lm_p.get('past_candidates_urls_for_search') or None,
-                                )
+                                if _lm_mode == 'semantic':
+                                    _lm_sem_p = st.session_state.get('_last_semantic_params', {})
+
+                                    def _lm_fetch(cursor_val):
+                                        raw = search_people_semantic(
+                                            _lm_sem_p.get('query', ''),
+                                            limit=_lm_sem_p.get('limit', 20),
+                                            cursor=cursor_val,
+                                            api_key=api_key,
+                                        )
+                                        raw['profiles'] = [
+                                            semantic_profile_to_legacy_shape(p)
+                                            for p in (raw.get('profiles') or [])
+                                        ]
+                                        return raw
+
+                                    # Semantic search has no server-side exclude_profiles
+                                    # param wired up (see search_people_semantic) — exclusion
+                                    # is entirely client-side here, same as the initial
+                                    # description search above.
+                                    _lm_names_set = {
+                                        str(n).lower().strip()
+                                        for n in (st.session_state.get('past_candidates_names_for_search') or [])
+                                    }
+                                    _lm_pc_urls = {
+                                        normalize_linkedin_url(u)
+                                        for u in (st.session_state.get('past_candidates_urls_for_search') or [])
+                                        if u
+                                    }
+                                    _lm_pc_urls.discard(None)
+                                    _lm_bl_raw = [c for c in (st.session_state.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+                                    _lm_nr_raw = [c for c in (st.session_state.get('nr_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+                                else:
+                                    # Use persisted effective params from initial search so pagination
+                                    # uses the same filters including AI-expanded values, not raw widgets.
+                                    filters = build_search_filters(
+                                        title=_lm_p.get('title'),
+                                        company=_lm_p.get('company'),
+                                        location=_lm_p.get('location'),
+                                        seniority=_lm_p.get('seniority'),
+                                        headcount=_lm_p.get('headcount'),
+                                        experience_min=_lm_p.get('experience_min'),
+                                        experience_max=_lm_p.get('experience_max'),
+                                        skill_groups=_lm_p.get('skill_groups'),
+                                        keywords=_lm_p.get('keywords'),
+                                        past_companies=_lm_p.get('past_companies'),
+                                        past_titles=_lm_p.get('past_titles'),
+                                        school=_lm_p.get('school'),
+                                        recently_changed_jobs=_lm_p.get('recently_changed_jobs'),
+                                        has_verified_email=_lm_p.get('has_verified_email'),
+                                        function_categories=_lm_p.get('function_categories'),
+                                        industries=_lm_p.get('industries'),
+                                        country=_lm_p.get('country'),
+                                        continent=_lm_p.get('continent'),
+                                        geo_city=_lm_p.get('geo_city'),
+                                        geo_radius_km=_lm_p.get('geo_radius_km'),
+                                        min_connections=_lm_p.get('min_connections'),
+                                        exact_company=_lm_p.get('exact_company', False),
+                                        # not_relevant and blacklist applied client-side in _lm_clean()
+                                    )
+
+                                    def _lm_fetch(cursor_val):
+                                        return search_people_db(
+                                            filters,
+                                            limit=_lm_p.get('limit', 100),
+                                            cursor=cursor_val,
+                                            sorts=_lm_p.get('sorts'),
+                                            api_key=api_key,
+                                            exclude_profiles=_lm_p.get('past_candidates_urls_for_search') or None,
+                                        )
+
+                                    _lm_names_set = set(_lm_p.get('past_candidates_names_for_search') or [])
+                                    # Already excluded server-side via exclude_profiles above.
+                                    _lm_pc_urls = set()
+                                    _lm_bl_raw = [c for c in (_lm_p.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+                                    _lm_nr_raw = [c for c in (_lm_p.get('nr_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+
+                                more_results = _lm_fetch(cursor)
 
                                 # Post-filter helpers (same exclusions as original search)
                                 def _lm_norm_name(n):
@@ -6401,13 +6596,17 @@ with tab_search:
                                     n = re.sub(r'[^\w\s]', '', n)
                                     return n.strip()
 
-                                _lm_names_set = set(_lm_p.get('past_candidates_names_for_search') or [])
-                                _lm_bl_raw = [c for c in (_lm_p.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
-                                _lm_nr_raw = [c for c in (_lm_p.get('nr_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
-
                                 def _lm_get_co(p):
                                     emp = pick_current_employer(p.get('current_employers'))
                                     return (emp.get('employer_name') or emp.get('name', '')) if emp else ''
+
+                                def _lm_url_of(p):
+                                    raw = (
+                                        p.get('flagship_profile_url')
+                                        or p.get('linkedin_flagship_url')
+                                        or p.get('linkedin_profile_url')
+                                    )
+                                    return normalize_linkedin_url(raw) if raw else None
 
                                 def _lm_is_excluded(p):
                                     co = _lm_get_co(p)
@@ -6421,6 +6620,8 @@ with tab_search:
                                     out = profiles
                                     if _lm_names_set:
                                         out = [p for p in out if _lm_norm_name(p.get('name') or f"{p.get('first_name','')} {p.get('last_name','')}") not in _lm_names_set]
+                                    if _lm_pc_urls:
+                                        out = [p for p in out if _lm_url_of(p) not in _lm_pc_urls]
                                     if _lm_bl_raw or _lm_nr_raw:
                                         out = [p for p in out if not _lm_is_excluded(p)]
                                     return out
@@ -6431,14 +6632,7 @@ with tab_search:
                                 next_cursor = more_results.get('cursor')
                                 total_lm_credits = more_results.get('credits_used', 0)
                                 while not new_profiles and next_cursor:
-                                    extra = search_people_db(
-                                        filters,
-                                        limit=_lm_p.get('limit', 100),
-                                        cursor=next_cursor,
-                                        sorts=_lm_p.get('sorts'),
-                                        api_key=api_key,
-                                        exclude_profiles=_lm_p.get('past_candidates_urls_for_search') or None,
-                                    )
+                                    extra = _lm_fetch(next_cursor)
                                     new_profiles = _lm_clean(extra.get('profiles') or [])
                                     next_cursor = extra.get('cursor')
                                     total_lm_credits += extra.get('credits_used', 0)

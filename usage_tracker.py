@@ -18,6 +18,13 @@ CRUSTDATA_PRICING = {
     'credits_per_profile': 3,
 }
 
+# New v2025-11-01 batch-enrich pricing (POST /batch/person/enrich): additive,
+# base profile = 1 credit (vs. 3 credits/profile for the legacy enrich
+# endpoint above). Verified against docs.crustdata.com 2026-07-20.
+CRUSTDATA_PRICING_V2_ENRICH = {
+    'credits_per_profile_base': 1,
+}
+
 # OpenAI pricing (per 1M tokens)
 OPENAI_PRICING = {
     'gpt-4.1-mini': {
@@ -136,6 +143,37 @@ class UsageTracker:
             error_message=error_message,
             response_time_ms=response_time_ms,
             metadata={'profiles_enriched': profiles_enriched}
+        )
+
+    def log_crustdata_batch_enrich(
+        self,
+        requested: int,
+        fulfilled: int,
+        status: str = 'success',
+        error_message: str = None,
+        response_time_ms: int = None,
+    ) -> Optional[dict]:
+        """Log usage for the new v2025-11-01 batch-enrich endpoint
+        (POST /batch/person/enrich) — additive pricing, base profile = 1
+        credit, distinct from log_crustdata()'s 3-credits/profile legacy
+        rate. Do NOT reuse log_crustdata() for this; it hardcodes the wrong
+        per-profile credit cost.
+
+        Billed on `fulfilled`, not `requested` — Crustdata's global no-charge-
+        on-no-match policy means unmatched profiles cost nothing.
+        """
+        credits = fulfilled * CRUSTDATA_PRICING_V2_ENRICH['credits_per_profile_base']
+        cost_usd = credits * CRUSTDATA_PRICING['cost_per_credit']
+        return self.log_usage(
+            provider='crustdata',
+            operation='batch_enrich',
+            request_count=1,
+            credits_used=credits,
+            cost_usd=cost_usd,
+            status=status,
+            error_message=error_message,
+            response_time_ms=response_time_ms,
+            metadata={'requested': requested, 'fulfilled': fulfilled, 'unmatched': requested - fulfilled},
         )
 
     def log_salesql(

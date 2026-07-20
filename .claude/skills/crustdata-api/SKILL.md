@@ -4,7 +4,29 @@ Reference guide for Crustdata API integration in SourcingX. Auto-consult when wo
 
 ---
 
-## People Database Search API
+## ⚠️ New versioned API (v2025-11-01) — migration in progress, added 2026-07-20
+
+Everything below this notice documents the **legacy** endpoints (`/screener/*`, `Token` auth) that
+`crustdata_search.py` and `dashboard.py`'s `enrich_batch()` currently use — still accurate for the
+current code. Crustdata has since launched a new versioned API (`Bearer` auth +
+`x-api-version: 2025-11-01` header, new field-nesting). Two things to know before building the
+new auto-enrichment step for the "new search returns thin profiles" migration:
+
+- **New search** (`POST /person/search`, what SourceNx will move to) stops returning `skills` and
+  `summary` in results — they're filterable but not returned. That's the whole reason an
+  enrichment step is needed before AI screening.
+- **New batch enrich** (`POST /batch/person/enrich`) is the fix: submit up to **10,000** LinkedIn
+  URLs in one async job (not 25 like the old sync enrich), poll `/batch/{batch_id}` (free) for
+  completion, download one JSON record per profile. Base profile = **1 credit**, covers
+  `basic_profile` (includes `summary`), `experience`, `education`, `skills`,
+  `professional_network` — but you must explicitly pass `fields` for those sections since the
+  default response is only `basic_profile` + `social_handles`. `chunk_size` (10–1000, default 100)
+  is optional. Full detail in the unscoped `crustdata-api` skill (`~/.claude/skills/crustdata-api/SKILL.md`)
+  under "Person Enrich (NEW)", verified live against docs.crustdata.com 2026-07-20.
+
+---
+
+## People Database Search API (LEGACY — current production code)
 
 Search 100M+ professionals by name, company, title, location, skills, experience, and more.
 

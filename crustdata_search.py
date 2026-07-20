@@ -1162,8 +1162,16 @@ def search_people_db_v2(
             body["post_processing"] = {"exclude_profiles": clean_urls}
 
     if sorts:
+        # The sort field needs the SAME column -> field remap filters get —
+        # not just a key rename. Sending an unmapped legacy name like
+        # `num_of_connections` (the dashboard's default sort) as a v2 `field`
+        # value would sort wrong or get rejected outright (Codex review,
+        # 2026-07-20).
         body["sorts"] = [
-            {"field": s.get("field") or s.get("column"), "order": s.get("order")}
+            {
+                "field": _LEGACY_TO_V2_FIELD.get(s.get("field") or s.get("column"), s.get("field") or s.get("column")),
+                "order": s.get("order"),
+            }
             for s in sorts
         ]
 

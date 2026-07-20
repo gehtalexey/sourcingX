@@ -177,6 +177,17 @@ class TestSearchV2Request:
             body = mock_post.call_args.kwargs["json"]
             assert body["sorts"] == [{"field": "years_of_experience_raw", "order": "desc"}]
 
+    def test_sort_field_value_is_remapped_not_just_the_key(self):
+        """Regression test for a Codex-caught bug (2026-07-20): renaming
+        `column` -> `field` isn't enough — the VALUE must go through the same
+        _LEGACY_TO_V2_FIELD map filters use. The dashboard's default sort is
+        `num_of_connections`, which has no v2 field of that name."""
+        with patch("crustdata_search.requests.post") as mock_post:
+            mock_post.return_value = _mock_response(json_data={"profiles": [], "total_count": 0})
+            search_people_db_v2({}, sorts=[{"column": "num_of_connections", "order": "desc"}], api_key="test-key")
+            body = mock_post.call_args.kwargs["json"]
+            assert body["sorts"] == [{"field": "professional_network.connections", "order": "desc"}]
+
     def test_exclude_profiles_normalized_under_post_processing(self):
         with patch("crustdata_search.requests.post") as mock_post:
             mock_post.return_value = _mock_response(json_data={"profiles": [], "total_count": 0})

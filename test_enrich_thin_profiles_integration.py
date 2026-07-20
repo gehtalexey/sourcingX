@@ -185,6 +185,33 @@ class TestEnrichThinProfilesForBatch:
         assert called["n"] == 0
         assert stats["thin_found"] == 0
 
+    def test_nan_skills_and_summary_still_counted_as_thin(self, monkeypatch):
+        """Regression test for a Codex-caught bug (2026-07-20): CSV/DataFrame
+        rows often carry literal float('nan') for a missing string column.
+        bool(float('nan')) is True in Python, so a naive truthiness check on
+        the flat fallback would treat a genuinely-empty skills/summary as
+        present and skip enrichment — exactly backwards."""
+        import math
+
+        nan_profile = {
+            "linkedin_url": "https://www.linkedin.com/in/nanrow",
+            "name": "Nan Row",
+            "skills": math.nan,
+            "summary": math.nan,
+        }
+        captured = {}
+
+        def fake_batch_enrich(urls, api_key=None):
+            captured["urls"] = urls
+            return {"by_url": {}, "requested": 1, "fulfilled": 0, "unmatched": urls, "credits_used": 0, "batch_ids": []}
+
+        monkeypatch.setattr(dashboard, "batch_enrich_profiles", fake_batch_enrich)
+
+        stats = dashboard.enrich_thin_profiles_for_batch([nan_profile], api_key="test-key", db_client=None)
+
+        assert captured.get("urls") == ["https://www.linkedin.com/in/nanrow"]
+        assert stats["thin_found"] == 1
+
     def test_missing_either_skill_or_summary_alone_is_not_thin(self):
         """Alexey's call, 2026-07-20: only enrich when BOTH are missing, not
         just one — cheaper than an OR check."""

@@ -45,6 +45,7 @@ from normalizers import (
     profiles_to_display_df,
     parse_duration,
     clean_dict,
+    clean_value,
     pick_current_employer,
 )
 from helpers import format_past_positions, format_education
@@ -4915,9 +4916,15 @@ def enrich_thin_profiles_for_batch(profiles: list, api_key: str, db_client=None,
         # Without this, a profile with no raw blob but perfectly usable flat
         # fields gets misclassified as thin and enriched needlessly (Codex
         # review, 2026-07-20).
+        # clean_value() coerces pandas/CSV NaN to None — a DataFrame-derived
+        # profile's missing skills/summary column is often literal
+        # float('nan'), and bool(float('nan')) is True in Python, so a raw
+        # truthiness check would treat a genuinely-missing value as present
+        # and skip enrichment for a profile that actually needs it (Codex
+        # review, 2026-07-20).
         raw = _ensure_raw_dict(p.get('raw_crustdata') or p.get('raw_data'))
-        skills = raw.get('skills') or p.get('skills')
-        summary = raw.get('summary') or p.get('summary')
+        skills = clean_value(raw.get('skills')) or clean_value(p.get('skills'))
+        summary = clean_value(raw.get('summary')) or clean_value(p.get('summary'))
         if not skills and not summary:
             thin_profiles.append(p)
 

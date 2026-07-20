@@ -1048,7 +1048,13 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
             - skills (comma-separated string)
             - years_experience
             - _source = 'crustdata_search'
-            - _needs_enrichment = False  (search response is complete with compact=false)
+            - _needs_enrichment = False for a normal filter search (compact=false
+              returns the full profile). True when the input carries the
+              ``_semantic_incomplete`` marker — set by
+              semantic_profile_to_legacy_shape() because Crustdata's
+              description-search endpoint doesn't return skills, summary, or
+              years of experience, so those rows still need a real enrichment
+              pass before screening.
     """
     if not profile:
         return None
@@ -1212,7 +1218,9 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
         'connections_count': connections_count,
         # Metadata
         '_source': 'crustdata_search',
-        '_needs_enrichment': False,  # compact=false returns full profile
+        # Only description-search rows (marked by the shim below) still need
+        # enrichment — a normal filter search already returns the full profile.
+        '_needs_enrichment': bool(profile.get('_semantic_incomplete', False)),
         '_raw_search_result': profile,  # Keep raw for debugging
     }
 
@@ -1228,6 +1236,15 @@ def semantic_profile_to_legacy_shape(profile: Dict[str, Any]) -> Dict[str, Any]:
     This lets semantic search results flow through the exact same
     display, selection, CSV export, and pipeline code as the regular
     filter search — no parallel code path needed.
+
+    Crustdata's description-search endpoint doesn't return skills, summary,
+    or years of experience (verified live 2026-07-20 — confirmed empty/absent
+    in a real response), and the AI screening prompt treats missing skills as
+    a hard FAIL rather than "unknown". The shim marks its output with
+    ``_semantic_incomplete: True`` so normalize_search_result() sets
+    ``_needs_enrichment: True`` on these rows — that's what makes them show
+    up in the normal "1. Load" tab enrichment queue instead of silently
+    heading into AI Screen with blank fields.
 
     Verified response field paths against the live Crustdata docs on
     2026-07-20 (basic_profile.location.{raw,country}, experience
@@ -1288,6 +1305,9 @@ def semantic_profile_to_legacy_shape(profile: Dict[str, Any]) -> Dict[str, Any]:
         # way normalize_search_result() keeps _raw_search_result for the
         # regular filter search.
         '_raw_semantic_result': profile,
+        # Tells normalize_search_result() this row is missing skills/summary/
+        # experience and needs real enrichment before AI Screen sees it.
+        '_semantic_incomplete': True,
     }
 
 

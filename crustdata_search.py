@@ -26,6 +26,7 @@ Usage:
     df = normalize_search_results_to_df(results['profiles'])
 """
 
+import gzip
 import json
 import time
 import requests
@@ -63,6 +64,24 @@ CRUSTDATA_CREDITS_ENDPOINT = "https://api.crustdata.com/account/credits"
 CRUSTDATA_SEMANTIC_SEARCH_ENDPOINT = "https://api.crustdata.com/person/search"
 CRUSTDATA_API_VERSION = "2025-11-01"
 CREDITS_PER_RESULT_SEMANTIC = 0.03
+
+# Async batch enrichment (v2025-11-01) — fills in skills/summary/employment
+# history for profiles the description-search endpoint above can't return
+# them for. Verified live against docs.crustdata.com 2026-07-20: up to
+# 10,000 LinkedIn URLs per job, base profile = 1 credit (additive pricing,
+# same as the sync /person/enrich — see CREDITS_PER_ENRICH_PROFILE_BASE
+# below). Note: the filter-based search (search_people_db, compact=false)
+# already returns full profiles and stays the default search until
+# Crustdata retires the legacy endpoint — this enrichment step only ever
+# fires for profiles that come back thin, i.e. today, description-search
+# results.
+CRUSTDATA_BATCH_ENRICH_ENDPOINT = "https://api.crustdata.com/batch/person/enrich"
+CRUSTDATA_BATCH_STATUS_ENDPOINT = "https://api.crustdata.com/batch"  # + f"/{batch_id}"
+BATCH_ENRICH_FIELDS = [
+    "basic_profile", "experience", "education",
+    "skills", "professional_network", "social_handles",
+]
+CREDITS_PER_ENRICH_PROFILE_BASE = 1  # base profile only — no contact/phone/dev-platform requested
 
 # Seniority levels supported by Crustdata.
 # Canonical values verified via crustdata_autocomplete_person on 2026-05-17.
@@ -661,6 +680,16 @@ def build_filters(
     }
 
 
+def _v2_headers(api_key: str) -> Dict[str, str]:
+    """Shared header set for every v2025-11-01 endpoint (Bearer auth + version
+    header — legacy endpoints use `Token` auth and no version header)."""
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "x-api-version": CRUSTDATA_API_VERSION,
+    }
+
+
 # =============================================================================
 # API FUNCTIONS
 # =============================================================================
@@ -961,11 +990,7 @@ def search_people_semantic(
         response = requests.post(
             CRUSTDATA_SEMANTIC_SEARCH_ENDPOINT,
             json=body,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "x-api-version": CRUSTDATA_API_VERSION,
-            },
+            headers=_v2_headers(api_key),
             timeout=60,
         )
 
@@ -1018,6 +1043,352 @@ def search_people_semantic(
             "Crustdata",
             message=f"Connection error: {str(e)[:200]}"
         )
+
+
+# =============================================================================
+# BATCH ENRICHMENT (NEW v2025-11-01 API)
+# =============================================================================
+# Fills in skills/summary/employment history for profiles the new search
+# endpoints can't return them for. Async job: submit up to 10,000 LinkedIn
+# URLs, poll for completion, download one JSON record per profile. Base
+# profile = 1 credit (additive pricing, same as sync /person/enrich).
+# Distinct from the legacy enrich_batch() in dashboard.py (25 URLs/call,
+# 3 credits/profile, no rate limiter/retry) — do not confuse the two.
+
+@retry_with_backoff(
+    max_retries=3,
+    base_delay=2.0,
+    retryable_exceptions=(RateLimitError, ServiceUnavailableError, ConnectionError, TimeoutError),
+)
+def submit_batch_enrich(
+    linkedin_urls: List[str],
+    api_key: str = None,
+    chunk_size: int = 100,
+    fields: List[str] = None,
+) -> str:
+    """
+    Submit up to 10,000 LinkedIn profile URLs to POST /batch/person/enrich.
+    Returns the batch_id to poll via get_batch_status().
+
+    Raises ValueError if more than 10,000 URLs are passed — batch_enrich_profiles()
+    is the caller that splits large lists into multiple jobs; call this
+    directly only when you already know you're under the cap.
+    """
+    if not linkedin_urls:
+        raise ValueError("submit_batch_enrich requires at least one LinkedIn URL")
+    if len(linkedin_urls) > 10000:
+        raise ValueError(f"submit_batch_enrich accepts at most 10,000 URLs, got {len(linkedin_urls)}")
+
+    if not api_key:
+        api_key = _load_api_key()
+    limiter = get_rate_limiter('crustdata')
+
+    body = {
+        "professional_network_profile_urls": linkedin_urls,
+        "fields": fields or BATCH_ENRICH_FIELDS,
+        "chunk_size": max(10, min(chunk_size, 1000)),
+    }
+
+    try:
+        limiter.wait_if_needed()
+    except RateLimitExceeded as e:
+        raise RateLimitError("Crustdata", message=str(e))
+
+    try:
+        response = requests.post(
+            CRUSTDATA_BATCH_ENRICH_ENDPOINT,
+            json=body,
+            headers=_v2_headers(api_key),
+            timeout=60,
+        )
+        limiter.record_request()
+
+        if response.status_code == 401:
+            raise AuthenticationError("Crustdata")
+        elif response.status_code == 429:
+            retry_after = response.headers.get('Retry-After')
+            raise RateLimitError(
+                "Crustdata",
+                retry_after=float(retry_after) if retry_after else None
+            )
+        elif response.status_code >= 500:
+            raise ServiceUnavailableError(
+                "Crustdata",
+                status_code=response.status_code,
+                response_body=response.text[:500]
+            )
+        elif response.status_code >= 400:
+            raise ExternalServiceError(
+                "Crustdata",
+                message=f"Batch enrich submit failed: {response.text[:500]}",
+                status_code=response.status_code,
+                response_body=response.text
+            )
+
+        data = response.json()
+        batch_id = data.get("batch_id") or data.get("id")
+        if not batch_id:
+            raise ExternalServiceError(
+                "Crustdata",
+                message=f"Batch enrich submit returned no batch id: {response.text[:300]}"
+            )
+        return batch_id
+
+    except requests.exceptions.Timeout:
+        raise ExternalServiceError(
+            "Crustdata",
+            message="Batch enrich submit timed out",
+            status_code=504
+        )
+    except requests.exceptions.ConnectionError as e:
+        raise ServiceUnavailableError(
+            "Crustdata",
+            message=f"Connection error: {str(e)[:200]}"
+        )
+
+
+@retry_with_backoff(
+    max_retries=3,
+    base_delay=2.0,
+    retryable_exceptions=(RateLimitError, ServiceUnavailableError, ConnectionError, TimeoutError),
+)
+def get_batch_status(batch_id: str, api_key: str = None) -> Dict[str, Any]:
+    """GET /batch/{batch_id}. Free — no credits consumed. Returns the raw
+    status payload (exact key vocabulary not pinned in Crustdata's docs as
+    of 2026-07-20 — _is_batch_terminal()/_download_batch_results() below
+    handle the documented shape defensively)."""
+    if not api_key:
+        api_key = _load_api_key()
+    limiter = get_rate_limiter('crustdata')
+
+    try:
+        limiter.wait_if_needed()
+    except RateLimitExceeded as e:
+        raise RateLimitError("Crustdata", message=str(e))
+
+    try:
+        response = requests.get(
+            f"{CRUSTDATA_BATCH_STATUS_ENDPOINT}/{batch_id}",
+            headers=_v2_headers(api_key),
+            timeout=30,
+        )
+        limiter.record_request()
+
+        if response.status_code == 401:
+            raise AuthenticationError("Crustdata")
+        elif response.status_code == 429:
+            retry_after = response.headers.get('Retry-After')
+            raise RateLimitError(
+                "Crustdata",
+                retry_after=float(retry_after) if retry_after else None
+            )
+        elif response.status_code >= 500:
+            raise ServiceUnavailableError(
+                "Crustdata",
+                status_code=response.status_code,
+                response_body=response.text[:500]
+            )
+        elif response.status_code >= 400:
+            raise ExternalServiceError(
+                "Crustdata",
+                message=f"Batch status check failed: {response.text[:500]}",
+                status_code=response.status_code,
+                response_body=response.text
+            )
+
+        return response.json()
+
+    except requests.exceptions.Timeout:
+        raise ExternalServiceError(
+            "Crustdata",
+            message="Batch status check timed out",
+            status_code=504
+        )
+    except requests.exceptions.ConnectionError as e:
+        raise ServiceUnavailableError(
+            "Crustdata",
+            message=f"Connection error: {str(e)[:200]}"
+        )
+
+
+_BATCH_TERMINAL_SUCCESS = {"completed", "succeeded", "success", "done"}
+_BATCH_TERMINAL_FAILURE = {"failed", "error", "cancelled", "canceled"}
+
+
+def _is_batch_terminal(status_payload: Dict[str, Any]) -> bool:
+    status = str(status_payload.get("status", "")).lower()
+    return status in _BATCH_TERMINAL_SUCCESS or status in _BATCH_TERMINAL_FAILURE
+
+
+def _download_batch_results(status_payload: Dict[str, Any], api_key: str) -> List[Dict[str, Any]]:
+    """Return the list of {original_identifier, internal_id, data} records
+    for a completed batch job. Results may be inline on the status payload
+    (`results`/`data`), or behind one or more download URLs.
+
+    Verified live against a real batch job 2026-07-20 (this shape was
+    guessed/unverified before then — see the corrections below, both
+    confirmed against real API responses, not docs):
+      - The status payload carries BOTH `download_url` (one file) and
+        `download_urls` (a list — larger jobs split into multiple
+        `part-NNN.jsonl.gz` files). Must fetch every URL in `download_urls`
+        when present, not just the singular one, or a large job's later
+        parts get silently dropped.
+      - Each file is gzip-compressed (`Content-Type: application/gzip`,
+        magic bytes `\\x1f\\x8b`) but the server does NOT set the HTTP
+        `Content-Encoding: gzip` header, so `requests` does not
+        auto-decompress it — reading `.text` on the raw response silently
+        returns garbled bytes, every JSON-parse fails, and the whole batch
+        looks like zero matches even when Crustdata successfully enriched
+        everyone. Must gunzip explicitly.
+      - These are presigned S3 URLs (auth is in the query string) — do NOT
+        send our own Bearer header to them; only crustdata.com URLs need it
+        (kept for `results_file_url`/single-file inline compatibility in
+        case a future API version serves an uncompressed file directly
+        from Crustdata itself).
+    """
+    inline = status_payload.get("results") or status_payload.get("data")
+    if isinstance(inline, list):
+        return inline
+
+    download_urls = status_payload.get("download_urls")
+    if not download_urls:
+        single = status_payload.get("download_url") or status_payload.get("results_file_url")
+        download_urls = [single] if single else []
+    if not download_urls:
+        return []
+
+    records = []
+    for download_url in download_urls:
+        if not download_url:
+            continue
+        response = requests.get(
+            download_url,
+            headers=_v2_headers(api_key) if download_url.startswith("https://api.crustdata.com") else None,
+            timeout=120,
+        )
+        response.raise_for_status()
+
+        content = response.content
+        if content[:2] == b"\x1f\x8b":  # gzip magic number
+            content = gzip.decompress(content)
+        text = content.decode("utf-8")
+
+        # One JSON object per line (JSONL).
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return records
+
+
+def batch_enrich_profiles(
+    linkedin_urls: List[str],
+    api_key: str = None,
+    poll_interval_s: float = 5.0,
+    max_wait_s: float = 300.0,
+    chunk_size: int = 100,
+    fields: List[str] = None,
+) -> Dict[str, Any]:
+    """
+    Submit, poll-and-wait, download, and translate a batch enrichment job.
+    This is the function screening calls (via dashboard.py's
+    enrich_thin_profiles_for_batch()) — it never raises on partial no-matches
+    or a poll timeout, since SourcingX's policy is to screen thin profiles
+    anyway rather than block a whole batch over a few unmatched people.
+
+    Splits into multiple <=10,000-URL jobs if linkedin_urls is larger than
+    that (submitted sequentially — in practice a single AI-Screen batch is
+    at most ~50 profiles, so this only matters for very large runs).
+
+    Args:
+        linkedin_urls: Normalized LinkedIn URLs to enrich.
+        poll_interval_s: Seconds between status checks (default 5s — well
+            under the 60 RPM Crustdata rate limit).
+        max_wait_s: Give up waiting on a single job after this many seconds;
+            whatever isn't done yet lands in `unmatched`, not an exception.
+
+    Returns:
+        {
+            "by_url": {<url>: <flat legacy-enrich-shape dict>},
+            "requested": int,
+            "fulfilled": int,
+            "unmatched": [urls...],
+            "credits_used": fulfilled * 1,
+            "batch_ids": [...],
+        }
+    """
+    linkedin_urls = [u for u in (linkedin_urls or []) if u and str(u).strip()]
+    if not linkedin_urls:
+        return {"by_url": {}, "requested": 0, "fulfilled": 0, "unmatched": [], "credits_used": 0, "batch_ids": []}
+
+    if not api_key:
+        api_key = _load_api_key()
+
+    jobs = [linkedin_urls[i:i + 10000] for i in range(0, len(linkedin_urls), 10000)]
+    by_url: Dict[str, Dict[str, Any]] = {}
+    batch_ids: List[str] = []
+
+    for job_urls in jobs:
+        try:
+            batch_id = submit_batch_enrich(job_urls, api_key=api_key, chunk_size=chunk_size, fields=fields)
+        except Exception:
+            # Whole job failed to submit — its URLs stay unmatched below.
+            continue
+        batch_ids.append(batch_id)
+
+        elapsed = 0.0
+        status_payload = {}
+        while elapsed < max_wait_s:
+            try:
+                status_payload = get_batch_status(batch_id, api_key=api_key)
+            except Exception:
+                break
+            if _is_batch_terminal(status_payload):
+                break
+            time.sleep(poll_interval_s)
+            elapsed += poll_interval_s
+
+        if str(status_payload.get("status", "")).lower() in _BATCH_TERMINAL_FAILURE:
+            continue  # whole job failed — its URLs stay unmatched
+
+        try:
+            records = _download_batch_results(status_payload, api_key)
+        except Exception:
+            records = []
+
+        for record in records:
+            data = record.get("data") or {}
+            if not data:
+                continue
+            flat = enrich_profile_to_legacy_shape(data)
+            identifier = record.get("original_identifier")
+            key = identifier or flat.get("linkedin_flagship_url")
+            if not key:
+                continue
+            by_url[key] = flat
+            norm_key = normalize_linkedin_url(key)
+            if norm_key and norm_key not in by_url:
+                by_url[norm_key] = flat
+
+    requested_set = set(linkedin_urls)
+    unmatched = sorted(
+        u for u in requested_set
+        if u not in by_url and normalize_linkedin_url(u) not in by_url
+    )
+    fulfilled = len(requested_set) - len(unmatched)
+
+    return {
+        "by_url": by_url,
+        "requested": len(requested_set),
+        "fulfilled": fulfilled,
+        "unmatched": unmatched,
+        "credits_used": fulfilled * CREDITS_PER_ENRICH_PROFILE_BASE,
+        "batch_ids": batch_ids,
+    }
 
 
 # =============================================================================
@@ -1311,6 +1682,120 @@ def semantic_profile_to_legacy_shape(profile: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _v2_coerce_skill(skill: Any) -> str:
+    """Skills come back as either bare strings or {"name": ...} objects
+    (element type not confirmed live as of 2026-07-20 — two sample profiles
+    both had empty skills lists) — handle both defensively."""
+    if isinstance(skill, dict):
+        return skill.get("name") or skill.get("skill") or ""
+    return str(skill) if skill else ""
+
+
+def _v2_employer_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Map one experience.employment_details.{current,past}[] entry (v2
+    field names: title/name/start_date/end_date/description) to the flat
+    legacy employer shape (employee_title/employer_name/.../
+    employee_description) that trim_raw_profile() and compute_role_durations()
+    read. Verified live against a real /person/enrich response 2026-07-20.
+    """
+    if not isinstance(entry, dict):
+        return None
+    return {
+        "employee_title": (entry.get("title") or "").strip(),
+        "employer_name": entry.get("name") or "",
+        "start_date": entry.get("start_date"),
+        "end_date": entry.get("end_date"),
+        "employee_description": entry.get("description") or None,
+        # The new API has no per-employer company-description field (confirmed
+        # live — absent even where a `description` exists on the position
+        # itself). trim_raw_profile() only keeps the first sentence anyway,
+        # so a missing value here just degrades gracefully to nothing shown.
+        "employer_linkedin_description": None,
+    }
+
+
+def _v2_school_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Map one education.schools[] entry (v2 field names: school/degree/
+    field_of_study — NOT institute_name/degree_name) to the flat legacy
+    education_background shape. Verified live 2026-07-20."""
+    if not isinstance(entry, dict):
+        return None
+    return {
+        "institute_name": entry.get("school") or "",
+        "degree_name": entry.get("degree") or "",
+        "field_of_study": entry.get("field_of_study") or "",
+    }
+
+
+def enrich_profile_to_legacy_shape(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Map one nested /batch/person/enrich (or /person/enrich) record's `data`
+    payload to the FLAT LEGACY ENRICH shape that trim_raw_profile(),
+    compute_role_durations(), and db._prepare_profile_row() all read.
+
+    Distinct from semantic_profile_to_legacy_shape() above, which targets a
+    different output contract (the search-results table) and deliberately
+    keeps a partial field set — feeding its output to the screening path
+    would silently drop every job title and duration. This translator is
+    built for the screening/DB-save path specifically.
+
+    Verified against a real /person/enrich response (2026-07-20, same nested
+    shape as the batch endpoint) rather than guessed — see
+    _v2_employer_entry() / _v2_school_entry() docstrings for the confirmed
+    field-name differences from the legacy shape.
+    """
+    if not data:
+        return {}
+
+    basic = data.get("basic_profile") or {}
+    location = basic.get("location") or {}
+    employment = (data.get("experience") or {}).get("employment_details") or {}
+    schools = (data.get("education") or {}).get("schools") or []
+    raw_skills = (data.get("skills") or {}).get("professional_network_skills") or []
+    professional_network = data.get("professional_network") or {}
+    pn_location = professional_network.get("location") or {}
+    social_id = (data.get("social_handles") or {}).get("professional_network_identifier") or {}
+
+    skills = [s for s in (_v2_coerce_skill(s) for s in raw_skills) if s]
+    current_employers = [e for e in (_v2_employer_entry(e) for e in (employment.get("current") or [])) if e]
+    past_employers = [e for e in (_v2_employer_entry(e) for e in (employment.get("past") or [])) if e]
+    education_background = [e for e in (_v2_school_entry(e) for e in schools) if e]
+
+    all_employers = [e["employer_name"] for e in (current_employers + past_employers) if e.get("employer_name")]
+    all_titles = [e["employee_title"] for e in (current_employers + past_employers) if e.get("employee_title")]
+    all_schools = [e["institute_name"] for e in education_background if e.get("institute_name")]
+    all_degrees = [e["degree_name"] for e in education_background if e.get("degree_name")]
+
+    flagship_url = social_id.get("profile_url") or ""
+
+    # basic_profile.current_title is present directly on the new API
+    # (confirmed live) — prefer it over deriving from the employer list,
+    # falling back only if it's ever absent.
+    title = basic.get("current_title") or (current_employers[0]["employee_title"] if current_employers else "")
+
+    return {
+        "name": basic.get("name") or "",
+        "title": title,
+        "headline": basic.get("headline") or "",
+        "summary": basic.get("summary") or "",
+        "location": location.get("raw") or pn_location.get("raw") or "",
+        "region": pn_location.get("raw") or location.get("raw") or "",
+        "num_of_connections": professional_network.get("connections"),
+        "skills": skills,
+        "languages": basic.get("languages") or [],
+        "linkedin_flagship_url": flagship_url,
+        "linkedin_url": flagship_url,
+        "current_employers": current_employers,
+        "past_employers": past_employers,
+        "education_background": education_background,
+        "all_employers": all_employers,
+        "all_titles": all_titles,
+        "all_schools": all_schools,
+        "all_degrees": all_degrees,
+        "crustdata_person_id": data.get("crustdata_person_id"),
+    }
+
+
 def normalize_search_results_to_df(profiles: List[Dict[str, Any]]) -> pd.DataFrame:
     """
     Batch normalize search results and return DataFrame ready for pipeline.
@@ -1578,15 +2063,22 @@ __all__ = [
     'HEADCOUNT_RANGES',
     'CREDITS_PER_100_RESULTS',
     'CREDITS_PER_RESULT_SEMANTIC',
+    'CREDITS_PER_ENRICH_PROFILE_BASE',
+    'BATCH_ENRICH_FIELDS',
     # Main functions
     'search_people_db',
     'build_filters',
     'check_credits',
     'search_people_semantic',
+    # Batch enrichment (new v2025-11-01 API)
+    'submit_batch_enrich',
+    'get_batch_status',
+    'batch_enrich_profiles',
     # Normalization
     'normalize_search_result',
     'normalize_search_results_to_df',
     'semantic_profile_to_legacy_shape',
+    'enrich_profile_to_legacy_shape',
     # Usage tracking
     'log_search_usage',
     # AI expansion

@@ -26,6 +26,7 @@ Usage:
     df = normalize_search_results_to_df(results['profiles'])
 """
 
+import gzip
 import json
 import time
 import requests
@@ -1430,34 +1431,65 @@ def _is_batch_terminal(status_payload: Dict[str, Any]) -> bool:
 def _download_batch_results(status_payload: Dict[str, Any], api_key: str) -> List[Dict[str, Any]]:
     """Return the list of {original_identifier, internal_id, data} records
     for a completed batch job. Results may be inline on the status payload
-    (`results`/`data`) or behind a download URL (`download_url`/
-    `results_file_url`) — handle both since the exact shape isn't pinned in
-    Crustdata's docs."""
+    (`results`/`data`), or behind one or more download URLs.
+
+    Verified live against a real batch job 2026-07-20 (this shape was
+    guessed/unverified before then — see the corrections below, both
+    confirmed against real API responses, not docs):
+      - The status payload carries BOTH `download_url` (one file) and
+        `download_urls` (a list — larger jobs split into multiple
+        `part-NNN.jsonl.gz` files). Must fetch every URL in `download_urls`
+        when present, not just the singular one, or a large job's later
+        parts get silently dropped.
+      - Each file is gzip-compressed (`Content-Type: application/gzip`,
+        magic bytes `\\x1f\\x8b`) but the server does NOT set the HTTP
+        `Content-Encoding: gzip` header, so `requests` does not
+        auto-decompress it — reading `.text` on the raw response silently
+        returns garbled bytes, every JSON-parse fails, and the whole batch
+        looks like zero matches even when Crustdata successfully enriched
+        everyone. Must gunzip explicitly.
+      - These are presigned S3 URLs (auth is in the query string) — do NOT
+        send our own Bearer header to them; only crustdata.com URLs need it
+        (kept for `results_file_url`/single-file inline compatibility in
+        case a future API version serves an uncompressed file directly
+        from Crustdata itself).
+    """
     inline = status_payload.get("results") or status_payload.get("data")
     if isinstance(inline, list):
         return inline
 
-    download_url = status_payload.get("download_url") or status_payload.get("results_file_url")
-    if not download_url:
+    download_urls = status_payload.get("download_urls")
+    if not download_urls:
+        single = status_payload.get("download_url") or status_payload.get("results_file_url")
+        download_urls = [single] if single else []
+    if not download_urls:
         return []
 
-    response = requests.get(
-        download_url,
-        headers=_v2_headers(api_key) if download_url.startswith("https://api.crustdata.com") else None,
-        timeout=120,
-    )
-    response.raise_for_status()
-
-    # One JSON object per line (JSONL).
     records = []
-    for line in response.text.splitlines():
-        line = line.strip()
-        if not line:
+    for download_url in download_urls:
+        if not download_url:
             continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+        response = requests.get(
+            download_url,
+            headers=_v2_headers(api_key) if download_url.startswith("https://api.crustdata.com") else None,
+            timeout=120,
+        )
+        response.raise_for_status()
+
+        content = response.content
+        if content[:2] == b"\x1f\x8b":  # gzip magic number
+            content = gzip.decompress(content)
+        text = content.decode("utf-8")
+
+        # One JSON object per line (JSONL).
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
     return records
 
 

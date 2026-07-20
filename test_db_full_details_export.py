@@ -20,6 +20,10 @@ These tests pin the pure composition helper (no Streamlit, no network, no DB):
      out empty — this is exactly the gap the opt-in export closes.
   3. Column ordering matches ``prepare_df_for_export`` (first_name/last_name lead).
   4. An empty input list yields an empty DataFrame rather than raising.
+  5. The ``crustdata_raw_json`` column carries the complete raw_data blob
+     verbatim (including fields nothing else in this export surfaces, e.g.
+     the current role's own description) — empty string when there's no
+     raw_data to dump.
 """
 
 from __future__ import annotations
@@ -133,3 +137,26 @@ def test_empty_input_returns_empty_dataframe():
     df = _build([])
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 0
+
+
+def test_crustdata_raw_json_column_has_the_complete_raw_response():
+    # The flattened columns (summary, past_positions, etc.) only surface a
+    # curated subset. crustdata_raw_json must carry the ENTIRE raw_data blob
+    # verbatim, including fields nothing else in this export exposes (here:
+    # the current role's own description, which past_positions never covers
+    # since it only serializes past_employers).
+    df = _build([_raw_profile_with_raw_data()])
+    row = df.iloc[0]
+
+    assert 'crustdata_raw_json' in df.columns
+    parsed = json.loads(row['crustdata_raw_json'])
+    assert parsed['summary'] == 'Backend engineer who loves distributed systems.'
+    assert parsed['current_employers'][0]['description'] == 'Owns the payments service end to end.'
+    assert parsed['past_employers'][0]['employer_name'] == 'Globex'
+
+
+def test_crustdata_raw_json_is_empty_object_when_no_raw_data():
+    # json.dumps({}) -> '{}', a valid (empty) JSON object — distinguishable
+    # from a missing/unparseable value, not a bare empty string.
+    df = _build([_raw_profile_without_raw_data()])
+    assert df.iloc[0]['crustdata_raw_json'] == '{}'

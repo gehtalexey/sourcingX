@@ -1016,12 +1016,66 @@ def build_full_details_export_df(raw_profiles: list) -> pd.DataFrame:
     the same ``profiles_to_dataframe`` -> ``prepare_df_for_export`` composition
     every other CSV export uses, so the column ordering stays consistent.
 
+    Also attaches a ``crustdata_raw_json`` column with the complete raw
+    Crustdata response verbatim (``json.dumps(raw_data)``). The flattened
+    columns above only surface a curated subset (e.g. they drop certifications,
+    languages, the current role's own description, education dates/degrees) —
+    the raw JSON column guarantees this export has everything Crustdata
+    actually returned for each person, not just what got hand-picked into a
+    column.
+
     Pure/transient by design: it returns a fresh DataFrame and never touches
     session state or the shared listing — the caller stashes only the resulting
     CSV bytes, not this DataFrame or the raw profile dicts.
     """
     from db import profiles_to_dataframe
     df = profiles_to_dataframe(raw_profiles)
+
+    raw_json_by_url = {
+        p.get('linkedin_url', ''): json.dumps(p.get('raw_data') or {}, ensure_ascii=False)
+        for p in (raw_profiles or [])
+        if p.get('linkedin_url')
+    }
+    if not df.empty and 'linkedin_url' in df.columns:
+        df['crustdata_raw_json'] = df['linkedin_url'].map(raw_json_by_url).fillna('')
+
+    return prepare_df_for_export(df)
+
+
+def build_search_full_details_export_df(raw_profiles: list) -> pd.DataFrame:
+    """Build the export-ready DataFrame for the Search tab's full-details CSV.
+
+    Runs profiles through the existing normalize_search_results_to_df() ->
+    prepare_df_for_export() composition (the same readable columns the
+    regular Search tab CSV already has), then attaches a crustdata_raw_json
+    column with the complete raw Crustdata response for each person verbatim.
+
+    No extra API calls needed. A regular filter-search profile IS the full
+    raw Crustdata response already (compact=false) — nothing to unwrap. A
+    description (semantic) search result is a lossy shim, so its original
+    nested response is kept separately under _raw_semantic_result (see
+    semantic_profile_to_legacy_shape in crustdata_search.py). Either way the
+    data is already sitting in memory from the search that was just run —
+    this just surfaces it.
+    """
+    df = normalize_search_results_to_df(raw_profiles)
+    if df.empty:
+        return df
+
+    raw_json_by_url = {}
+    for p in (raw_profiles or []):
+        raw = p.get('_raw_search_result') or p.get('_raw_semantic_result') or p
+        url = (
+            p.get('flagship_profile_url') or p.get('linkedin_flagship_url')
+            or p.get('linkedin_profile_url') or p.get('linkedin_url')
+        )
+        url = normalize_linkedin_url(url) if url else None
+        if url:
+            raw_json_by_url[url] = json.dumps(raw, ensure_ascii=False, default=str)
+
+    if 'linkedin_url' in df.columns:
+        df['crustdata_raw_json'] = df['linkedin_url'].map(raw_json_by_url).fillna('')
+
     return prepare_df_for_export(df)
 
 
@@ -6484,7 +6538,7 @@ with tab_search:
 
             # Action buttons
             st.divider()
-            action_col1, action_col2, action_col3 = st.columns([2, 1, 1])
+            action_col1, action_col2, action_col3, action_col4 = st.columns([2, 1, 1, 1.3])
 
             with action_col1:
                 # Send to Filter Tab button
@@ -6732,6 +6786,33 @@ with tab_search:
                     )
                 else:
                     st.button("Download CSV (0)", disabled=True, use_container_width=True, key="crust_download_disabled")
+
+            with action_col4:
+                # Full-details CSV: same selected profiles, but with a
+                # crustdata_raw_json column carrying the complete raw
+                # Crustdata response per person — everything Crustdata
+                # returned, not just the flattened columns. No extra API
+                # calls: the raw response for each result is already sitting
+                # in memory (see build_search_full_details_export_df).
+                if selected_indices:
+                    selected_profiles_fd = [results[i] for i in selected_indices]
+                    full_export_df = build_search_full_details_export_df(selected_profiles_fd)
+                    full_export_data = full_export_df.to_csv(index=False).encode('utf-8-sig')
+
+                    st.download_button(
+                        f"📄 Full Details ({len(selected_indices)})",
+                        full_export_data,
+                        f"crustdata_search_full_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        "text/csv",
+                        use_container_width=True,
+                        key="crust_download_full_details_csv",
+                        help="Includes a crustdata_raw_json column with everything Crustdata "
+                             "returned for each person. Description-search results still won't "
+                             "have skills/summary/job descriptions in it — Crustdata itself "
+                             "doesn't send those back for that search type."
+                    )
+                else:
+                    st.button("📄 Full Details (0)", disabled=True, use_container_width=True, key="crust_download_full_details_disabled")
 
 # ========== TAB 1: Upload ==========
 with tab_upload:
@@ -11482,6 +11563,16 @@ with tab_database:
                                 urls = filtered_df['linkedin_url'].tolist()
                                 with st.spinner(f"Fetching full details for {len(urls)} profiles..."):
                                     profiles_with_raw = get_profiles_by_urls(db_client, urls, include_raw_data=True)
+                                    if profiles_with_raw:
+                                        # get_profiles_by_urls reads the profiles table only —
+                                        # unlike get_all_profiles (used for the normal listing),
+                                        # it doesn't merge in screening results. Without this,
+                                        # the full-details CSV would blank out screening_score/
+                                        # fit/summary for already-screened people even though the
+                                        # regular CSV for the same rows has them.
+                                        from db import _select_latest_screenings_for_urls, _merge_latest_screenings
+                                        screenings_by_url = _select_latest_screenings_for_urls(db_client, urls)
+                                        profiles_with_raw = _merge_latest_screenings(profiles_with_raw, screenings_by_url)
                                 if profiles_with_raw:
                                     export_df = build_full_details_export_df(profiles_with_raw)
                                     st.session_state['db_full_details_csv'] = export_df.to_csv(index=False).encode('utf-8-sig')

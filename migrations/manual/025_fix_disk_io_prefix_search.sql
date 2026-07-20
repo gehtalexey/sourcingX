@@ -41,6 +41,18 @@
 -- HOW TO APPLY: run each statement below separately, with autocommit on —
 -- one at a time in the Supabase SQL Editor's "Run" button, or via
 -- `psql -f` (default autocommit). Never paste the whole file as one block.
+--
+-- AFTER RUNNING each CREATE INDEX CONCURRENTLY statement, verify it actually
+-- succeeded — do not trust "no error" alone. If the build is interrupted
+-- (connection drop, canceled statement), Postgres can leave an INVALID index
+-- behind under this exact name; a later re-run's IF NOT EXISTS then skips it
+-- forever, silently leaving the fix half-applied (Codex review round 3, PR
+-- #109). Check with:
+--     SELECT indexrelid::regclass, indisvalid FROM pg_index
+--     WHERE indexrelid::regclass::text IN
+--       ('idx_profiles_linkedin_url_pattern', 'idx_profiles_original_url_pattern');
+-- If indisvalid is false for either, DROP INDEX CONCURRENTLY IF EXISTS it and
+-- re-run its CREATE statement.
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_profiles_linkedin_url_pattern
   ON public.profiles (linkedin_url text_pattern_ops);

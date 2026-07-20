@@ -5593,6 +5593,15 @@ with tab_search:
                             str(n).lower().strip()
                             for n in (st.session_state.get('past_candidates_names_for_search') or [])
                         }
+                        # The filter search excludes these URLs server-side (exclude_profiles);
+                        # search_people_semantic has no equivalent param, so past candidates
+                        # known only by URL (no matching name) must be filtered here too.
+                        _sem_pc_urls = {
+                            normalize_linkedin_url(u)
+                            for u in (st.session_state.get('past_candidates_urls_for_search') or [])
+                            if u
+                        }
+                        _sem_pc_urls.discard(None)
                         _sem_bl = [
                             c for c in (st.session_state.get('blacklist_for_search') or [])
                             if c and str(c).strip() and len(str(c).strip()) >= 3
@@ -5606,6 +5615,10 @@ with tab_search:
                             n = str(p.get('name') or '').lower().strip()
                             return ' '.join(re.sub(r'[^\w\s]', '', n).split())
 
+                        def _sem_url_of(p):
+                            raw = p.get('flagship_profile_url')
+                            return normalize_linkedin_url(raw) if raw else None
+
                         def _sem_company_of(p):
                             emp = pick_current_employer(p.get('current_employers'))
                             return (emp.get('name') or '') if emp else ''
@@ -5616,6 +5629,9 @@ with tab_search:
                             if not p:
                                 continue
                             if _sem_pc_names and _sem_name_of(p) in _sem_pc_names:
+                                _sem_removed += 1
+                                continue
+                            if _sem_pc_urls and _sem_url_of(p) in _sem_pc_urls:
                                 _sem_removed += 1
                                 continue
                             _sem_co = _sem_company_of(p)
@@ -6518,6 +6534,12 @@ with tab_search:
                                         str(n).lower().strip()
                                         for n in (st.session_state.get('past_candidates_names_for_search') or [])
                                     }
+                                    _lm_pc_urls = {
+                                        normalize_linkedin_url(u)
+                                        for u in (st.session_state.get('past_candidates_urls_for_search') or [])
+                                        if u
+                                    }
+                                    _lm_pc_urls.discard(None)
                                     _lm_bl_raw = [c for c in (st.session_state.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
                                     _lm_nr_raw = [c for c in (st.session_state.get('nr_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
                                 else:
@@ -6560,6 +6582,8 @@ with tab_search:
                                         )
 
                                     _lm_names_set = set(_lm_p.get('past_candidates_names_for_search') or [])
+                                    # Already excluded server-side via exclude_profiles above.
+                                    _lm_pc_urls = set()
                                     _lm_bl_raw = [c for c in (_lm_p.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
                                     _lm_nr_raw = [c for c in (_lm_p.get('nr_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
 
@@ -6576,6 +6600,14 @@ with tab_search:
                                     emp = pick_current_employer(p.get('current_employers'))
                                     return (emp.get('employer_name') or emp.get('name', '')) if emp else ''
 
+                                def _lm_url_of(p):
+                                    raw = (
+                                        p.get('flagship_profile_url')
+                                        or p.get('linkedin_flagship_url')
+                                        or p.get('linkedin_profile_url')
+                                    )
+                                    return normalize_linkedin_url(raw) if raw else None
+
                                 def _lm_is_excluded(p):
                                     co = _lm_get_co(p)
                                     if _lm_bl_raw and co and _company_matches_filter_list(co, _lm_bl_raw):
@@ -6588,6 +6620,8 @@ with tab_search:
                                     out = profiles
                                     if _lm_names_set:
                                         out = [p for p in out if _lm_norm_name(p.get('name') or f"{p.get('first_name','')} {p.get('last_name','')}") not in _lm_names_set]
+                                    if _lm_pc_urls:
+                                        out = [p for p in out if _lm_url_of(p) not in _lm_pc_urls]
                                     if _lm_bl_raw or _lm_nr_raw:
                                         out = [p for p in out if not _lm_is_excluded(p)]
                                     return out

@@ -124,20 +124,39 @@ except ImportError:
 try:
     from crustdata_search import (
         search_people_db,
+        search_people_db_v2,
         build_filters as build_search_filters,
         normalize_search_results_to_df,
         check_credits as check_crustdata_credits,
         expand_variations,
         search_people_semantic,
         semantic_profile_to_legacy_shape,
+        batch_enrich_profiles,
         SENIORITY_LEVELS,
         HEADCOUNT_RANGES,
         FUNCTION_CATEGORIES,
         COMPANY_INDUSTRIES,
     )
     HAS_CRUSTDATA_SEARCH = True
+
+    # Crustdata's legacy /screener/persondb/search endpoint (compact=false)
+    # returns full profiles — skills/summary included — in one call, and is
+    # cheaper/richer than the new v2025-11-01 /person/search endpoint, which
+    # never returns skills/summary regardless of what's requested. Crustdata
+    # has confirmed the legacy endpoint stays live until end of September
+    # 2026, so this branch's search-endpoint migration ships DISABLED by
+    # default — search_people_db() (legacy) stays the default search
+    # function everywhere in this file. The full v2 + batch-enrich pipeline
+    # (search_people_db_v2, enrich_thin_profiles_for_batch) is built, tested,
+    # and Codex-reviewed so flipping this one flag is the only change needed
+    # when the legacy endpoint is retired — nothing else in this file
+    # changes. Flip via CRUSTDATA_USE_SEARCH_V2=true in the environment (not
+    # config.json — this is a deploy-time switch, not a per-user setting).
+    CRUSTDATA_USE_SEARCH_V2 = os.environ.get('CRUSTDATA_USE_SEARCH_V2', 'false').strip().lower() == 'true'
+    _active_search_people_db = search_people_db_v2 if CRUSTDATA_USE_SEARCH_V2 else search_people_db
 except ImportError:
     HAS_CRUSTDATA_SEARCH = False
+    CRUSTDATA_USE_SEARCH_V2 = False
 
 # Plotly for charts
 try:
@@ -4845,6 +4864,116 @@ def fetch_raw_data_for_batch(profiles: list, raw_index: dict = None, db_client =
                 print(f"[Screening] Warning: {len(still_missing) - applied} profiles still missing raw data after DB fetch")
 
 
+def enrich_thin_profiles_for_batch(profiles: list, api_key: str, db_client=None,
+                                    tracker: 'UsageTracker' = None) -> dict:
+    """Top up any profile in this batch that's missing BOTH skills and a
+    summary (About text) via Crustdata's new batch-enrich endpoint, right
+    before AI Screen sees it.
+
+    Why this exists: the new Crustdata search endpoints (search_people_db_v2,
+    search_people_semantic) don't return skills/summary — only the old
+    legacy search (compact=false) did. This is the auto-fill step that keeps
+    AI Screen quality unchanged regardless of which search endpoint sourced
+    a profile.
+
+    Detection is AND (only enrich when BOTH skills and summary are missing,
+    not just one) and unmatched profiles are screened as-is rather than
+    blocking the batch — both explicit calls Alexey made, 2026-07-20, when
+    this feature was planned. No concurrency guard against two sessions
+    enriching the same profile at once (same conversation: accepted as a
+    small, rare risk rather than adding a re-check-before-submit step).
+
+    Call this unconditionally for every screening batch — do NOT gate it
+    behind "only if the raw-data fetch step reported something missing".
+    Profiles can already be thin in memory (e.g. straight from a v2 search)
+    with nothing upstream flagging that; this function's own thin-detection
+    below is what has to catch them, and it only runs if it's actually
+    called every time.
+
+    Mutates `profiles` in place: on a match, replaces raw_crustdata (and
+    clears any stale raw_data) with the enriched flat profile, so
+    screen_profile() reads the rich version. Also saves every newly-enriched
+    profile back to Supabase immediately (via the same save_enriched_profiles_bulk
+    path search-save already uses), so the same person is never re-enriched
+    for a future JD.
+
+    Returns a stats dict for the UI: {thin_found, enriched, unmatched, credits_used}.
+    """
+    stats = {'thin_found': 0, 'enriched': 0, 'unmatched': 0, 'credits_used': 0}
+
+    thin_profiles = []
+    for p in profiles:
+        if not isinstance(p, dict):
+            continue
+        url = p.get('linkedin_url')
+        if not url:
+            continue
+        raw = _ensure_raw_dict(p.get('raw_crustdata') or p.get('raw_data'))
+        if not raw.get('skills') and not raw.get('summary'):
+            thin_profiles.append(p)
+
+    stats['thin_found'] = len(thin_profiles)
+    if not thin_profiles:
+        return stats
+
+    urls = [p['linkedin_url'] for p in thin_profiles]
+
+    try:
+        result = batch_enrich_profiles(urls, api_key=api_key)
+    except Exception as e:
+        # Never let an enrichment failure block screening — every thin
+        # profile just stays thin and screens as-is.
+        if tracker:
+            tracker.log_crustdata_batch_enrich(
+                requested=len(urls), fulfilled=0, status='error',
+                error_message=str(e)[:200],
+            )
+        stats['unmatched'] = len(thin_profiles)
+        return stats
+
+    by_url = result.get('by_url') or {}
+    newly_enriched = []  # flat Crustdata-shaped dicts — passed directly to
+                          # save_enriched_profiles_bulk(), NOT wrapped, since
+                          # that function (via _prepare_profile_row) reads
+                          # name/skills/employer fields straight off each dict.
+    original_url_map = {}
+
+    for p in thin_profiles:
+        url = p['linkedin_url']
+        flat = by_url.get(url) or by_url.get(normalize_linkedin_url(url))
+        if not flat:
+            stats['unmatched'] += 1
+            continue
+        p['raw_crustdata'] = flat
+        p.pop('raw_data', None)
+        stats['enriched'] += 1
+        newly_enriched.append(flat)
+        norm_url = normalize_linkedin_url(flat.get('linkedin_flagship_url') or url)
+        if norm_url:
+            original_url_map[norm_url] = url
+
+    stats['credits_used'] = result.get('credits_used', 0)
+
+    if tracker:
+        tracker.log_crustdata_batch_enrich(
+            requested=result.get('requested', len(urls)),
+            fulfilled=result.get('fulfilled', 0),
+            status='success',
+        )
+
+    if newly_enriched and db_client:
+        try:
+            save_enriched_profiles_bulk(
+                db_client, newly_enriched,
+                original_url_map=original_url_map,
+                batch_size=100,
+            )
+        except Exception as e:
+            print(f"[Screening] Warning: failed to save batch-enriched profiles ({e})")
+
+    return stats
+
+
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
                           max_workers: int = 15,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
@@ -6149,7 +6278,7 @@ with tab_search:
                     progress_placeholder.info("Searching Crustdata database...")
 
                     _exclude_urls = st.session_state.get('past_candidates_urls_for_search') or None
-                    results = search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key, exclude_profiles=_exclude_urls)
+                    results = _active_search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key, exclude_profiles=_exclude_urls)
 
                     if results.get("profiles"):
                         # Name filter applied inline during pagination so we keep
@@ -6213,7 +6342,7 @@ with tab_search:
                         while cursor and len(all_profiles) < target:
                             progress_placeholder.info(f"Loading profiles... {len(all_profiles):,} / {target:,}")
                             remaining = target - len(all_profiles)
-                            page_results = search_people_db(
+                            page_results = _active_search_people_db(
                                 filters,
                                 limit=min(remaining, 1000),
                                 cursor=cursor,
@@ -6643,7 +6772,7 @@ with tab_search:
                                     )
 
                                     def _lm_fetch(cursor_val):
-                                        return search_people_db(
+                                        return _active_search_people_db(
                                             filters,
                                             limit=_lm_p.get('limit', 100),
                                             cursor=cursor_val,
@@ -9658,10 +9787,11 @@ with tab_screening:
 
                 if batch_profiles:
                     with st.status(f"Processing batch {current_batch + 1} ({screen_mode} mode)...", expanded=True) as status:
+                        db_client = _get_db_client() if HAS_DATABASE else None
+
                         # Only fetch raw_data from DB if profiles don't already have it
                         missing_before = sum(1 for p in batch_profiles if not p.get('raw_crustdata') and not p.get('raw_data'))
                         if missing_before > 0:
-                            db_client = _get_db_client() if HAS_DATABASE else None
                             fetch_raw_data_for_batch(
                                 batch_profiles,
                                 raw_index=raw_index,
@@ -9670,6 +9800,26 @@ with tab_screening:
                             missing_after = sum(1 for p in batch_profiles if not p.get('raw_crustdata') and not p.get('raw_data'))
                             fetched = missing_before - missing_after
                             st.write(f"📦 Fetched raw data for {fetched}/{missing_before} profiles from DB" + (f" ({missing_after} still missing)" if missing_after > 0 else ""))
+
+                        # Top up any profile still missing skills/summary (e.g. sourced from
+                        # the new Crustdata search endpoints, which don't return them) via
+                        # the new batch-enrich endpoint — unconditional, not gated behind
+                        # missing_before, since a profile can already be thin in memory with
+                        # nothing upstream flagging it. See enrich_thin_profiles_for_batch()
+                        # docstring for why this must not be nested inside the block above.
+                        if has_crust_key:
+                            _enrich_stats = enrich_thin_profiles_for_batch(
+                                batch_profiles,
+                                api_key=api_key,
+                                db_client=db_client,
+                                tracker=get_usage_tracker(),
+                            )
+                            if _enrich_stats['thin_found'] > 0:
+                                st.write(
+                                    f"🔎 Enriching {_enrich_stats['thin_found']} thin profiles… "
+                                    f"{_enrich_stats['enriched']} filled, "
+                                    f"{_enrich_stats['unmatched']} not found (screened as-is)"
+                                )
 
                         # Thread-safe progress tracking for this batch
                         batch_progress = {'completed': 0, 'strong': 0, 'good': 0, 'partial': 0, 'error': 0}

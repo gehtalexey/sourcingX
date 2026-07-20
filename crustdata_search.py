@@ -1297,6 +1297,14 @@ def semantic_profile_to_legacy_shape(profile: Dict[str, Any]) -> Dict[str, Any]:
         # Not part of the legacy shape — carried through as an extra field
         # so the results table can show it.
         '_fit': profile.get('fit', ''),
+        # The shim above only maps the fields the legacy shape/pipeline knows
+        # about — it drops some of the nested v2 response (contact flags,
+        # normalized_title, professional_network handle, etc.). Keep the
+        # original nested profile so a "full details" export can still show
+        # everything Crustdata actually returned for this person, the same
+        # way normalize_search_result() keeps _raw_search_result for the
+        # regular filter search.
+        '_raw_semantic_result': profile,
         # Tells normalize_search_result() this row is missing skills/summary/
         # experience and needs real enrichment before AI Screen sees it.
         '_semantic_incomplete': True,

@@ -5632,6 +5632,14 @@ with tab_search:
                         st.session_state['crustdata_search_total'] = sem_results.get('total_count', len(_sem_clean))
                         st.session_state['crustdata_search_credits_used'] = sem_results.get('credits_used', 0)
                         st.session_state['crustdata_search_selected'] = list(range(len(_sem_clean)))
+                        # Tells Load More which endpoint/cursor pairing to use — the cursor
+                        # above comes from the semantic endpoint, not the filter-search one,
+                        # so Load More must keep calling search_people_semantic with it.
+                        st.session_state['crustdata_search_mode'] = 'semantic'
+                        st.session_state['_last_semantic_params'] = {
+                            'query': semantic_query.strip(),
+                            'limit': int(semantic_limit),
+                        }
                         _sem_note = f" ({_sem_removed} already-seen removed)" if _sem_removed else ""
                         st.session_state['_search_loaded_msg'] = (
                             f"Found **{len(_sem_clean):,}** profiles matching your description{_sem_note}. "
@@ -5908,7 +5916,8 @@ with tab_search:
             keys_to_clear = [
                 'crustdata_search_results', 'crustdata_search_cursor',
                 'crustdata_search_total', 'crustdata_search_selected',
-                'crustdata_search_credits_used',
+                'crustdata_search_credits_used', 'crustdata_search_mode',
+                '_last_semantic_params',
                 'crust_search_exact_company', 'crust_search_function', 'crust_search_industry',
                 'crust_search_sort', 'crust_search_country', 'crust_search_continent',
                 'crust_search_geo_city', 'crust_search_geo_radius', 'crust_search_min_connections',
@@ -6138,6 +6147,9 @@ with tab_search:
                         st.session_state['crustdata_search_total'] = total_count
                         st.session_state['crustdata_search_credits_used'] = total_credits
                         st.session_state['crustdata_search_selected'] = list(range(loaded_count))
+                        # Tells Load More which endpoint/cursor pairing to use — this is a
+                        # filter search, not a description (semantic) search.
+                        st.session_state['crustdata_search_mode'] = 'filter'
                         # Persist effective filter values so Load More uses the same payload
                         st.session_state['_last_search_params'] = {
                             'title': effective_title,
@@ -6475,43 +6487,83 @@ with tab_search:
                     if st.button("Load More", use_container_width=True, key="crust_load_more"):
                         with st.spinner("Loading more results..."):
                             try:
-                                # Use persisted effective params from initial search so pagination
-                                # uses the same filters including AI-expanded values, not raw widgets.
+                                # Which search produced the current results decides which
+                                # endpoint/cursor pairing Load More must keep using — the
+                                # semantic endpoint's cursor is not valid on the filter
+                                # endpoint (and vice versa).
+                                _lm_mode = st.session_state.get('crustdata_search_mode', 'filter')
                                 _lm_p = st.session_state.get('_last_search_params', {})
-                                filters = build_search_filters(
-                                    title=_lm_p.get('title'),
-                                    company=_lm_p.get('company'),
-                                    location=_lm_p.get('location'),
-                                    seniority=_lm_p.get('seniority'),
-                                    headcount=_lm_p.get('headcount'),
-                                    experience_min=_lm_p.get('experience_min'),
-                                    experience_max=_lm_p.get('experience_max'),
-                                    skill_groups=_lm_p.get('skill_groups'),
-                                    keywords=_lm_p.get('keywords'),
-                                    past_companies=_lm_p.get('past_companies'),
-                                    past_titles=_lm_p.get('past_titles'),
-                                    school=_lm_p.get('school'),
-                                    recently_changed_jobs=_lm_p.get('recently_changed_jobs'),
-                                    has_verified_email=_lm_p.get('has_verified_email'),
-                                    function_categories=_lm_p.get('function_categories'),
-                                    industries=_lm_p.get('industries'),
-                                    country=_lm_p.get('country'),
-                                    continent=_lm_p.get('continent'),
-                                    geo_city=_lm_p.get('geo_city'),
-                                    geo_radius_km=_lm_p.get('geo_radius_km'),
-                                    min_connections=_lm_p.get('min_connections'),
-                                    exact_company=_lm_p.get('exact_company', False),
-                                    # not_relevant and blacklist applied client-side in _lm_clean()
-                                )
 
-                                more_results = search_people_db(
-                                    filters,
-                                    limit=_lm_p.get('limit', 100),
-                                    cursor=cursor,
-                                    sorts=_lm_p.get('sorts'),
-                                    api_key=api_key,
-                                    exclude_profiles=_lm_p.get('past_candidates_urls_for_search') or None,
-                                )
+                                if _lm_mode == 'semantic':
+                                    _lm_sem_p = st.session_state.get('_last_semantic_params', {})
+
+                                    def _lm_fetch(cursor_val):
+                                        raw = search_people_semantic(
+                                            _lm_sem_p.get('query', ''),
+                                            limit=_lm_sem_p.get('limit', 20),
+                                            cursor=cursor_val,
+                                            api_key=api_key,
+                                        )
+                                        raw['profiles'] = [
+                                            semantic_profile_to_legacy_shape(p)
+                                            for p in (raw.get('profiles') or [])
+                                        ]
+                                        return raw
+
+                                    # Semantic search has no server-side exclude_profiles
+                                    # param wired up (see search_people_semantic) — exclusion
+                                    # is entirely client-side here, same as the initial
+                                    # description search above.
+                                    _lm_names_set = {
+                                        str(n).lower().strip()
+                                        for n in (st.session_state.get('past_candidates_names_for_search') or [])
+                                    }
+                                    _lm_bl_raw = [c for c in (st.session_state.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+                                    _lm_nr_raw = [c for c in (st.session_state.get('nr_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+                                else:
+                                    # Use persisted effective params from initial search so pagination
+                                    # uses the same filters including AI-expanded values, not raw widgets.
+                                    filters = build_search_filters(
+                                        title=_lm_p.get('title'),
+                                        company=_lm_p.get('company'),
+                                        location=_lm_p.get('location'),
+                                        seniority=_lm_p.get('seniority'),
+                                        headcount=_lm_p.get('headcount'),
+                                        experience_min=_lm_p.get('experience_min'),
+                                        experience_max=_lm_p.get('experience_max'),
+                                        skill_groups=_lm_p.get('skill_groups'),
+                                        keywords=_lm_p.get('keywords'),
+                                        past_companies=_lm_p.get('past_companies'),
+                                        past_titles=_lm_p.get('past_titles'),
+                                        school=_lm_p.get('school'),
+                                        recently_changed_jobs=_lm_p.get('recently_changed_jobs'),
+                                        has_verified_email=_lm_p.get('has_verified_email'),
+                                        function_categories=_lm_p.get('function_categories'),
+                                        industries=_lm_p.get('industries'),
+                                        country=_lm_p.get('country'),
+                                        continent=_lm_p.get('continent'),
+                                        geo_city=_lm_p.get('geo_city'),
+                                        geo_radius_km=_lm_p.get('geo_radius_km'),
+                                        min_connections=_lm_p.get('min_connections'),
+                                        exact_company=_lm_p.get('exact_company', False),
+                                        # not_relevant and blacklist applied client-side in _lm_clean()
+                                    )
+
+                                    def _lm_fetch(cursor_val):
+                                        return search_people_db(
+                                            filters,
+                                            limit=_lm_p.get('limit', 100),
+                                            cursor=cursor_val,
+                                            sorts=_lm_p.get('sorts'),
+                                            api_key=api_key,
+                                            exclude_profiles=_lm_p.get('past_candidates_urls_for_search') or None,
+                                        )
+
+                                    _lm_names_set = set(_lm_p.get('past_candidates_names_for_search') or [])
+                                    _lm_bl_raw = [c for c in (_lm_p.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+                                    _lm_nr_raw = [c for c in (_lm_p.get('nr_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
+
+                                more_results = _lm_fetch(cursor)
 
                                 # Post-filter helpers (same exclusions as original search)
                                 def _lm_norm_name(n):
@@ -6519,10 +6571,6 @@ with tab_search:
                                     n = ' '.join(n.split())
                                     n = re.sub(r'[^\w\s]', '', n)
                                     return n.strip()
-
-                                _lm_names_set = set(_lm_p.get('past_candidates_names_for_search') or [])
-                                _lm_bl_raw = [c for c in (_lm_p.get('blacklist_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
-                                _lm_nr_raw = [c for c in (_lm_p.get('nr_for_search') or []) if c and str(c).strip() and len(str(c).strip()) >= 3]
 
                                 def _lm_get_co(p):
                                     emp = pick_current_employer(p.get('current_employers'))
@@ -6550,14 +6598,7 @@ with tab_search:
                                 next_cursor = more_results.get('cursor')
                                 total_lm_credits = more_results.get('credits_used', 0)
                                 while not new_profiles and next_cursor:
-                                    extra = search_people_db(
-                                        filters,
-                                        limit=_lm_p.get('limit', 100),
-                                        cursor=next_cursor,
-                                        sorts=_lm_p.get('sorts'),
-                                        api_key=api_key,
-                                        exclude_profiles=_lm_p.get('past_candidates_urls_for_search') or None,
-                                    )
+                                    extra = _lm_fetch(next_cursor)
                                     new_profiles = _lm_clean(extra.get('profiles') or [])
                                     next_cursor = extra.get('cursor')
                                     total_lm_credits += extra.get('credits_used', 0)

@@ -17,11 +17,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import gzip
+import json
+
 from crustdata_search import (
     submit_batch_enrich,
     get_batch_status,
     batch_enrich_profiles,
     enrich_profile_to_legacy_shape,
+    _download_batch_results,
     CRUSTDATA_BATCH_ENRICH_ENDPOINT,
     CRUSTDATA_API_VERSION,
 )
@@ -271,6 +275,80 @@ _REAL_ENRICH_RESPONSE = {
     },
     "crustdata_person_id": 14540,
 }
+
+
+def _gzip_response(records, content_type="application/gzip", encoding_header=None):
+    """Build a MagicMock response matching what a real Crustdata batch
+    results file looks like: gzip-compressed BODY BYTES with no
+    Content-Encoding header (verified live 2026-07-20) — requests will NOT
+    auto-decompress this."""
+    body = "\n".join(json.dumps(r) for r in records).encode("utf-8")
+    compressed = gzip.compress(body)
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.content = compressed
+    resp.headers = {"Content-Type": content_type}
+    if encoding_header:
+        resp.headers["Content-Encoding"] = encoding_header
+    resp.raise_for_status = MagicMock()
+    return resp
+
+
+class TestDownloadBatchResults:
+    """Regression tests for a real bug found via live testing 2026-07-20
+    (not a Codex finding — Codex can't make network calls): Crustdata's
+    results files are gzip-compressed but the server doesn't set
+    Content-Encoding, so a naive `.text` read silently produced zero
+    records even when the job fully succeeded — the whole feature would
+    have done nothing in production."""
+
+    def test_gzip_compressed_single_file_is_decompressed(self):
+        records = [{"original_identifier": "https://www.linkedin.com/in/a", "data": {"basic_profile": {"name": "A"}}}]
+        with patch("crustdata_search.requests.get", return_value=_gzip_response(records)):
+            result = _download_batch_results({"download_url": "https://s3.example.com/results.jsonl.gz"}, api_key="test-key")
+        assert result == records
+
+    def test_multiple_part_files_all_fetched(self):
+        """Larger jobs split into part-000.jsonl.gz, part-001.jsonl.gz, etc.
+        — download_urls (plural) must ALL be fetched, not just the first."""
+        part0 = [{"original_identifier": "https://www.linkedin.com/in/a", "data": {"basic_profile": {"name": "A"}}}]
+        part1 = [{"original_identifier": "https://www.linkedin.com/in/b", "data": {"basic_profile": {"name": "B"}}}]
+        responses = [_gzip_response(part0), _gzip_response(part1)]
+        with patch("crustdata_search.requests.get", side_effect=responses):
+            result = _download_batch_results(
+                {"download_urls": ["https://s3.example.com/part-000.jsonl.gz", "https://s3.example.com/part-001.jsonl.gz"]},
+                api_key="test-key",
+            )
+        assert result == part0 + part1
+
+    def test_download_urls_preferred_over_singular_when_both_present(self):
+        part0 = [{"original_identifier": "https://www.linkedin.com/in/a", "data": {}}]
+        with patch("crustdata_search.requests.get", return_value=_gzip_response(part0)) as mock_get:
+            _download_batch_results(
+                {"download_url": "https://s3.example.com/single.jsonl.gz",
+                 "download_urls": ["https://s3.example.com/part-000.jsonl.gz"]},
+                api_key="test-key",
+            )
+        assert mock_get.call_args.args[0] == "https://s3.example.com/part-000.jsonl.gz"
+
+    def test_no_bearer_header_sent_to_s3_presigned_url(self):
+        """S3 presigned URLs authenticate via the query string — sending our
+        own Bearer header would be at best redundant, at worst rejected."""
+        with patch("crustdata_search.requests.get", return_value=_gzip_response([])) as mock_get:
+            _download_batch_results({"download_url": "https://s3.example.com/results.jsonl.gz"}, api_key="test-key")
+        assert mock_get.call_args.kwargs["headers"] is None
+
+    def test_inline_results_still_short_circuits_before_any_download(self):
+        with patch("crustdata_search.requests.get") as mock_get:
+            result = _download_batch_results({"results": [{"data": {"basic_profile": {"name": "Inline"}}}]}, api_key="test-key")
+        mock_get.assert_not_called()
+        assert result == [{"data": {"basic_profile": {"name": "Inline"}}}]
+
+    def test_no_download_url_returns_empty_list(self):
+        with patch("crustdata_search.requests.get") as mock_get:
+            result = _download_batch_results({"status": "completed"}, api_key="test-key")
+        mock_get.assert_not_called()
+        assert result == []
 
 
 class TestEnrichProfileToLegacyShape:

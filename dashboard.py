@@ -4908,8 +4908,17 @@ def enrich_thin_profiles_for_batch(profiles: list, api_key: str, db_client=None,
         url = p.get('linkedin_url')
         if not url:
             continue
+        # Fall back to the profile's own top-level flat skills/summary (e.g. a
+        # CSV-imported row with no nested raw blob at all) before deciding a
+        # profile is thin — mirrors screen_profile()'s own fallback ("Try to
+        # construct minimal profile from flat fields") a few lines below.
+        # Without this, a profile with no raw blob but perfectly usable flat
+        # fields gets misclassified as thin and enriched needlessly (Codex
+        # review, 2026-07-20).
         raw = _ensure_raw_dict(p.get('raw_crustdata') or p.get('raw_data'))
-        if not raw.get('skills') and not raw.get('summary'):
+        skills = raw.get('skills') or p.get('skills')
+        summary = raw.get('summary') or p.get('summary')
+        if not skills and not summary:
             thin_profiles.append(p)
 
     stats['thin_found'] = len(thin_profiles)

@@ -165,6 +165,26 @@ class TestEnrichThinProfilesForBatch:
         assert called["n"] == 0
         assert stats == {"thin_found": 0, "enriched": 0, "unmatched": 0, "credits_used": 0}
 
+    def test_flat_top_level_skills_and_summary_prevent_false_thin_classification(self, monkeypatch):
+        """Regression test for a Codex-caught bug (2026-07-20): a profile
+        with no raw_crustdata/raw_data at all (e.g. a CSV-imported row) but
+        usable flat top-level skills/summary must NOT be treated as thin —
+        screen_profile() already falls back to these same flat fields, so
+        enriching it would just be an unnecessary paid Crustdata call."""
+        flat_only = {
+            "linkedin_url": "https://www.linkedin.com/in/flatonly",
+            "name": "Flat Only",
+            "skills": "Python, Go",
+            "summary": "Already has a summary, just no nested raw blob.",
+        }
+        called = {"n": 0}
+        monkeypatch.setattr(dashboard, "batch_enrich_profiles", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
+
+        stats = dashboard.enrich_thin_profiles_for_batch([flat_only], api_key="test-key", db_client=None)
+
+        assert called["n"] == 0
+        assert stats["thin_found"] == 0
+
     def test_missing_either_skill_or_summary_alone_is_not_thin(self):
         """Alexey's call, 2026-07-20: only enrich when BOTH are missing, not
         just one — cheaper than an OR check."""

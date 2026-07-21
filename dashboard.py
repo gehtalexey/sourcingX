@@ -5668,7 +5668,10 @@ with tab_search:
                                 use_container_width=True,
                                 help=" · ".join(_meta) if _meta else None,
                             ):
-                                _load_people_search_into_form(_rs.get('filters') or {})
+                                _rs_filters = _rs.get('filters') or {}
+                                _load_people_search_into_form(_rs_filters)
+                                if _rs_filters.get('crust_semantic_query'):
+                                    st.session_state['_sem_expand_after_load'] = True
                                 st.session_state['_ps_loaded_msg'] = f"Loaded filters from: {_summary}"
                                 st.rerun()
                         with _row_get:
@@ -5760,7 +5763,7 @@ with tab_search:
         # their whole profile matches. Feeds the exact same results table /
         # selection / CSV export / "add to pipeline" code as the regular
         # filter search below, via semantic_profile_to_legacy_shape().
-        with st.expander("🔍 Search by description (beta)", expanded=False):
+        with st.expander("🔍 Search by description (beta)", expanded=st.session_state.pop('_sem_expand_after_load', False)):
             st.caption(
                 "Type who you're looking for in plain language — e.g. \"founding "
                 "engineers at developer-tools startups in Israel\" — instead of "
@@ -5875,6 +5878,42 @@ with tab_search:
                             'query': semantic_query.strip(),
                             'limit': int(semantic_limit),
                         }
+                        # Same background DB save the filter search uses (picked up by
+                        # the shared "Results Section" below) — without it these people
+                        # never land in the profiles table, so "Load saved (free)" on
+                        # this search's history entry would always find nothing.
+                        st.session_state['_pending_initial_save'] = True
+
+                        # Auto-save this description search to the same "recent
+                        # searches" history the filter search uses, so it shows up
+                        # there too (deduped per user by hash). Never fatal.
+                        try:
+                            _sem_filters_state = {
+                                'crust_semantic_query': semantic_query.strip(),
+                                'crust_semantic_limit': int(semantic_limit),
+                            }
+                            _sem_hash = hash_search_filters(_sem_filters_state)
+                            _sem_summary = summarize_search_filters(_sem_filters_state)
+                            _sem_result_urls = []
+                            _sem_seen_u = set()
+                            for _p in _sem_clean:
+                                _raw_u = _p.get('flagship_profile_url')
+                                _nu = normalize_linkedin_url(_raw_u) if _raw_u else None
+                                if _nu and _nu not in _sem_seen_u:
+                                    _sem_seen_u.add(_nu)
+                                    _sem_result_urls.append(_nu)
+                            record_people_search(
+                                _ps_db, _ps_username, _sem_filters_state, _sem_hash, _sem_summary,
+                                int(st.session_state.get('crustdata_search_total') or 0),
+                                result_urls=_sem_result_urls or None,
+                            )
+                            st.session_state['_ps_history_ref'] = {
+                                'username': _ps_username,
+                                'filters_hash': _sem_hash,
+                            }
+                        except Exception:
+                            pass
+
                         _sem_note = f" ({_sem_removed} already-seen removed)" if _sem_removed else ""
                         st.session_state['_search_loaded_msg'] = (
                             f"Found **{len(_sem_clean):,}** profiles matching your description{_sem_note}. "

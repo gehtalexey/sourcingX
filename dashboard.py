@@ -5878,11 +5878,19 @@ with tab_search:
                             'query': semantic_query.strip(),
                             'limit': int(semantic_limit),
                         }
-                        # Same background DB save the filter search uses (picked up by
-                        # the shared "Results Section" below) — without it these people
-                        # never land in the profiles table, so "Load saved (free)" on
-                        # this search's history entry would always find nothing.
-                        st.session_state['_pending_initial_save'] = True
+                        # Deliberately NOT setting _pending_initial_save here (unlike the
+                        # filter search below). That flag background-saves results via
+                        # save_enriched_profiles_bulk(), which unconditionally stamps
+                        # enrichment_status='enriched' + enriched_at — but these profiles
+                        # are known-incomplete (_semantic_incomplete, see
+                        # semantic_profile_to_legacy_shape docstring). Marking them
+                        # "enriched" would make get_enriched_urls()/get_recently_enriched_urls()
+                        # (the skip-lists used before re-scraping/re-enriching someone)
+                        # treat these people as already fully done, silently blocking the
+                        # real enrichment they still need — across this app AND the other
+                        # pipelines sharing this database. So "Load saved (free)" only
+                        # works for a description-search history entry once those people
+                        # have actually been enriched through the normal Load-tab flow.
 
                         # Auto-save this description search to the same "recent
                         # searches" history the filter search uses, so it shows up

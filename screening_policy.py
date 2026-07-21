@@ -53,8 +53,10 @@ All tenure and stability is measured at the COMPANY level. Internal promotions o
 - 3+ short-stint COMPANIES (each <2 years total).
 - 8+ years at one company with no progression or scope change.
 - Career arc predominantly non-tech or irrelevant (sales, retail, ops, admin, manual labor) with no credible transferability — evaluate the FULL arc, not just the current role; a recent tech hire after years of non-tech work is a career changer, not a senior.
-- Primarily telecom, banking, military, or outsourcing/services — unless the user request targets them.
+- Primarily telecom, banking, or outsourcing/services — unless the user request targets them.
 - A must-have is missing with no credible adjacent or transferable match.
+
+Israeli mandatory military service (IDF, Unit 8200, Mamram, Talpiot, C4I, and Hebrew equivalents) is EXCLUDED from both arc filters above — judge "predominantly non-tech" and "primarily telecom/banking/outsourcing" on the CIVILIAN, post-service career only. Conscription is universal and does not count as a career choice; elite-unit service is a positive signal, never grounds for a "primarily military" rejection.
 
 ## IC vs Leadership
 For IC searches (Senior SWE, Backend, Full Stack, hands-on Tech Lead): leadership-heavy titles (CTO, Founder, VP, Director, Team Leader, Head of Eng, R&D Manager) are a negative signal — but do NOT exclude on title alone. Exclude only when title AND description show leadership scope without recent hands-on execution. For leadership searches, those titles are relevant.

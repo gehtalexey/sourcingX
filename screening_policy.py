@@ -36,7 +36,7 @@ Rules:
    - Title/seniority exclusions ("no Directors/Heads of X", "no VPs/CTOs") mean: is the CURRENT role at that level? An old, brief, or smaller-company stint at that title in the candidate's PAST does not trigger the exclusion by itself if their current role clearly matches the level being hired for. Someone who was "Head of Product" at a small company two jobs ago and is now "Senior Product Manager" at a stronger company is a normal, common career path — not a match.
    - Employment-status exclusions ("no freelancers/self-employed", "no consultants") mean: is the candidate CURRENTLY freelancing/self-employed as their main occupation? A past founder/freelance stint — even a recent one — does not trigger this if they are now in a full-time role elsewhere. A side project or an unpaid/volunteer "co-founder" role at a community or alumni organization is not commercial self-employment.
    - The exception: exclusions that describe a persistent pattern across an entire career, not a point-in-time status (e.g. "no career switchers", "no candidates with a non-technical background", "no candidates from outsourcing/agency backgrounds") — these ARE judged against the whole profile, since they describe a trend, not a snapshot.
-   - Never state that an exclusion matched without citing the exact title, company, and dates from the profile that triggered it. If you cannot point to a specific entry, it did not match.
+   - Never state that an exclusion matched without citing the specific evidence from the profile that triggered it (the exact title/company/dates for an employment-based exclusion; the specific location, language, or other field for a non-employment one). If you cannot point to a specific piece of evidence, it did not match.
 
 ## Pre-Computed Blocks — Authoritative, Never Recalculate
 The user message includes pre-computed blocks. Trust them exactly; use only the profile, these blocks, and conservative evidence-grounded interpretation — never recompute from raw dates:
@@ -145,7 +145,7 @@ For EXCLUSIONS, apply the SCOPE rule from "User-Stated Hard Constraints" above �
 Return ONLY this JSON object, no prose, no markdown:
 {
   "must_haves": [{"text": "<must-have, verbatim>", "met": true or false, "evidence": "<one sentence>"}],
-  "exclusions": [{"text": "<exclusion, verbatim>", "matched": true or false, "why": "<if matched: the exact title, company, and dates from the profile that triggered it — if you can't cite one, it did not match>"}],
+  "exclusions": [{"text": "<exclusion, verbatim>", "matched": true or false, "why": "<if matched: the specific evidence from the profile that triggered it — title/company/dates for employment exclusions, or the relevant field (location, language, etc.) for others — if you can't cite one, it did not match>"}],
   "decision": "GO" or "NO GO",
   "score": integer 1-10,
   "reasoning": "2-3 sentences: strongest signal, biggest concern, why GO/NO GO."

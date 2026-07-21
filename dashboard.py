@@ -125,6 +125,7 @@ except ImportError:
 try:
     from crustdata_search import (
         search_people_db,
+        search_people_db_v2,
         build_filters as build_search_filters,
         normalize_search_results_to_df,
         check_credits as check_crustdata_credits,
@@ -138,8 +139,26 @@ try:
         COMPANY_INDUSTRIES,
     )
     HAS_CRUSTDATA_SEARCH = True
+
+    # Crustdata's legacy /screener/persondb/search endpoint (compact=false)
+    # returns full profiles — skills/summary included — in one call, and is
+    # cheaper/richer than the new v2025-11-01 /person/search endpoint, which
+    # never returns skills/summary regardless of what's requested. Crustdata
+    # has confirmed the legacy endpoint stays live until end of September
+    # 2026, so this branch's search-endpoint migration ships DISABLED by
+    # default — search_people_db() (legacy) stays the default search
+    # function everywhere in this file. The auto-fill-before-screening step
+    # (enrich_thin_profiles_for_batch, already live since 2026-07-20) already
+    # covers thin profiles regardless of which search sourced them, so
+    # flipping this one flag is the only change needed when the legacy
+    # endpoint is retired — nothing else in this file changes. Flip via
+    # CRUSTDATA_USE_SEARCH_V2=true in the environment (not config.json —
+    # this is a deploy-time switch, not a per-user setting).
+    CRUSTDATA_USE_SEARCH_V2 = os.environ.get('CRUSTDATA_USE_SEARCH_V2', 'false').strip().lower() == 'true'
+    _active_search_people_db = search_people_db_v2 if CRUSTDATA_USE_SEARCH_V2 else search_people_db
 except ImportError:
     HAS_CRUSTDATA_SEARCH = False
+    CRUSTDATA_USE_SEARCH_V2 = False
 
 # Plotly for charts
 try:
@@ -6278,7 +6297,7 @@ with tab_search:
                     progress_placeholder.info("Searching Crustdata database...")
 
                     _exclude_urls = st.session_state.get('past_candidates_urls_for_search') or None
-                    results = search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key, exclude_profiles=_exclude_urls)
+                    results = _active_search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key, exclude_profiles=_exclude_urls)
 
                     if results.get("profiles"):
                         # Name filter applied inline during pagination so we keep
@@ -6342,7 +6361,7 @@ with tab_search:
                         while cursor and len(all_profiles) < target:
                             progress_placeholder.info(f"Loading profiles... {len(all_profiles):,} / {target:,}")
                             remaining = target - len(all_profiles)
-                            page_results = search_people_db(
+                            page_results = _active_search_people_db(
                                 filters,
                                 limit=min(remaining, 1000),
                                 cursor=cursor,
@@ -6772,7 +6791,7 @@ with tab_search:
                                     )
 
                                     def _lm_fetch(cursor_val):
-                                        return search_people_db(
+                                        return _active_search_people_db(
                                             filters,
                                             limit=_lm_p.get('limit', 100),
                                             cursor=cursor_val,

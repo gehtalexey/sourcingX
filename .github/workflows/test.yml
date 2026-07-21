@@ -71,4 +71,5 @@ jobs:
             test_similar_profiles_auto_enrich.py \
             test_people_search_history.py \
             test_crustdata_batch_enrich.py \
-            test_enrich_thin_profiles_integration.py
+            test_enrich_thin_profiles_integration.py \
+            test_crustdata_v2_search.py

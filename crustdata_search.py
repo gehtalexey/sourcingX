@@ -65,6 +65,13 @@ CRUSTDATA_SEMANTIC_SEARCH_ENDPOINT = "https://api.crustdata.com/person/search"
 CRUSTDATA_API_VERSION = "2025-11-01"
 CREDITS_PER_RESULT_SEMANTIC = 0.03
 
+# Filter-based v2025-11-01 search (replaces CRUSTDATA_SEARCH_ENDPOINT above once
+# the migration cuts over — see search_people_db_v2()). Same dataset/endpoint
+# as the semantic search above, different request shape (filters, not a
+# free-text query).
+CRUSTDATA_SEARCH_V2_ENDPOINT = "https://api.crustdata.com/person/search"
+CREDITS_PER_RESULT_V2 = 0.03  # unchanged from legacy persondb/search (3 per 100)
+
 # Async batch enrichment (v2025-11-01) — fills in skills/summary/employment
 # history for profiles the description-search endpoint above can't return
 # them for. Verified live against docs.crustdata.com 2026-07-20: up to
@@ -691,6 +698,64 @@ def _v2_headers(api_key: str) -> Dict[str, str]:
 
 
 # =============================================================================
+# FILTER GRAMMAR — legacy (`column`) -> v2025-11-01 (`field`)
+# =============================================================================
+
+# Maps every filter column build_filters() can emit to its v2025-11-01
+# field path. Enumerated by reading build_filters() directly (Codex review,
+# 2026-07-20) rather than guessing a partial list — a filter added to
+# build_filters() later without a matching entry here falls through to the
+# "pass through unchanged" branch in _remap_filters(), which fails loudly
+# (wrong/zero results) rather than silently dropping the condition.
+_LEGACY_TO_V2_FIELD = {
+    "current_employers.title": "experience.employment_details.current.title",
+    "current_employers.name": "experience.employment_details.current.name",
+    "current_employers.seniority_level": "experience.employment_details.current.seniority_level",
+    "current_employers.company_headcount_range": "experience.employment_details.current.company_headcount_range",
+    "current_employers.company_industries": "experience.employment_details.current.company_industries",
+    "current_employers.business_email_verified": "experience.employment_details.current.business_email_verified",
+    "current_employers.function_category": "experience.employment_details.current.function_category",
+    "past_employers.name": "experience.employment_details.past.name",
+    "past_employers.title": "experience.employment_details.past.title",
+    "region": "professional_network.location.raw",
+    "headline": "basic_profile.headline",
+    "summary": "basic_profile.summary",
+    "skills": "skills.professional_network_skills",
+    "education_background.institute_name": "education.schools.school",
+    "years_of_experience_raw": "years_of_experience_raw",
+    "recently_changed_jobs": "recently_changed_jobs",
+    "num_of_connections": "professional_network.connections",
+    "location_country": "basic_profile.location.country",
+    "location_continent": "basic_profile.location.continent",
+}
+
+
+def _remap_filters(node):
+    """Recursively rewrite a legacy filter tree (`column`/`type`/`value` leaf
+    conditions, `op`+`conditions[]` groups) into the v2025-11-01 shape
+    (`field` instead of `column`, same operators — `>=`/`<=` rewritten to
+    `=>`/`=<` defensively, though build_filters() doesn't emit those today).
+    """
+    if not isinstance(node, dict):
+        return node
+    if "conditions" in node:
+        return {
+            **{k: v for k, v in node.items() if k != "conditions"},
+            "conditions": [_remap_filters(c) for c in node["conditions"]],
+        }
+    if "column" in node:
+        new_node = {k: v for k, v in node.items() if k != "column"}
+        legacy_field = node["column"]
+        new_node["field"] = _LEGACY_TO_V2_FIELD.get(legacy_field, legacy_field)
+        if new_node.get("type") == ">=":
+            new_node["type"] = "=>"
+        elif new_node.get("type") == "<=":
+            new_node["type"] = "=<"
+        return new_node
+    return node
+
+
+# =============================================================================
 # API FUNCTIONS
 # =============================================================================
 
@@ -1036,6 +1101,155 @@ def search_people_semantic(
         raise ExternalServiceError(
             "Crustdata",
             message="Semantic search request timed out",
+            status_code=504
+        )
+    except requests.exceptions.ConnectionError as e:
+        raise ServiceUnavailableError(
+            "Crustdata",
+            message=f"Connection error: {str(e)[:200]}"
+        )
+
+
+@retry_with_backoff(
+    max_retries=3,
+    base_delay=2.0,
+    retryable_exceptions=(RateLimitError, ServiceUnavailableError, ConnectionError, TimeoutError),
+)
+def search_people_db_v2(
+    filters: Dict[str, Any],
+    limit: int = 100,
+    cursor: str = None,
+    sorts: List[Dict[str, str]] = None,
+    api_key: str = None,
+    exclude_profiles: List[str] = None,
+) -> Dict[str, Any]:
+    """
+    Filter-based people search via the new v2025-11-01 POST /person/search
+    endpoint — the eventual replacement for search_people_db(). Takes the
+    SAME filters dict shape as search_people_db() (build_filters() output);
+    remaps the legacy column/AND-OR grammar to the new field-based grammar
+    internally via _remap_filters(), so callers don't change.
+
+    IMPORTANT: unlike the legacy endpoint (compact=false), /person/search
+    does NOT return `skills` or `summary` in results — they're filterable
+    but stripped from the response (verified live 2026-07-20). Every
+    returned profile is passed through semantic_profile_to_legacy_shape()
+    (the same v2-nested -> flat-legacy translator search_people_semantic()
+    results already go through — both endpoints return the same nested
+    shape), which marks each result `_semantic_incomplete: True` so
+    normalize_search_result() sets `_needs_enrichment: True`. That flags
+    thin profiles for the existing "1. Load" tab enrichment queue; SourcingX
+    also auto-fills them right before AI Screen regardless (see
+    enrich_thin_profiles_for_batch() in dashboard.py, live since 2026-07-20),
+    so this flag is a visibility signal, not the only path to getting them
+    filled in.
+
+    Returns the same shape as search_people_db(): {"profiles", "cursor",
+    "total_count", "credits_used", "response_time_ms"}.
+    """
+    if not api_key:
+        api_key = _load_api_key()
+    limiter = get_rate_limiter('crustdata')
+
+    body = {"limit": min(limit, 1000)}
+
+    if filters:
+        raw_filters = filters.get("filters") if "filters" in filters else filters
+        if raw_filters:
+            body["filters"] = _remap_filters(raw_filters)
+
+    if cursor:
+        body["cursor"] = cursor
+
+    # Crustdata nests exclusions under post_processing on both API versions.
+    if exclude_profiles:
+        clean_urls = [normalize_linkedin_url(u) for u in exclude_profiles if u and str(u).strip()]
+        clean_urls = [u for u in clean_urls if u]
+        if clean_urls:
+            body["post_processing"] = {"exclude_profiles": clean_urls}
+
+    if sorts:
+        # The sort field needs the SAME column -> field remap filters get —
+        # not just a key rename. Sending an unmapped legacy name like
+        # `num_of_connections` (the dashboard's default sort) as a v2 `field`
+        # value would sort wrong or get rejected outright (Codex review,
+        # 2026-07-20).
+        body["sorts"] = [
+            {
+                "field": _LEGACY_TO_V2_FIELD.get(s.get("field") or s.get("column"), s.get("field") or s.get("column")),
+                "order": s.get("order"),
+            }
+            for s in sorts
+        ]
+
+    # Keep the response small — skills/summary are never returned by this
+    # endpoint regardless of what's requested, so only ask for the sections
+    # the results table + semantic_profile_to_legacy_shape() actually read.
+    body["fields"] = [
+        "basic_profile", "experience.employment_details", "education.schools",
+        "social_handles.professional_network_identifier", "professional_network",
+        "years_of_experience_raw", "recently_changed_jobs", "crustdata_person_id",
+    ]
+
+    try:
+        limiter.wait_if_needed()
+    except RateLimitExceeded as e:
+        raise RateLimitError("Crustdata", message=str(e))
+
+    start_time = time.time()
+
+    try:
+        response = requests.post(
+            CRUSTDATA_SEARCH_V2_ENDPOINT,
+            json=body,
+            headers=_v2_headers(api_key),
+            timeout=60,
+        )
+
+        limiter.record_request()
+
+        if response.status_code == 401:
+            raise AuthenticationError("Crustdata")
+        elif response.status_code == 429:
+            retry_after = response.headers.get('Retry-After')
+            raise RateLimitError(
+                "Crustdata",
+                retry_after=float(retry_after) if retry_after else None
+            )
+        elif response.status_code >= 500:
+            raise ServiceUnavailableError(
+                "Crustdata",
+                status_code=response.status_code,
+                response_body=response.text[:500]
+            )
+        elif response.status_code >= 400:
+            raise ExternalServiceError(
+                "Crustdata",
+                message=f"Search v2 failed: {response.text[:500]}",
+                status_code=response.status_code,
+                response_body=response.text
+            )
+
+        data = response.json()
+        raw_profiles = data.get("profiles", [])
+        next_cursor = data.get("next_cursor")
+        total_count = data.get("total_count", len(raw_profiles))
+
+        profiles = [semantic_profile_to_legacy_shape(p) for p in raw_profiles]
+        credits_used = round(len(raw_profiles) * CREDITS_PER_RESULT_V2, 2)
+
+        return {
+            "profiles": profiles,
+            "cursor": next_cursor,
+            "total_count": total_count,
+            "credits_used": credits_used,
+            "response_time_ms": int((time.time() - start_time) * 1000),
+        }
+
+    except requests.exceptions.Timeout:
+        raise ExternalServiceError(
+            "Crustdata",
+            message="Search v2 request timed out",
             status_code=504
         )
     except requests.exceptions.ConnectionError as e:
@@ -2063,10 +2277,12 @@ __all__ = [
     'HEADCOUNT_RANGES',
     'CREDITS_PER_100_RESULTS',
     'CREDITS_PER_RESULT_SEMANTIC',
+    'CREDITS_PER_RESULT_V2',
     'CREDITS_PER_ENRICH_PROFILE_BASE',
     'BATCH_ENRICH_FIELDS',
     # Main functions
     'search_people_db',
+    'search_people_db_v2',
     'build_filters',
     'check_credits',
     'search_people_semantic',

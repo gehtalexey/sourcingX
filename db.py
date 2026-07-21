@@ -2585,7 +2585,7 @@ def delete_search_history_entry(client: SupabaseClient, agent_id: str, csv_name:
 
 # Filter keys that change how many / how ordered, not WHO matches — so they are
 # excluded from the dedup hash (same people criteria = same search).
-_PEOPLE_SEARCH_HASH_IGNORE_KEYS = {'crust_search_sort', 'crust_search_limit'}
+_PEOPLE_SEARCH_HASH_IGNORE_KEYS = {'crust_search_sort', 'crust_search_limit', 'crust_semantic_limit'}
 
 
 def _canonicalize_search_value(value):
@@ -2636,6 +2636,16 @@ def hash_search_filters(filters: dict) -> str:
 def summarize_search_filters(filters: dict) -> str:
     """Short human label for a saved search, e.g. 'team lead · @Wiz · Tel Aviv · Senior'."""
     f = filters or {}
+
+    # Search-by-description (semantic) searches have no filter fields, just a
+    # free-text query — label them distinctly so they're recognizable in the
+    # saved-searches list instead of falling through to "All profiles".
+    _semantic_query = (f.get('crust_semantic_query') or '').strip()
+    if _semantic_query:
+        summary = f'🔍 "{_semantic_query}"'
+        if len(summary) > 140:
+            summary = summary[:139] + '…"'
+        return summary
 
     def _txt(key):
         val = f.get(key)

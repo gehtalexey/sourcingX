@@ -125,6 +125,7 @@ except ImportError:
 try:
     from crustdata_search import (
         search_people_db,
+        search_people_db_v2,
         build_filters as build_search_filters,
         normalize_search_results_to_df,
         check_credits as check_crustdata_credits,
@@ -138,8 +139,26 @@ try:
         COMPANY_INDUSTRIES,
     )
     HAS_CRUSTDATA_SEARCH = True
+
+    # Crustdata's legacy /screener/persondb/search endpoint (compact=false)
+    # returns full profiles — skills/summary included — in one call, and is
+    # cheaper/richer than the new v2025-11-01 /person/search endpoint, which
+    # never returns skills/summary regardless of what's requested. Crustdata
+    # has confirmed the legacy endpoint stays live until end of September
+    # 2026, so this branch's search-endpoint migration ships DISABLED by
+    # default — search_people_db() (legacy) stays the default search
+    # function everywhere in this file. The auto-fill-before-screening step
+    # (enrich_thin_profiles_for_batch, already live since 2026-07-20) already
+    # covers thin profiles regardless of which search sourced them, so
+    # flipping this one flag is the only change needed when the legacy
+    # endpoint is retired — nothing else in this file changes. Flip via
+    # CRUSTDATA_USE_SEARCH_V2=true in the environment (not config.json —
+    # this is a deploy-time switch, not a per-user setting).
+    CRUSTDATA_USE_SEARCH_V2 = os.environ.get('CRUSTDATA_USE_SEARCH_V2', 'false').strip().lower() == 'true'
+    _active_search_people_db = search_people_db_v2 if CRUSTDATA_USE_SEARCH_V2 else search_people_db
 except ImportError:
     HAS_CRUSTDATA_SEARCH = False
+    CRUSTDATA_USE_SEARCH_V2 = False
 
 # Plotly for charts
 try:
@@ -5649,7 +5668,10 @@ with tab_search:
                                 use_container_width=True,
                                 help=" · ".join(_meta) if _meta else None,
                             ):
-                                _load_people_search_into_form(_rs.get('filters') or {})
+                                _rs_filters = _rs.get('filters') or {}
+                                _load_people_search_into_form(_rs_filters)
+                                if _rs_filters.get('crust_semantic_query'):
+                                    st.session_state['_sem_expand_after_load'] = True
                                 st.session_state['_ps_loaded_msg'] = f"Loaded filters from: {_summary}"
                                 st.rerun()
                         with _row_get:
@@ -5741,7 +5763,7 @@ with tab_search:
         # their whole profile matches. Feeds the exact same results table /
         # selection / CSV export / "add to pipeline" code as the regular
         # filter search below, via semantic_profile_to_legacy_shape().
-        with st.expander("🔍 Search by description (beta)", expanded=False):
+        with st.expander("🔍 Search by description (beta)", expanded=st.session_state.pop('_sem_expand_after_load', False)):
             st.caption(
                 "Type who you're looking for in plain language — e.g. \"founding "
                 "engineers at developer-tools startups in Israel\" — instead of "
@@ -5856,6 +5878,50 @@ with tab_search:
                             'query': semantic_query.strip(),
                             'limit': int(semantic_limit),
                         }
+                        # Deliberately NOT setting _pending_initial_save here (unlike the
+                        # filter search below). That flag background-saves results via
+                        # save_enriched_profiles_bulk(), which unconditionally stamps
+                        # enrichment_status='enriched' + enriched_at — but these profiles
+                        # are known-incomplete (_semantic_incomplete, see
+                        # semantic_profile_to_legacy_shape docstring). Marking them
+                        # "enriched" would make get_enriched_urls()/get_recently_enriched_urls()
+                        # (the skip-lists used before re-scraping/re-enriching someone)
+                        # treat these people as already fully done, silently blocking the
+                        # real enrichment they still need — across this app AND the other
+                        # pipelines sharing this database. So "Load saved (free)" only
+                        # works for a description-search history entry once those people
+                        # have actually been enriched through the normal Load-tab flow.
+
+                        # Auto-save this description search to the same "recent
+                        # searches" history the filter search uses, so it shows up
+                        # there too (deduped per user by hash). Never fatal.
+                        try:
+                            _sem_filters_state = {
+                                'crust_semantic_query': semantic_query.strip(),
+                                'crust_semantic_limit': int(semantic_limit),
+                            }
+                            _sem_hash = hash_search_filters(_sem_filters_state)
+                            _sem_summary = summarize_search_filters(_sem_filters_state)
+                            _sem_result_urls = []
+                            _sem_seen_u = set()
+                            for _p in _sem_clean:
+                                _raw_u = _p.get('flagship_profile_url')
+                                _nu = normalize_linkedin_url(_raw_u) if _raw_u else None
+                                if _nu and _nu not in _sem_seen_u:
+                                    _sem_seen_u.add(_nu)
+                                    _sem_result_urls.append(_nu)
+                            record_people_search(
+                                _ps_db, _ps_username, _sem_filters_state, _sem_hash, _sem_summary,
+                                int(st.session_state.get('crustdata_search_total') or 0),
+                                result_urls=_sem_result_urls or None,
+                            )
+                            st.session_state['_ps_history_ref'] = {
+                                'username': _ps_username,
+                                'filters_hash': _sem_hash,
+                            }
+                        except Exception:
+                            pass
+
                         _sem_note = f" ({_sem_removed} already-seen removed)" if _sem_removed else ""
                         st.session_state['_search_loaded_msg'] = (
                             f"Found **{len(_sem_clean):,}** profiles matching your description{_sem_note}. "
@@ -6278,7 +6344,7 @@ with tab_search:
                     progress_placeholder.info("Searching Crustdata database...")
 
                     _exclude_urls = st.session_state.get('past_candidates_urls_for_search') or None
-                    results = search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key, exclude_profiles=_exclude_urls)
+                    results = _active_search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key, exclude_profiles=_exclude_urls)
 
                     if results.get("profiles"):
                         # Name filter applied inline during pagination so we keep
@@ -6342,7 +6408,7 @@ with tab_search:
                         while cursor and len(all_profiles) < target:
                             progress_placeholder.info(f"Loading profiles... {len(all_profiles):,} / {target:,}")
                             remaining = target - len(all_profiles)
-                            page_results = search_people_db(
+                            page_results = _active_search_people_db(
                                 filters,
                                 limit=min(remaining, 1000),
                                 cursor=cursor,
@@ -6772,7 +6838,7 @@ with tab_search:
                                     )
 
                                     def _lm_fetch(cursor_val):
-                                        return search_people_db(
+                                        return _active_search_people_db(
                                             filters,
                                             limit=_lm_p.get('limit', 100),
                                             cursor=cursor_val,

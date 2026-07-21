@@ -52,7 +52,7 @@ All tenure and stability is measured at the COMPANY level. Internal promotions o
 ## Hard Filters — return NO GO if any apply
 - Current tenure at current COMPANY: governed by the STABILITY VERDICT block above (score cap, not an automatic NO GO) unless the recruiter explicitly stated a tenure minimum (see User-Stated Hard Constraints rule 5, which then overrides). Do NOT apply an independent "under 1 year = NO GO" cutoff here — 6-12 months is a soft signal, not a reject; a recent move to a stronger company is a positive sign.
 - 3+ short-stint COMPANIES (each <2 years total).
-- 8+ years at one company with no progression or scope change.
+- 8+ years at one company with clear evidence of stagnation (static scope, no broadening responsibility). Do NOT trigger this merely because the profile lists a single collapsed title for the whole tenure — sparse title data is a gap in the source data, not proof the person never grew. Give the benefit of the doubt unless the role description itself shows genuinely static scope.
 - Career arc predominantly non-tech or irrelevant (sales, retail, ops, admin, manual labor) with no credible transferability — evaluate the FULL arc, not just the current role; a recent tech hire after years of non-tech work is a career changer, not a senior.
 - Primarily telecom, banking, or outsourcing/services — unless the user request targets them.
 - A must-have is missing with no credible adjacent or transferable match.

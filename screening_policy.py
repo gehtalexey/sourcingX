@@ -32,6 +32,11 @@ Rules:
 3. Interpret each constraint exactly as the recruiter wrote it. A constraint that lists alternatives ("Node.js or Python", "Tel Aviv or Herzliya") is SATISFIED by ANY ONE of the alternatives — never treat the first option as the real requirement and the rest as fallback, and never require all of them at once. Do not add conditions the recruiter did not state (e.g. do not require experience to be "recent", or a stint to be longer than stated, unless the recruiter said so).
 4. Be strict and literal about whether a correctly-interpreted constraint is met — if the profile lacks evidence it is satisfied, treat it as a fail and say so.
 5. A stated constraint OVERRIDES the generic Hard Filters below when stricter (e.g. user says "min 6 months" — use that, not the generic 1-year default).
+6. SCOPE — most exclusions describe the candidate's CURRENT state, not their whole career. Get this right or you will reject the best candidates:
+   - Title/seniority exclusions ("no Directors/Heads of X", "no VPs/CTOs") mean: is the CURRENT role at that level? An old, brief, or smaller-company stint at that title in the candidate's PAST does not trigger the exclusion by itself if their current role clearly matches the level being hired for. Someone who was "Head of Product" at a small company two jobs ago and is now "Senior Product Manager" at a stronger company is a normal, common career path — not a match.
+   - Employment-status exclusions ("no freelancers/self-employed", "no consultants") mean: is the candidate CURRENTLY freelancing/self-employed as their main occupation? A past founder/freelance stint — even a recent one — does not trigger this if they are now in a full-time role elsewhere. A side project or an unpaid/volunteer "co-founder" role at a community or alumni organization is not commercial self-employment.
+   - The exception: exclusions that describe a persistent pattern across an entire career, not a point-in-time status (e.g. "no career switchers", "no candidates with a non-technical background", "no candidates from outsourcing/agency backgrounds") — these ARE judged against the whole profile, since they describe a trend, not a snapshot.
+   - Never state that an exclusion matched without citing the exact title, company, and dates from the profile that triggered it. If you cannot point to a specific entry, it did not match.
 
 ## Pre-Computed Blocks — Authoritative, Never Recalculate
 The user message includes pre-computed blocks. Trust them exactly; use only the profile, these blocks, and conservative evidence-grounded interpretation — never recompute from raw dates:
@@ -133,12 +138,14 @@ def get_system_prompt() -> str:
 # ===========================================================================
 
 _STRUCTURED_OUTPUT = """## Request Format & Output
-The recruiter request below has labelled sections — ROLE & CONTEXT (calibration only), MUST-HAVES (all required), EXCLUSIONS (any match disqualifies). An "X or Y" line is met by either option; judge each line holistically against the whole profile.
+The recruiter request below has labelled sections — ROLE & CONTEXT (calibration only), MUST-HAVES (all required), EXCLUSIONS (any match disqualifies). An "X or Y" line is met by either option.
+For MUST-HAVES, credit cumulative evidence across the whole career (e.g. total years of relevant experience doesn't have to be all at the current company).
+For EXCLUSIONS, apply the SCOPE rule from "User-Stated Hard Constraints" above — judge title/status exclusions against the candidate's CURRENT position, not their full history, unless the exclusion is explicitly about a persistent career-wide pattern.
 
 Return ONLY this JSON object, no prose, no markdown:
 {
   "must_haves": [{"text": "<must-have, verbatim>", "met": true or false, "evidence": "<one sentence>"}],
-  "exclusions": [{"text": "<exclusion, verbatim>", "matched": true or false, "why": "<one sentence>"}],
+  "exclusions": [{"text": "<exclusion, verbatim>", "matched": true or false, "why": "<if matched: the exact title, company, and dates from the profile that triggered it — if you can't cite one, it did not match>"}],
   "decision": "GO" or "NO GO",
   "score": integer 1-10,
   "reasoning": "2-3 sentences: strongest signal, biggest concern, why GO/NO GO."

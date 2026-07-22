@@ -4521,6 +4521,34 @@ def _decision_to_fit_label(decision: str, score: int) -> str:
     return "Good Fit" if s >= GO_CONFIDENCE_THRESHOLD else "Maybe"
 
 
+def _verdicts_force_no_go(must_have_verdicts, exclusion_verdicts):
+    """Return (force_no_go: bool, reason: str). True when the model's own
+    per-criterion verdicts contradict a GO: any must-have not met, or any
+    exclusion matched. Conservative: if there are NO verdicts at all (empty/None),
+    return (False, '') so we never override a decision the model made without
+    emitting verdicts."""
+    def _is_true(v):   # met/matched robust truthiness
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return v.strip().lower() == 'true'
+        return False
+    failed = [str(m.get('text', '')).strip() for m in (must_have_verdicts or [])
+              if isinstance(m, dict) and not _is_true(m.get('met'))]
+    matched = [str(e.get('text', '')).strip() for e in (exclusion_verdicts or [])
+               if isinstance(e, dict) and _is_true(e.get('matched'))]
+    if not (must_have_verdicts or exclusion_verdicts):
+        return (False, '')
+    if failed or matched:
+        bits = []
+        if failed:
+            bits.append('must-have(s) not met: ' + '; '.join(x for x in failed if x))
+        if matched:
+            bits.append('exclusion(s) matched: ' + '; '.join(x for x in matched if x))
+        return (True, ' | '.join(bits))
+    return (False, '')
+
+
 _DEFAULT_USER_REQUEST = "Senior software engineering candidate. Apply the standard policy."
 
 
@@ -4703,6 +4731,29 @@ def screen_profile(profile: dict, job_description: str, client,
                 "exclusion_verdicts": scr.get("exclusions", []),
                 "bonus_tags": bonus_tags,
             }
+
+            # Deterministic safety catch: the model returns a per-criterion
+            # verdict on every must-have/exclusion AND a top-level decision,
+            # but nothing previously checked the two against each other — a
+            # model could mark a must-have "met": false yet still say
+            # "decision": "GO". Enforce the rule the prompt already states:
+            # GO only when every must-have is met and no exclusion matched.
+            # Never flips a NO GO into a GO — only tightens.
+            force_no_go, guard_reason = _verdicts_force_no_go(
+                result["must_have_verdicts"], result["exclusion_verdicts"]
+            )
+            if force_no_go and decision == "GO":
+                decision = "NO GO"
+                result["decision"] = "NO GO"
+                result["fit"] = _decision_to_fit_label("NO GO", score)
+                override_note = (
+                    f"Auto-NO GO (model verdicts contradicted its GO): "
+                    f"{guard_reason}. {reasoning}"
+                )
+                result["reasoning"] = override_note
+                result["summary"] = override_note
+                result["decision_guard_override"] = True
+
             constraint_text = "\n".join(
                 [str(m) for m in must_haves] + [str(e) for e in exclusions]
             )

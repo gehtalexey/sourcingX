@@ -33,12 +33,16 @@ model:
 These tests never call an LLM and never hit the network.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 
 import dashboard
 from tenure_constraint_validator import (
     parse_max_tenure_constraint_months,
+    parse_tenure_constraint_months,
     longest_company_tenure_months,
+    merge_company_intervals_months,
     enforce_max_tenure_constraint,
     TENURE_OVERRIDE_SCORE,
 )
@@ -141,6 +145,32 @@ def test_internal_promotion_with_small_gap_still_merges():
     assert longest_company_tenure_months(raw) == 48
 
 
+def test_unknown_end_role_does_not_extend_neighbouring_stint():
+    """An unknown-end (end=None) role — a non-current role whose end_date
+    was blank/unparseable — must contribute 0 months on its own AND must
+    never extend or bridge a neighbouring stint, even when its start falls
+    within the 3-month merge-gap tolerance.
+
+    Before the fix, an end=None interval was converted to (start, start)
+    and kept in the merge, so 2019-01->2020-01 followed by a 2020-03->None
+    role at the same company incorrectly extended the merged interval's end
+    to 2020-03, inflating the total from 12 months to 14. It must stay 12.
+    """
+    intervals = [
+        (datetime(2019, 1, 1, tzinfo=timezone.utc), datetime(2020, 1, 1, tzinfo=timezone.utc)),
+        (datetime(2020, 3, 1, tzinfo=timezone.utc), None),
+    ]
+    assert merge_company_intervals_months(intervals) == 12
+
+
+def test_lone_unknown_end_role_is_zero_months():
+    """A company whose ONLY role has an unknown (unparseable) end_date must
+    return 0 months — not be dropped in a way that changes other behavior,
+    and not inflated."""
+    intervals = [(datetime(2019, 1, 1, tzinfo=timezone.utc), None)]
+    assert merge_company_intervals_months(intervals) == 0
+
+
 # ---------------------------------------------------------------------------
 # (c) Blank end_date treated as current
 # ---------------------------------------------------------------------------
@@ -188,9 +218,12 @@ def test_unparseable_non_current_end_date_is_unknown_not_inflated():
 @pytest.mark.parametrize("text, expected_months", [
     ("Looking for backend devs. No more than 5 years at one company.", 60),
     ("Senior role. At most 3 years at a company please.", 36),
-    ("Need someone who hasn't stayed too long — max 4 years at current company.", 48),
+    ("Need someone who hasn't stayed too long — max 4 years at one employer.", 48),
     ("Prefer candidates with less than 2 years at one company.", 24),
     ("No longer than 5 years at company.", 60),
+    ("No more than 5 years at the same company.", 60),
+    ("At most 3 years at a single company.", 36),
+    ("No longer than 2 years at any employer.", 24),
 ])
 def test_parse_max_tenure_constraint_realistic_phrasings(text, expected_months):
     assert parse_max_tenure_constraint_months(text) == expected_months
@@ -199,6 +232,22 @@ def test_parse_max_tenure_constraint_realistic_phrasings(text, expected_months):
 def test_parse_max_tenure_constraint_returns_none_when_absent():
     assert parse_max_tenure_constraint_months("Looking for a great backend engineer.") is None
     assert parse_max_tenure_constraint_months(None) is None
+
+
+def test_parse_max_tenure_constraint_current_company_not_parsed():
+    """Max-tenure enforcement (`longest_company_tenure_months`) checks the
+    longest tenure across ALL companies, past + current — correct for a
+    career-wide "no more than N years at one company" rule, but WRONG for
+    "at current company" (which should be current-only). So a max-tenure
+    phrase scoped to "current company/employer" must NOT be parsed here —
+    it's left to the model rather than misapplied against career-wide
+    tenure."""
+    assert parse_max_tenure_constraint_months(
+        "no more than 5 years at current company"
+    ) is None
+    assert parse_max_tenure_constraint_months(
+        "at most 3 years at the current employer"
+    ) is None
 
 
 def test_parse_max_tenure_constraint_takes_strictest_smallest():

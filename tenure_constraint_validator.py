@@ -198,36 +198,48 @@ def parse_tenure_constraint_months(text: Optional[str]) -> Optional[int]:
 # ---------------------------------------------------------------------------
 
 # Common trailing phrase: "at one company" / "at a company" / "at the
-# company" / "at current company" / "at current employer", etc.
+# company" / "at the same company" / "at a single company" / "at any
+# employer", etc.
+#
+# Deliberately does NOT match "current" — max-tenure enforcement
+# (``longest_company_tenure_months``) checks the longest tenure across ALL
+# companies (past + current), which is correct for a career-wide "no more
+# than N years at one company" rule but WRONG for "at current company"
+# (that should be current-only, which this deterministic validator does not
+# compute for the max case). So a "current company" max phrasing is left
+# unparsed here and falls through to the model instead of being misapplied
+# against career-wide tenure.
+#
 # Note: "one" is normalized to "1" by _normalize_number_words above, since
 # it's also a valid quantity word (e.g. "minimum one year") — so this
-# suffix must accept the digit form too.
-_AT_COMPANY_SUFFIX = r"at\s+(?:one\s+|1\s+|a\s+|the\s+)?(?:current\s+)?(?:employer|company)"
+# suffix must accept the digit form too. Up to two qualifier words are
+# accepted so "the same company" / "a single company" both match.
+_AT_ONE_COMPANY_SUFFIX = r"at\s+(?:(?:one|1|a|the|any|same|single)\s+){0,2}(?:company|employer)"
 
 _EN_MAX_PATTERNS = [
     # "no more than 5 years at one company"
     re.compile(
-        rf"no\s+more\s+than\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_COMPANY_SUFFIX}",
+        rf"no\s+more\s+than\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_ONE_COMPANY_SUFFIX}",
         re.IGNORECASE,
     ),
     # "at most 3 years at a company"
     re.compile(
-        rf"at\s+most\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_COMPANY_SUFFIX}",
+        rf"at\s+most\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_ONE_COMPANY_SUFFIX}",
         re.IGNORECASE,
     ),
-    # "max 5 years at current company" / "max. 5 years at current employer"
+    # "max 5 years at one company" / "max. 5 years at a single employer"
     re.compile(
-        rf"max\.?\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_COMPANY_SUFFIX}",
+        rf"max\.?\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_ONE_COMPANY_SUFFIX}",
         re.IGNORECASE,
     ),
     # "less than 5 years at one company"
     re.compile(
-        rf"less\s+than\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_COMPANY_SUFFIX}",
+        rf"less\s+than\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_ONE_COMPANY_SUFFIX}",
         re.IGNORECASE,
     ),
     # "no longer than 5 years at company"
     re.compile(
-        rf"no\s+longer\s+than\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_COMPANY_SUFFIX}",
+        rf"no\s+longer\s+than\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_ONE_COMPANY_SUFFIX}",
         re.IGNORECASE,
     ),
 ]
@@ -311,16 +323,17 @@ def merge_company_intervals_months(intervals, gap_months: int = _INTERVAL_MERGE_
     promotions, back-to-back role changes) into one continuous stint.
 
     - Intervals with ``start`` is None are skipped (can't place them in time).
-    - Intervals with ``end`` is None are treated as zero-length at ``start``
-      (unknown/unparseable end date on a non-current role — we don't know
-      the duration, so we don't inflate it and we don't drop it from the
-      timeline; it just contributes 0 months on its own).
+    - Intervals with ``end`` is None are SKIPPED entirely (unknown/
+      unparseable end date on a non-current role — we don't know the
+      duration, so it contributes 0 months and must never extend or bridge
+      a neighbouring stint's end date). A company whose only role has an
+      unknown end returns 0 months total.
     """
     valid = []
     for start, end in intervals:
-        if start is None:
+        if start is None or end is None:
             continue
-        valid.append((start, end if end is not None else start))
+        valid.append((start, end))
     if not valid:
         return 0
 

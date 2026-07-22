@@ -4521,22 +4521,44 @@ def _decision_to_fit_label(decision: str, score: int) -> str:
     return "Good Fit" if s >= GO_CONFIDENCE_THRESHOLD else "Maybe"
 
 
+def _tri(v):
+    """Tri-state truthiness for a verdict field ('met'/'matched'). Returns
+    True/False ONLY for explicit, unambiguous signals; anything else (missing
+    key, None, empty string, an unrecognized string, or any other type) comes
+    back as None ("unknown") so callers never mistake a malformed/incomplete
+    verdict for an explicit one."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        if v == 1:
+            return True
+        if v == 0:
+            return False
+        return None
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ('true', 'yes', 'y', '1'):
+            return True
+        if s in ('false', 'no', 'n', '0'):
+            return False
+        return None
+    return None
+
+
 def _verdicts_force_no_go(must_have_verdicts, exclusion_verdicts):
     """Return (force_no_go: bool, reason: str). True when the model's own
-    per-criterion verdicts contradict a GO: any must-have not met, or any
-    exclusion matched. Conservative: if there are NO verdicts at all (empty/None),
-    return (False, '') so we never override a decision the model made without
-    emitting verdicts."""
-    def _is_true(v):   # met/matched robust truthiness
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, str):
-            return v.strip().lower() == 'true'
-        return False
+    per-criterion verdicts EXPLICITLY contradict a GO: any must-have with an
+    explicit met=false, or any exclusion with an explicit matched=true. A
+    missing or ambiguous field (_tri(...) is None) is never treated as a
+    contradiction -- only an explicit signal from the model may force an
+    override, so a malformed/incomplete verdict can never wrongly flip a
+    legitimate GO into a NO GO. Conservative: if there are NO verdicts at all
+    (empty/None), return (False, '') so we never override a decision the
+    model made without emitting verdicts."""
     failed = [str(m.get('text', '')).strip() for m in (must_have_verdicts or [])
-              if isinstance(m, dict) and not _is_true(m.get('met'))]
+              if isinstance(m, dict) and _tri(m.get('met')) is False]
     matched = [str(e.get('text', '')).strip() for e in (exclusion_verdicts or [])
-               if isinstance(e, dict) and _is_true(e.get('matched'))]
+               if isinstance(e, dict) and _tri(e.get('matched')) is True]
     if not (must_have_verdicts or exclusion_verdicts):
         return (False, '')
     if failed or matched:

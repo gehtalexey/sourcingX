@@ -191,6 +191,80 @@ def parse_tenure_constraint_months(text: Optional[str]) -> Optional[int]:
 
 
 # ---------------------------------------------------------------------------
+# 1b. Parse a MAXIMUM tenure-at-one-company constraint ("no job hoppers who
+#     stayed too long at one place" is not the concern here — this is the
+#     mirror image: recruiters who want candidates who have NOT stayed
+#     unusually long at a single company).
+# ---------------------------------------------------------------------------
+
+# Common trailing phrase: "at one company" / "at a company" / "at the
+# company" / "at current company" / "at current employer", etc.
+# Note: "one" is normalized to "1" by _normalize_number_words above, since
+# it's also a valid quantity word (e.g. "minimum one year") — so this
+# suffix must accept the digit form too.
+_AT_COMPANY_SUFFIX = r"at\s+(?:one\s+|1\s+|a\s+|the\s+)?(?:current\s+)?(?:employer|company)"
+
+_EN_MAX_PATTERNS = [
+    # "no more than 5 years at one company"
+    re.compile(
+        rf"no\s+more\s+than\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_COMPANY_SUFFIX}",
+        re.IGNORECASE,
+    ),
+    # "at most 3 years at a company"
+    re.compile(
+        rf"at\s+most\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_COMPANY_SUFFIX}",
+        re.IGNORECASE,
+    ),
+    # "max 5 years at current company" / "max. 5 years at current employer"
+    re.compile(
+        rf"max\.?\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_COMPANY_SUFFIX}",
+        re.IGNORECASE,
+    ),
+    # "less than 5 years at one company"
+    re.compile(
+        rf"less\s+than\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_COMPANY_SUFFIX}",
+        re.IGNORECASE,
+    ),
+    # "no longer than 5 years at company"
+    re.compile(
+        rf"no\s+longer\s+than\s+(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?)\s+{_AT_COMPANY_SUFFIX}",
+        re.IGNORECASE,
+    ),
+]
+
+
+def parse_max_tenure_constraint_months(text: Optional[str]) -> Optional[int]:
+    """Return the strictest (i.e. smallest) maximum-tenure-at-one-company
+    threshold, in months, found anywhere in ``text``, or None if no such
+    constraint is present.
+
+    "Strictest" = smallest threshold — for a MAX rule, the smaller cap is
+    the more restrictive one. English only (Hebrew min-tenure patterns
+    above are untouched by this).
+    """
+    if not text:
+        return None
+
+    text = _normalize_number_words(text)
+
+    found_months = []
+    for pattern in _EN_MAX_PATTERNS:
+        for match in pattern.finditer(text):
+            try:
+                qty = float(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            unit = match.group(2)
+            months = _unit_to_months(qty, unit)
+            if months > 0:
+                found_months.append(months)
+
+    if not found_months:
+        return None
+    return min(found_months)
+
+
+# ---------------------------------------------------------------------------
 # 2. Compute candidate's current-company tenure
 # ---------------------------------------------------------------------------
 
@@ -213,6 +287,118 @@ def _months_between(start: datetime, end: datetime) -> int:
         return 0
     months = (end.year - start.year) * 12 + (end.month - start.month)
     return max(0, months)
+
+
+
+# Rehire-gap merge tolerance for company-level tenure. Two stints at the same
+# company are merged into one continuous tenure when the later stint starts
+# within this many months of the earlier stint's end (covers back-to-back
+# internal promotions / role changes with no real gap, plus small data-entry
+# slop in start/end months). A gap longer than this (e.g. someone who left
+# and was rehired years later) is treated as two separate stints, not one
+# bridged tenure.
+_INTERVAL_MERGE_GAP_MONTHS = 3
+
+
+def merge_company_intervals_months(intervals, gap_months: int = _INTERVAL_MERGE_GAP_MONTHS) -> int:
+    """Merge a company's (start, end) role intervals and return the summed
+    duration, in whole months, of the merged intervals.
+
+    This is the single source of truth for "how long was this candidate
+    actually at this company" — it excludes rehire gaps (two stints at the
+    same company with a real gap between them are NOT bridged into one long
+    tenure) while still merging contiguous/overlapping intervals (internal
+    promotions, back-to-back role changes) into one continuous stint.
+
+    - Intervals with ``start`` is None are skipped (can't place them in time).
+    - Intervals with ``end`` is None are treated as zero-length at ``start``
+      (unknown/unparseable end date on a non-current role — we don't know
+      the duration, so we don't inflate it and we don't drop it from the
+      timeline; it just contributes 0 months on its own).
+    """
+    valid = []
+    for start, end in intervals:
+        if start is None:
+            continue
+        valid.append((start, end if end is not None else start))
+    if not valid:
+        return 0
+
+    valid.sort(key=lambda pair: pair[0])
+    merged = [list(valid[0])]
+    for start, end in valid[1:]:
+        last = merged[-1]
+        gap = (start.year - last[1].year) * 12 + (start.month - last[1].month)
+        if start <= last[1] or gap <= gap_months:
+            if end > last[1]:
+                last[1] = end
+        else:
+            merged.append([start, end])
+
+    total_months = 0
+    for start, end in merged:
+        total_months += max(0, (end.year - start.year) * 12 + (end.month - start.month))
+    return total_months
+
+
+def _company_intervals(raw: Optional[dict]) -> dict:
+    """Group every role (past + current) by company name into a list of
+    (start, end) datetime tuples, ready for ``merge_company_intervals_months``.
+
+    A missing/blank/"present"/"current" end_date means the role is current
+    (end = today). A non-empty but unparseable end_date on a non-current
+    role yields end=None (unknown duration — handled by the merge helper).
+    """
+    if not isinstance(raw, dict):
+        return {}
+    today = datetime.now(timezone.utc)
+    companies: dict = {}
+    for emp_key in ("past_employers", "current_employers"):
+        for emp in (raw.get(emp_key) or []):
+            if not isinstance(emp, dict):
+                continue
+            company = (emp.get("employer_name") or "").strip()
+            if not company:
+                continue
+            start = _parse_iso_date(emp.get("start_date"))
+            if start is None:
+                continue
+            raw_end = emp.get("end_date")
+            norm_end = str(raw_end).strip().lower() if raw_end is not None else ""
+            is_current = raw_end is None or norm_end in ("", "present", "current", "none", "null")
+            end = today if is_current else _parse_iso_date(raw_end)
+            companies.setdefault(company, []).append((start, end))
+    return companies
+
+
+def _longest_company_tenure(raw: Optional[dict]):
+    """Return (company_name, months) for the candidate's longest merged
+    company-level tenure across all companies (current + past), or
+    (None, None) if no parseable dates are available.
+    """
+    companies = _company_intervals(raw)
+    if not companies:
+        return None, None
+
+    best_company = None
+    best_months = -1
+    for company, intervals in companies.items():
+        months = merge_company_intervals_months(intervals)
+        if months > best_months:
+            best_months = months
+            best_company = company
+    return best_company, best_months
+
+
+def longest_company_tenure_months(raw: Optional[dict]) -> Optional[int]:
+    """Longest company-level tenure (in months) across all of the
+    candidate's companies, current + past. Uses merged intervals — rehire
+    gaps are excluded, internal promotions/back-to-back roles at the same
+    company are merged into one continuous stint. Returns None if no
+    parseable dates are available.
+    """
+    _, months = _longest_company_tenure(raw)
+    return months
 
 
 def current_company_tenure_months(raw: Optional[dict]) -> Optional[int]:
@@ -360,6 +546,97 @@ def enforce_tenure_constraint(
 
     # Tag for downstream inspection / debugging.
     result["tenure_override"] = {
+        "threshold_months": threshold_months,
+        "actual_months": actual_months,
+    }
+
+    return result
+
+
+def enforce_max_tenure_constraint(
+    result: dict,
+    jd_text: Optional[str],
+    raw: Optional[dict],
+    *,
+    threshold_months: Optional[int] = None,
+    actual_months: Optional[int] = None,
+) -> dict:
+    """Deterministic post-screening override — the MAXIMUM-tenure mirror of
+    ``enforce_tenure_constraint``.
+
+    If ``jd_text`` contains a "no more than N years/months at one company"
+    style constraint AND the candidate's longest company-level tenure
+    (merged intervals, gaps excluded, internal promotions merged —
+    ``longest_company_tenure_months``) EXCEEDS that threshold, mutate
+    ``result`` in place to "Not a Fit"/"NO GO" with score capped at
+    ``TENURE_OVERRIDE_SCORE``. Otherwise leave ``result`` untouched.
+
+    ``threshold_months`` and ``actual_months`` can be passed pre-computed to
+    avoid re-parsing / re-computing in tight loops; otherwise this function
+    derives them itself.
+
+    Conservative by design: if no max-tenure constraint parses from
+    ``jd_text``, or no company has a parseable date, this is a no-op.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    if threshold_months is None:
+        threshold_months = parse_max_tenure_constraint_months(jd_text)
+    if threshold_months is None:
+        # No max-tenure constraint in the request → pass-through.
+        return result
+
+    company_name = None
+    if actual_months is None:
+        company_name, actual_months = _longest_company_tenure(raw)
+    if actual_months is None:
+        # No company with a parseable date → can't prove a violation.
+        return result
+
+    if actual_months <= threshold_months:
+        # Candidate satisfies the constraint. Leave the result alone.
+        return result
+
+    # --- Override ---
+    override_msg = (
+        f"Hard constraint violated: recruiter requested no more than "
+        f"{threshold_months} months at one company; candidate has "
+        f"{actual_months} months at {company_name or 'one company'}."
+    )
+
+    original_reasoning = (
+        result.get("reasoning")
+        or result.get("summary")
+        or ""
+    )
+    new_reasoning = override_msg
+    if original_reasoning:
+        new_reasoning = f"{override_msg} (Original model reasoning: {original_reasoning})"
+
+    # Cap the score (don't raise it if model already gave 1).
+    try:
+        existing_score = int(result.get("score") or 0)
+    except (TypeError, ValueError):
+        existing_score = 0
+    new_score = min(existing_score, TENURE_OVERRIDE_SCORE) if existing_score > 0 else TENURE_OVERRIDE_SCORE
+
+    result["score"] = new_score
+
+    if "fit" in result:
+        result["fit"] = "Not a Fit"
+    if "category" in result:
+        result["category"] = "No Fit"
+
+    if "decision" in result:
+        result["decision"] = "NO GO"
+
+    if "reasoning" in result:
+        result["reasoning"] = new_reasoning
+    if "summary" in result:
+        result["summary"] = new_reasoning
+
+    result["max_tenure_override"] = {
         "threshold_months": threshold_months,
         "actual_months": actual_months,
     }

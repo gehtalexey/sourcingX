@@ -4251,8 +4251,27 @@ def compute_role_durations(raw):
             return f"{m}m"
         return f"{y}y {m}m"
 
+    def _role_end(emp, today):
+        """Interpret a role's end_date, treating blank/"present"/"current"
+        as CURRENT (runs to today) and a non-empty-but-unparseable end_date
+        on a non-current role as UNKNOWN (returns end=None — do not inflate
+        to today).
+        """
+        raw_end = emp.get('end_date')
+        norm = str(raw_end).strip().lower() if raw_end is not None else ''
+        is_current = (raw_end is None) or norm in ('', 'present', 'current', 'none', 'null')
+        if is_current:
+            return today, True
+        parsed = _parse_date(raw_end)
+        return (parsed, False) if parsed else (None, False)
+
+    # Merged-interval company tenure (rehire gaps excluded, internal
+    # promotions merged) — same logic used by tenure_constraint_validator's
+    # max-tenure hard constraint (Fix 3), imported here so both stay in sync.
+    from tenure_constraint_validator import merge_company_intervals_months
+
     # Track company-level data for stability summary
-    companies = {}  # company_name -> {min_start, max_end, is_current, titles}
+    companies = {}  # company_name -> {intervals: [(start,end)], max_end, is_current, titles}
     career_start = None  # Track earliest role start date
 
     for emp_key in ['past_employers', 'current_employers']:
@@ -4263,11 +4282,15 @@ def compute_role_durations(raw):
             has_roles = True
             company = emp.get('employer_name', '?')
             start = _parse_date(emp.get('start_date'))
-            end = _parse_date(emp.get('end_date')) or today
-            is_current = emp.get('end_date') is None
-            months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if start else 0
+            end, is_current = _role_end(emp, today)
+            months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if start and end else 0
             start_str = start.strftime('%b %Y') if start else '?'
-            end_str = 'today' if is_current else end.strftime('%b %Y') if end else '?'
+            if is_current:
+                end_str = 'today'
+            elif end:
+                end_str = end.strftime('%b %Y')
+            else:
+                end_str = '?'
             dur = _fmt_duration(months)
 
             # Track career start date
@@ -4281,12 +4304,10 @@ def compute_role_durations(raw):
 
             # Group by company (also track titles for internship detection)
             if company not in companies:
-                companies[company] = {'min_start': start, 'max_end': end, 'is_current': False, 'titles': []}
-            else:
-                if start and (companies[company]['min_start'] is None or start < companies[company]['min_start']):
-                    companies[company]['min_start'] = start
-                if end > companies[company]['max_end']:
-                    companies[company]['max_end'] = end
+                companies[company] = {'intervals': [], 'max_end': end, 'is_current': False, 'titles': []}
+            companies[company]['intervals'].append((start, end))
+            if end and (companies[company]['max_end'] is None or end > companies[company]['max_end']):
+                companies[company]['max_end'] = end
             companies[company]['titles'].append(title.lower())
             if is_current:
                 companies[company]['is_current'] = True
@@ -4310,8 +4331,11 @@ def compute_role_durations(raw):
     _intern_keywords = {'intern', 'internship', 'trainee', 'apprentice', 'student', 'associate'}
 
     for comp_name, comp_data in companies.items():
-        total_months = max(0, (comp_data['max_end'].year - comp_data['min_start'].year) * 12 +
-                           (comp_data['max_end'].month - comp_data['min_start'].month)) if comp_data['min_start'] else 0
+        # Sum of merged (start, end) intervals — rehire gaps are excluded
+        # (two stints at the same company with a real gap between them do
+        # NOT get bridged into one long tenure); adjacent/overlapping
+        # intervals (internal promotions) still merge into one stint.
+        total_months = merge_company_intervals_months(comp_data['intervals'])
         if comp_data['is_current']:
             # If multiple current companies, pick the longest tenure (primary role)
             if current_company_months is None or total_months > current_company_months:
@@ -4375,13 +4399,13 @@ def compute_role_durations(raw):
             if not title:
                 continue
             start = _parse_date(emp.get('start_date'))
-            end = _parse_date(emp.get('end_date')) or today
+            end, _is_current_mil = _role_end(emp, today)
             if not start:
                 continue
             is_military = is_military_position(title, emp.get('employer_name'))
             all_starts.append(start)
             if is_military:
-                mil_months = max(0, (end.year - start.year) * 12 + (end.month - start.month))
+                mil_months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if end else 0
                 military_months += mil_months
                 military_positions.append(f"{title} at {emp.get('employer_name', '?')} ({_fmt_duration(mil_months)})")
             else:
@@ -4425,8 +4449,8 @@ def compute_role_durations(raw):
                     continue
                 if any(kw in title_lower for kw in _swe_keywords):
                     start = _parse_date(emp.get('start_date'))
-                    end = _parse_date(emp.get('end_date')) or today
-                    months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if start else 0
+                    end, _is_current_swe = _role_end(emp, today)
+                    months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if start and end else 0
                     swe_roles.append(f'{title} at {emp.get("employer_name", "?")} ({_fmt_duration(months)})')
         if swe_roles:
             lines.append('')
@@ -4735,8 +4759,16 @@ def screen_profile(profile: dict, job_description: str, client,
         # asked for a minimum tenure and the candidate is below it.
         # See tenure_constraint_validator.py (Issue 7, Chen).
         try:
-            from tenure_constraint_validator import enforce_tenure_constraint
+            from tenure_constraint_validator import (
+                enforce_tenure_constraint,
+                enforce_max_tenure_constraint,
+            )
             result = enforce_tenure_constraint(result, constraint_text, raw)
+            # Mirror check: recruiter-stated MAXIMUM tenure at one company
+            # (e.g. "no more than 5 years at one company"). Same
+            # deterministic, post-model override pattern as the minimum
+            # check above. See tenure_constraint_validator.py.
+            result = enforce_max_tenure_constraint(result, constraint_text, raw)
         except Exception:
             # Validator must NEVER crash screening. On any error, fall
             # through with the original model result.

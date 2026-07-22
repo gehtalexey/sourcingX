@@ -116,3 +116,62 @@ class TestTenureRuleLowered:
         system_prompt = get_system_prompt()
         assert "min 6 months" in system_prompt
         assert "generic 1-year default" in system_prompt
+
+
+class TestMinVsMaxMilitaryCredit:
+    """Wave 2: a MINIMUM "N+ years" rule must credit role-relevant Israeli
+    military technical service at HALF, added to civilian role-relevant
+    experience — while a MAXIMUM / seniority-cap rule still uses civilian-
+    only INDUSTRY EXPERIENCE with no military credit at all. Before this
+    change the policy lumped min and max together as "use INDUSTRY
+    EXPERIENCE", under-crediting strong ex-army candidates against a
+    minimum-years bar."""
+
+    def test_policy_splits_minimum_from_maximum_rules(self):
+        assert "MAXIMUM" in SCREENING_POLICY and "MINIMUM" in SCREENING_POLICY, (
+            "The EXPERIENCE SUMMARY bullet must explicitly distinguish "
+            "MAXIMUM/ceiling rules from MINIMUM/'N+ years' rules."
+        )
+
+    def test_policy_credits_half_military_toward_minimum(self):
+        assert "HALF credit" in SCREENING_POLICY, (
+            "Policy must state that role-relevant Israeli military "
+            "technical service counts at HALF credit toward a MINIMUM "
+            "years requirement."
+        )
+        assert "never full military credit toward a minimum" in SCREENING_POLICY
+
+    def test_policy_still_forbids_military_for_maximum(self):
+        assert "never any military credit toward a maximum" in SCREENING_POLICY
+
+    def test_policy_still_forbids_total_career_span(self):
+        assert "never TOTAL CAREER SPAN" in SCREENING_POLICY
+
+
+class TestStartupFitDoesNotDefaultToNotMet:
+    """Wave 2: enrichment often lacks company size and company description.
+    The model must not treat that absence as evidence AGAINST startup fit —
+    it should judge from whatever signal IS present (role descriptions,
+    company name, career pattern) and lean toward MET when truly
+    ambiguous, rather than rejecting a possibly-strong candidate on a data
+    gap."""
+
+    def test_startup_section_addresses_missing_size_and_description(self):
+        assert "NO company size and NO company description" in SCREENING_POLICY
+
+    def test_startup_section_forbids_not_met_on_missing_data(self):
+        assert (
+            'Do NOT mark "startup experience" as not-met just because '
+            'size/description is missing.' in SCREENING_POLICY
+        )
+
+    def test_startup_section_leans_toward_met_when_ambiguous(self):
+        assert "lean toward MET" in SCREENING_POLICY
+
+    def test_startup_section_keeps_stealth_rule(self):
+        # Guard against accidentally deleting the pre-existing Stealth rule
+        # while adding the new thin-data guidance.
+        assert '"Stealth"' in SCREENING_POLICY
+
+    def test_startup_section_keeps_judge_at_the_time_rule(self):
+        assert "AT THE TIME the candidate worked there" in SCREENING_POLICY

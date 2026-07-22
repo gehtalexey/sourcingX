@@ -4427,7 +4427,7 @@ def compute_role_durations(raw):
             lines.append('>>> EXPERIENCE LIMIT CHECK: MAXIMUM / ceiling rules ("max N years", "reject >N years") — compare against INDUSTRY EXPERIENCE above (civilian only), NEVER TOTAL CAREER SPAN. MINIMUM rules ("min N years", "N+ years") for a specific role/skill — count civilian role-relevant experience PLUS the HALF-credit military figure above, ONLY if that military service is relevant to the required skill; NEVER count military at full credit toward a minimum, and NEVER use TOTAL CAREER SPAN for either. <<<')
         else:
             lines.append(f'  INDUSTRY EXPERIENCE: {_fmt_duration(total_months)} (no military service detected)')
-            lines.append('>>> EXPERIENCE LIMIT CHECK: for both MAXIMUM ("max N years", "reject >N years") and MINIMUM ("min N years", "N+ years") rules, use INDUSTRY EXPERIENCE above (no military service to credit here). <<<')
+            lines.append('>>> EXPERIENCE LIMIT CHECK: MAXIMUM rules ("max N years", "reject >N years") — compare against INDUSTRY EXPERIENCE above, never TOTAL CAREER SPAN. MINIMUM rules ("min N years", "N+ years") for a specific role/skill — count the ROLE-RELEVANT experience from the ROLE DURATIONS above (no military service to credit here). <<<')
         lines.append('  NOTE: AI must determine which roles are role-specific from the durations above. The baseline above is a starting point.')
 
     # Detect SWE roles with DevOps skill overlap — flag for AI to consider half-credit

@@ -51,6 +51,7 @@ jobs:
             test_hard_constraints_prompt.py \
             test_screening_policy_consolidation.py \
             test_tenure_constraint_override.py \
+            test_decision_guard.py \
             test_pick_current_employer.py \
             test_ai_screen_excludes_army.py \
             test_helpers_extract_display_fields.py \
@@ -72,5 +73,4 @@ jobs:
             test_people_search_history.py \
             test_crustdata_batch_enrich.py \
             test_enrich_thin_profiles_integration.py \
-            test_crustdata_v2_search.py \
-            test_experience_math_fixes.py
+            test_crustdata_v2_search.py

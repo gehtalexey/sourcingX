@@ -4346,11 +4346,13 @@ def compute_role_durations(raw):
     else:
         lines.append('  Current company: none found')
 
-    # Pre-computed STABILITY VERDICT — hard cap the AI must follow
+    # Pre-computed STABILITY VERDICT — hard cap the AI must follow.
+    # Short CURRENT-company tenure is intentionally NOT a cap here: per the
+    # unified policy it is informational unless the recruiter stated a tenure
+    # minimum, which is enforced separately and deterministically by
+    # tenure_constraint_validator.enforce_tenure_constraint after the model.
     if len(short_companies) >= 3:
         lines.append(f'>>> STABILITY VERDICT: FAIL — {len(short_companies)} short-stint companies >= 3 → MAX SCORE 4 <<<')
-    elif current_company_months is not None and current_company_months < 6:
-        lines.append(f'>>> STABILITY VERDICT: FAIL — current role {_fmt_duration(current_company_months)} < 6 months → MAX SCORE 5 <<<')
     else:
         lines.append('>>> STABILITY VERDICT: PASS <<<')
 
@@ -4547,7 +4549,7 @@ def _screening_api_call(client, ai_provider, ai_model, system_prompt, user_promp
                         "cache_control": {"type": "ephemeral"},
                     }],
                     messages=[{"role": "user", "content": user_prompt}],
-                    temperature=0.3,
+                    temperature=0,
                 )
                 break  # success
             except Exception as _e:
@@ -4575,7 +4577,7 @@ def _screening_api_call(client, ai_provider, ai_model, system_prompt, user_promp
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        temperature=0.3,
+        temperature=0,
         max_tokens=max_tokens,
         response_format={"type": "json_object"},
     )

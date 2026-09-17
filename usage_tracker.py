@@ -27,6 +27,11 @@ CRUSTDATA_PRICING_V2_ENRICH = {
 
 # OpenAI pricing (per 1M tokens)
 OPENAI_PRICING = {
+    'gpt-5.6-luna': {
+        'input': 0.20,        # $0.20 per 1M input tokens
+        'output': 1.20,       # $1.20 per 1M output tokens
+        'cached_input': 0.02, # $0.02 per 1M cached-prefix input tokens
+    },
     'gpt-4.1-mini': {
         'input': 0.40,   # $0.40 per 1M input tokens
         'output': 1.60,  # $1.60 per 1M output tokens
@@ -239,27 +244,43 @@ class UsageTracker:
         profiles_screened: int = 1,
         status: str = 'success',
         error_message: str = None,
-        response_time_ms: int = None
+        response_time_ms: int = None,
+        use_flex: bool = False,
+        cached_tokens: int = 0,
+        request_count: int = 1
     ) -> Optional[dict]:
         """Log OpenAI API usage with cost calculation.
 
         Args:
-            tokens_input: Number of input tokens
+            tokens_input: Number of input tokens (includes any cached_tokens)
             tokens_output: Number of output tokens
             model: Model name for pricing lookup
             profiles_screened: Number of profiles screened in this call
+            use_flex: Whether this request was billed at OpenAI's flex-tier
+                rate (half the standard price)
+            cached_tokens: Portion of tokens_input served from OpenAI's
+                prompt cache, billed at the model's discounted cached rate
+                when known (falls back to the full input rate otherwise)
+            request_count: Number of API requests this log entry represents
+                (e.g. 2 when an empty-response retry fired)
         """
         # Calculate cost
         pricing = OPENAI_PRICING.get(model, OPENAI_PRICING['gpt-4o-mini'])
+        cached_tokens = min(cached_tokens, tokens_input)
+        uncached_input_tokens = tokens_input - cached_tokens
+        cached_rate = pricing.get('cached_input', pricing['input'])
         cost_usd = (
-            (tokens_input / 1_000_000) * pricing['input'] +
+            (uncached_input_tokens / 1_000_000) * pricing['input'] +
+            (cached_tokens / 1_000_000) * cached_rate +
             (tokens_output / 1_000_000) * pricing['output']
         )
+        if use_flex:
+            cost_usd /= 2
 
         return self.log_usage(
             provider='openai',
             operation='screen',
-            request_count=1,
+            request_count=request_count,
             tokens_input=tokens_input,
             tokens_output=tokens_output,
             cost_usd=cost_usd,
@@ -268,7 +289,9 @@ class UsageTracker:
             response_time_ms=response_time_ms,
             metadata={
                 'model': model,
-                'profiles_screened': profiles_screened
+                'profiles_screened': profiles_screened,
+                'service_tier': 'flex' if use_flex else 'standard',
+                'cached_tokens': cached_tokens
             }
         )
 

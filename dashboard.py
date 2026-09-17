@@ -4602,7 +4602,8 @@ _DEFAULT_USER_REQUEST = "Senior software engineering candidate. Apply the standa
 
 
 def _screening_api_call(client, ai_provider, ai_model, system_prompt, user_prompt,
-                        max_tokens, tracker, start_time, profiles_screened=1):
+                        max_tokens, tracker, start_time, profiles_screened=1,
+                        use_flex=False):
     """One screening AI call. Handles OpenAI and Anthropic (Anthropic gets
     prompt caching on the system prompt + 429 retry with exponential backoff).
     Returns the parsed JSON dict; raises on failure.
@@ -4648,33 +4649,93 @@ def _screening_api_call(client, ai_provider, ai_model, system_prompt, user_promp
         return json.loads(_extract_json_from_text(response.content[0].text))
 
     # OpenAI
-    response = client.chat.completions.create(
-        model=ai_model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0,
-        max_tokens=max_tokens,
-        response_format={"type": "json_object"},
-    )
-    if tracker and hasattr(response, 'usage') and response.usage:
+    # gpt-5.x models reject temperature overrides (only the default of 1 is
+    # allowed) and use max_completion_tokens instead of max_tokens. Other
+    # OpenAI models (gpt-4o, gpt-4.1-mini, etc. — still used directly by
+    # compare_screening_modes.py) keep the original deterministic shape.
+    is_gpt5 = ai_model.startswith("gpt-5")
+
+    def _call(token_budget):
+        kwargs = dict(
+            model=ai_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={"type": "json_object"},
+        )
+        if is_gpt5:
+            # gpt-5.x are reasoning models — reasoning tokens count against
+            # max_completion_tokens and vary unpredictably (seen 47-209
+            # tokens on identical prompts in testing), so a budget tuned for
+            # a non-reasoning model can occasionally be exhausted by
+            # reasoning alone, leaving zero tokens for the actual JSON
+            # output. Caller retries with a bigger budget if that happens —
+            # this is a token-budget issue, not specific to flex tier.
+            kwargs["max_completion_tokens"] = token_budget
+            kwargs["prompt_cache_key"] = f"screening-{ai_model}"
+            if use_flex:
+                kwargs["service_tier"] = "flex"
+        else:
+            kwargs["max_tokens"] = token_budget
+            kwargs["temperature"] = 0
+        return client.chat.completions.create(**kwargs)
+
+    def _incomplete(response, content):
+        # Truncation (finish_reason == "length") can leave a non-empty but
+        # syntactically broken JSON string — an empty check alone misses
+        # that case, silently returning a parse-error result instead of
+        # retrying.
+        if not content.strip():
+            return True
+        if response.choices[0].finish_reason == "length":
+            return True
+        try:
+            json.loads(_extract_json_from_text(content))
+        except (json.JSONDecodeError, ValueError):
+            return True
+        return False
+
+    response = _call(max_tokens)
+    content = response.choices[0].message.content or ""
+    tokens_input = response.usage.prompt_tokens if response.usage else 0
+    tokens_output = response.usage.completion_tokens if response.usage else 0
+    cached_tokens = 0
+    if response.usage and getattr(response.usage, 'prompt_tokens_details', None):
+        cached_tokens += response.usage.prompt_tokens_details.cached_tokens or 0
+    request_count = 1
+    if is_gpt5 and _incomplete(response, content):
+        # The retry is a second billed request — fold its tokens into the
+        # same usage log instead of losing the first (wasted) request's cost.
+        response = _call(max_tokens * 2)
+        content = response.choices[0].message.content or ""
+        request_count = 2
+        if response.usage:
+            tokens_input += response.usage.prompt_tokens
+            tokens_output += response.usage.completion_tokens
+            if getattr(response.usage, 'prompt_tokens_details', None):
+                cached_tokens += response.usage.prompt_tokens_details.cached_tokens or 0
+
+    if tracker:
         tracker.log_openai(
-            tokens_input=response.usage.prompt_tokens,
-            tokens_output=response.usage.completion_tokens,
+            tokens_input=tokens_input,
+            tokens_output=tokens_output,
+            cached_tokens=cached_tokens,
             model=ai_model,
             profiles_screened=profiles_screened,
             status='success',
             response_time_ms=int((time.time() - start_time) * 1000),
+            use_flex=use_flex,
+            request_count=request_count,
         )
-    return json.loads(_extract_json_from_text(response.choices[0].message.content))
+    return json.loads(_extract_json_from_text(content))
 
 
 def screen_profile(profile: dict, job_description: str, client,
                    tracker: 'UsageTracker' = None, mode: str = "detailed",
-                   ai_model: str = "gpt-4.1-mini",
+                   ai_model: str = "gpt-5.6-luna",
                    ai_provider: str = "openai", user_request: str = None,
-                   screening_brief: dict = None) -> dict:
+                   screening_brief: dict = None, use_flex: bool = False) -> dict:
     """Screen a profile against a job's requirements using OpenAI or Anthropic.
 
     Args:
@@ -4683,7 +4744,7 @@ def screen_profile(profile: dict, job_description: str, client,
         client: OpenAI or Anthropic client instance
         tracker: Optional usage tracker
         mode: "quick" for cheaper/faster or "detailed" for full analysis
-        ai_model: Model to use (e.g. gpt-4.1-mini, claude-haiku-4-5-20251001)
+        ai_model: Model to use (e.g. gpt-5.6-luna, claude-haiku-4-5-20251001)
         ai_provider: "openai" or "anthropic"
         user_request: Legacy freeform recruiter request text. Used only when
             ``screening_brief`` is not supplied.
@@ -4743,8 +4804,8 @@ def screen_profile(profile: dict, job_description: str, client,
                 _structured_system_prompt(),
                 _structured_user_prompt(role_context, must_haves, exclusions,
                                         durations_text, trimmed_raw),
-                max_tokens=800, tracker=tracker, start_time=start_time,
-                profiles_screened=1,
+                max_tokens=1200, tracker=tracker, start_time=start_time,
+                profiles_screened=1, use_flex=use_flex,
             )
 
             # Separate nice-to-have bonus pass — isolated so any failure here
@@ -4756,8 +4817,9 @@ def screen_profile(profile: dict, job_description: str, client,
                         client, ai_provider, ai_model,
                         _NICE_TO_HAVE_SYSTEM,
                         _nice_to_have_prompt(nice_to_haves, trimmed_raw),
-                        max_tokens=400, tracker=tracker, start_time=start_time,
+                        max_tokens=600, tracker=tracker, start_time=start_time,
                         profiles_screened=0,  # same profile — don't double-count
+                        use_flex=use_flex,
                     )
                     bonus_tags = [
                         str(n.get("text", "")).strip()
@@ -4813,7 +4875,8 @@ def screen_profile(profile: dict, job_description: str, client,
                 client, ai_provider, ai_model,
                 _policy_system_prompt(),
                 _policy_user_prompt(effective_user_request, durations_text, trimmed_raw),
-                max_tokens=400, tracker=tracker, start_time=start_time,
+                max_tokens=700, tracker=tracker, start_time=start_time,
+                use_flex=use_flex,
             )
             decision = str(result.get("decision", "NO GO")).upper().strip()
             score = int(result.get("score", 0) or 0)
@@ -5210,9 +5273,10 @@ def enrich_thin_profiles_for_batch(profiles: list, api_key: str, db_client=None,
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
                           max_workers: int = 15,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
-                          ai_model: str = "gpt-4.1-mini",
+                          ai_model: str = "gpt-5.6-luna",
                           ai_provider: str = "openai", api_key: str = None,
-                          user_request: str = None, screening_brief: dict = None) -> list:
+                          user_request: str = None, screening_brief: dict = None,
+                          use_flex: bool = False) -> list:
     """Screen multiple profiles in parallel using ThreadPoolExecutor.
 
     Args:
@@ -5267,7 +5331,7 @@ def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: 
                     if cancel_flag and cancel_flag.get('cancelled'):
                         return None
 
-                    result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, ai_provider=ai_provider, user_request=user_request, screening_brief=screening_brief)
+                    result = screen_profile(profile, job_description, client, tracker=tracker, mode=mode, ai_model=ai_model, ai_provider=ai_provider, user_request=user_request, screening_brief=screening_brief, use_flex=use_flex)
                     break  # Success, exit retry loop
 
                 except Exception as e:
@@ -9822,16 +9886,29 @@ with tab_screening:
             key="screen_count"
         )
 
-        # Fixed settings - gpt-4.1-mini detailed mode (stronger instruction-following)
+        # Fixed settings - gpt-5.6-luna detailed mode
         screening_mode = "Detailed"
-        ai_model = "gpt-4.1-mini"
+        ai_model = "gpt-5.6-luna"
         ai_provider = "openai"
-        model_input_cost = 0.40   # $0.40/1M input tokens
-        model_output_cost = 1.60  # $1.60/1M output tokens
+        model_input_cost = 0.20   # $0.20/1M input tokens
+        model_output_cost = 1.20  # $1.20/1M output tokens
         output_tokens = 150
 
+        # Flex tier: half price, best-effort speed (no turnaround guarantee).
+        # Defaults to off every time this tab loads so nobody starts a live
+        # session on flex by accident.
+        use_flex_tier = st.checkbox(
+            "Cheaper & slower (flex tier) — half price, no speed guarantee",
+            value=False,
+            key="use_flex_tier",
+        )
+        if use_flex_tier:
+            model_input_cost /= 2
+            model_output_cost /= 2
+
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
-        st.info(f"Rubric: **Unified policy** | Model: **gpt-4.1-mini** | Est. cost: **${est_cost:.3f}**")
+        tier_label = " (flex)" if use_flex_tier else ""
+        st.info(f"Rubric: **Unified policy** | Model: **gpt-5.6-luna{tier_label}** | Est. cost: **${est_cost:.3f}**")
 
         # Debug: Show available fields and test single profile (admin-only)
         if is_admin_user():
@@ -9855,7 +9932,7 @@ with tab_screening:
                             for k, v in test_profile.items():
                                 if isinstance(v, float) and math.isnan(v):
                                     test_profile[k] = ''
-                            result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, ai_provider=ai_provider, screening_brief=screening_brief)
+                            result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, ai_provider=ai_provider, screening_brief=screening_brief, use_flex=use_flex_tier)
                             st.write("Result:", result)
                         except Exception as e:
                             import traceback
@@ -10025,9 +10102,10 @@ with tab_screening:
                 profiles_to_screen = batch_state.get('profiles', [])
                 job_desc = batch_state.get('job_description', '')
                 screen_mode = batch_state.get('mode', 'detailed')
-                batch_ai_model = batch_state.get('ai_model', 'gpt-4.1-mini')
+                batch_ai_model = batch_state.get('ai_model', 'gpt-5.6-luna')
                 batch_ai_provider = batch_state.get('ai_provider', 'openai')
                 batch_api_key = batch_state.get('api_key', openai_key)
+                batch_use_flex = batch_state.get('use_flex_tier', False)
                 max_workers = batch_state.get('max_workers', 10)  # Reduced from 15 to avoid rate limits
                 # Ensure Anthropic uses reduced concurrency even when resuming
                 if batch_ai_provider == "anthropic":
@@ -10147,7 +10225,8 @@ with tab_screening:
                             ai_provider=batch_ai_provider,
                             api_key=batch_api_key,
                             user_request=batch_user_request,
-                            screening_brief=batch_screening_brief
+                            screening_brief=batch_screening_brief,
+                            use_flex=batch_use_flex,
                         )
                         all_results.extend(batch_results)
 
@@ -10346,6 +10425,7 @@ with tab_screening:
                     'mode': 'detailed',
                     'ai_model': ai_model,
                     'ai_provider': ai_provider,
+                    'use_flex_tier': use_flex_tier,
                     'api_key': anthropic_key if ai_provider == "anthropic" else openai_key,
                     'user_request': job_description,  # Legacy freeform fallback
                     'screening_brief': screening_brief,  # Structured per-criterion path
@@ -12482,7 +12562,7 @@ with tab_usage:
                         st.metric(
                             "OpenAI",
                             f"${cost:.4f}",
-                            help="gpt-4.1-mini: $0.40/1M input, $1.60/1M output"
+                            help="gpt-5.6-luna: $0.20/1M input, $1.20/1M output (half that on flex tier)"
                         )
                         tokens_in = openai.get('tokens_input', 0)
                         tokens_out = openai.get('tokens_output', 0)

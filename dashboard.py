@@ -9932,7 +9932,7 @@ with tab_screening:
                             for k, v in test_profile.items():
                                 if isinstance(v, float) and math.isnan(v):
                                     test_profile[k] = ''
-                            result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, ai_provider=ai_provider, screening_brief=screening_brief)
+                            result = screen_profile(test_profile, job_description, client, mode=test_mode, ai_model=ai_model, ai_provider=ai_provider, screening_brief=screening_brief, use_flex=use_flex_tier)
                             st.write("Result:", result)
                         except Exception as e:
                             import traceback

@@ -10286,7 +10286,12 @@ with tab_screening:
                         # these back to skip a profile) — this save is so the shared
                         # screening_results table has SourcingX's screenings too,
                         # matching what autopilot already writes there.
-                        if HAS_DATABASE and db_client and all_results:
+                        # Only the results newly screened THIS run are saved — all_results
+                        # can also hold carried-over results from Continue/re-screen-selected,
+                        # which were evaluated against a different (or no) JD and must not be
+                        # relabeled as screenings for this job (Codex review, PR #132).
+                        newly_screened = all_results[batch_state.get('initial_count', 0):]
+                        if HAS_DATABASE and db_client and newly_screened:
                             screening_rows = [
                                 {
                                     'linkedin_url': r.get('linkedin_url'),
@@ -10295,16 +10300,22 @@ with tab_screening:
                                     'summary': r.get('summary'),
                                     'reasoning': r.get('reasoning'),
                                 }
-                                for r in all_results if r.get('linkedin_url')
+                                for r in newly_screened if r.get('linkedin_url')
                             ]
                             if screening_rows:
-                                update_profile_screening_batch(
+                                _save_stats = update_profile_screening_batch(
                                     db_client,
                                     screening_rows,
                                     jd_hash=compute_jd_hash(job_desc),
                                     jd_title=(job_desc or '')[:200],
                                     ai_model=batch_ai_model,
                                 )
+                                if _save_stats.get('errors'):
+                                    st.warning(
+                                        f"⚠️ {_save_stats['errors']} screening result(s) could not be "
+                                        f"saved to the shared database — other projects won't see them. "
+                                        f"Your results above are unaffected."
+                                    )
 
                         if st.session_state.get('_screening_active'):
                             _screening_session_end()
@@ -10452,6 +10463,7 @@ with tab_screening:
                     'screening_brief': screening_brief,  # Structured per-criterion path
                     'current_batch': 0,
                     'results': initial_results,  # Start with existing results if re-screening selected
+                    'initial_count': len(initial_results),  # Where newly-screened results start, for DB persistence
                     'is_continue': False,  # Always fresh screening
                     'max_workers': max_workers,
                 }

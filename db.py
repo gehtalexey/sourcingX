@@ -1090,8 +1090,13 @@ def update_profile_screening_batch(client: SupabaseClient, results: list,
 
 
 def compute_jd_hash(jd_text: str) -> str:
-    """Compute a stable hash from JD text for screening dedup."""
-    return hashlib.sha256((jd_text or '')[:500].encode()).hexdigest()
+    """Compute a stable hash from JD text for screening dedup.
+
+    Hashes the full text, not a prefix — two JDs sharing a long common
+    template prefix but differing later must not collide (Codex review,
+    PR #132).
+    """
+    return hashlib.sha256((jd_text or '').encode()).hexdigest()
 
 
 def insert_screening_result(client: SupabaseClient, linkedin_url: str, source_project: str,

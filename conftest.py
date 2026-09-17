@@ -43,7 +43,9 @@ class MockOpenAIClient:
             'messages': kwargs.get('messages'),
             'response_format': kwargs.get('response_format'),
             'temperature': kwargs.get('temperature'),
-            'max_tokens': kwargs.get('max_tokens')
+            'max_tokens': kwargs.get('max_tokens'),
+            'max_completion_tokens': kwargs.get('max_completion_tokens'),
+            'service_tier': kwargs.get('service_tier'),
         })
         return MockOpenAIResponse(json.dumps(self.response_data))
 

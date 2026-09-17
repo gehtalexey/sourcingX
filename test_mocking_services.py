@@ -31,15 +31,17 @@ class TestOpenAIMocking:
 
         assert mock_openai_client.captured_calls[0]['response_format'] == {"type": "json_object"}
 
-    def test_screen_profile_uses_low_temperature(self, mock_openai_client,
-                                                  strong_backend_profile,
-                                                  backend_job_description):
+    def test_screen_profile_omits_temperature(self, mock_openai_client,
+                                               strong_backend_profile,
+                                               backend_job_description):
+        # gpt-5.6 models reject any temperature override (only the default
+        # of 1 is allowed), so screen_profile must not pass one at all.
         import dashboard
         dashboard.screen_profile(strong_backend_profile, backend_job_description,
                                   mock_openai_client)
 
         temp = mock_openai_client.captured_calls[0]['temperature']
-        assert temp is not None and temp <= 0.3, f"Temperature should be <=0.3, got {temp}"
+        assert temp is None, f"Expected no temperature override, got {temp}"
 
     def test_screen_profile_includes_system_prompt(self, mock_openai_client,
                                                     strong_backend_profile,

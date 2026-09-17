@@ -82,7 +82,7 @@ except ImportError:
 try:
     from db import (
         get_supabase_client, check_connection, save_enriched_profile,
-        update_profile_enrichment, update_profile_screening, update_profile_screening_batch, get_all_profiles, save_enriched_profiles_bulk,
+        update_profile_enrichment, update_profile_screening, update_profile_screening_batch, compute_jd_hash, get_all_profiles, save_enriched_profiles_bulk,
         get_pipeline_stats, get_profiles_by_fit_level, get_all_linkedin_urls,
         get_dedup_stats, profiles_to_dataframe, get_usage_summary, get_usage_logs,
         get_usage_by_date, get_enriched_urls, get_recently_enriched_urls,
@@ -10282,8 +10282,29 @@ with tab_screening:
                         st.session_state['screening_batch_mode'] = False
                         st.session_state['screening_results'] = all_results
 
-                        # Screening results are kept in session only — not saved to DB
-                        # Each JD requires fresh screening, so cached DB scores are not useful
+                        # SourcingX still always re-screens fresh per JD (never reads
+                        # these back to skip a profile) — this save is so the shared
+                        # screening_results table has SourcingX's screenings too,
+                        # matching what autopilot already writes there.
+                        if HAS_DATABASE and db_client and all_results:
+                            screening_rows = [
+                                {
+                                    'linkedin_url': r.get('linkedin_url'),
+                                    'score': r.get('score'),
+                                    'fit_level': r.get('fit'),
+                                    'summary': r.get('summary'),
+                                    'reasoning': r.get('reasoning'),
+                                }
+                                for r in all_results if r.get('linkedin_url')
+                            ]
+                            if screening_rows:
+                                update_profile_screening_batch(
+                                    db_client,
+                                    screening_rows,
+                                    jd_hash=compute_jd_hash(job_desc),
+                                    jd_title=(job_desc or '')[:200],
+                                    ai_model=batch_ai_model,
+                                )
 
                         if st.session_state.get('_screening_active'):
                             _screening_session_end()

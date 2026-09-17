@@ -154,6 +154,25 @@ def test_update_profile_screening_batch_omits_status():
     assert client.upsert_batch_calls[0]["table"] == "screening_results"
 
 
+def test_update_profile_screening_batch_uses_real_jd_hash_when_given():
+    """A caller passing a real jd_hash must not fall back to the 'default'
+    placeholder — that placeholder collapses every job into one dedup key,
+    silently overwriting screenings for a different job with the same URL."""
+    client = FakeClient()
+    db.update_profile_screening_batch(
+        client,
+        [{"linkedin_url": "https://www.linkedin.com/in/a", "score": 5,
+          "fit_level": "Maybe", "summary": "x", "reasoning": "y"}],
+        jd_hash="abc123",
+        jd_title="Backend Engineer",
+        ai_model="gpt-5.6-luna",
+    )
+    row = client.upsert_batch_calls[0]["rows"][0]
+    assert row["jd_hash"] == "abc123"
+    assert row["jd_title"] == "Backend Engineer"
+    assert row["ai_model"] == "gpt-5.6-luna"
+
+
 def test_screening_writes_use_only_screening_results_columns():
     client = FakeClient()
     db.update_profile_screening(

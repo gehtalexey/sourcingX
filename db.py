@@ -1063,12 +1063,19 @@ def update_profile_screening(client: SupabaseClient, linkedin_url: str, score: i
     return result[0] if result else None
 
 
-def update_profile_screening_batch(client: SupabaseClient, results: list) -> dict:
+def update_profile_screening_batch(client: SupabaseClient, results: list,
+                                    jd_hash: str = None, jd_title: str = None,
+                                    ai_model: str = None) -> dict:
     """Batch write AI screening results to screening_results.
 
     Args:
         client: SupabaseClient instance
         results: List of dicts with keys: linkedin_url, score, fit_level, summary, reasoning
+        jd_hash: Hash of the JD used for screening (pass compute_jd_hash(jd_text) so
+            different jobs don't overwrite each other's results). Defaults to the
+            'default' placeholder hash when not given.
+        jd_title: Human-readable JD title
+        ai_model: AI model used for screening
     Returns:
         Stats dict with 'saved' and 'errors' counts
     """
@@ -1076,7 +1083,9 @@ def update_profile_screening_batch(client: SupabaseClient, results: list) -> dic
         client,
         results,
         source_project=DEFAULT_SCREENING_SOURCE_PROJECT,
-        jd_hash=DEFAULT_SCREENING_JD_HASH,
+        jd_hash=jd_hash or DEFAULT_SCREENING_JD_HASH,
+        jd_title=jd_title,
+        ai_model=ai_model,
     )
 
 

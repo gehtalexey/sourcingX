@@ -4681,6 +4681,21 @@ def _screening_api_call(client, ai_provider, ai_model, system_prompt, user_promp
             kwargs["temperature"] = 0
         return client.chat.completions.create(**kwargs)
 
+    def _incomplete(response, content):
+        # Truncation (finish_reason == "length") can leave a non-empty but
+        # syntactically broken JSON string — an empty check alone misses
+        # that case, silently returning a parse-error result instead of
+        # retrying.
+        if not content.strip():
+            return True
+        if response.choices[0].finish_reason == "length":
+            return True
+        try:
+            json.loads(_extract_json_from_text(content))
+        except (json.JSONDecodeError, ValueError):
+            return True
+        return False
+
     response = _call(max_tokens)
     content = response.choices[0].message.content or ""
     tokens_input = response.usage.prompt_tokens if response.usage else 0
@@ -4689,10 +4704,9 @@ def _screening_api_call(client, ai_provider, ai_model, system_prompt, user_promp
     if response.usage and getattr(response.usage, 'prompt_tokens_details', None):
         cached_tokens += response.usage.prompt_tokens_details.cached_tokens or 0
     request_count = 1
-    if is_gpt5 and not content.strip():
-        # The empty-response retry is a second billed request — fold its
-        # tokens into the same usage log instead of losing the first
-        # (wasted) request's cost.
+    if is_gpt5 and _incomplete(response, content):
+        # The retry is a second billed request — fold its tokens into the
+        # same usage log instead of losing the first (wasted) request's cost.
         response = _call(max_tokens * 2)
         content = response.choices[0].message.content or ""
         request_count = 2

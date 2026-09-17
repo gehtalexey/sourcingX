@@ -4649,50 +4649,70 @@ def _screening_api_call(client, ai_provider, ai_model, system_prompt, user_promp
         return json.loads(_extract_json_from_text(response.content[0].text))
 
     # OpenAI
-    # gpt-5.6 models reject temperature overrides (only the default of 1 is
-    # allowed) and use max_completion_tokens instead of max_tokens. They're
-    # reasoning models — reasoning tokens count against max_completion_tokens
-    # and vary unpredictably (seen 47-209 tokens on identical prompts in
-    # testing), so a budget tuned for a non-reasoning model can occasionally
-    # be exhausted by reasoning alone, leaving zero tokens for the actual JSON
-    # output. If that happens, retry once with double the budget before
-    # giving up — this is a token-budget issue, not specific to flex tier.
+    # gpt-5.x models reject temperature overrides (only the default of 1 is
+    # allowed) and use max_completion_tokens instead of max_tokens. Other
+    # OpenAI models (gpt-4o, gpt-4.1-mini, etc. — still used directly by
+    # compare_screening_modes.py) keep the original deterministic shape.
+    is_gpt5 = ai_model.startswith("gpt-5")
+
     def _call(token_budget):
-        return client.chat.completions.create(
+        kwargs = dict(
             model=ai_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            max_completion_tokens=token_budget,
             response_format={"type": "json_object"},
-            prompt_cache_key=f"screening-{ai_model}",
-            **({"service_tier": "flex"} if use_flex else {}),
         )
+        if is_gpt5:
+            # gpt-5.x are reasoning models — reasoning tokens count against
+            # max_completion_tokens and vary unpredictably (seen 47-209
+            # tokens on identical prompts in testing), so a budget tuned for
+            # a non-reasoning model can occasionally be exhausted by
+            # reasoning alone, leaving zero tokens for the actual JSON
+            # output. Caller retries with a bigger budget if that happens —
+            # this is a token-budget issue, not specific to flex tier.
+            kwargs["max_completion_tokens"] = token_budget
+            kwargs["prompt_cache_key"] = f"screening-{ai_model}"
+            if use_flex:
+                kwargs["service_tier"] = "flex"
+        else:
+            kwargs["max_tokens"] = token_budget
+            kwargs["temperature"] = 0
+        return client.chat.completions.create(**kwargs)
 
     response = _call(max_tokens)
     content = response.choices[0].message.content or ""
     tokens_input = response.usage.prompt_tokens if response.usage else 0
     tokens_output = response.usage.completion_tokens if response.usage else 0
-    if not content.strip():
+    cached_tokens = 0
+    if response.usage and getattr(response.usage, 'prompt_tokens_details', None):
+        cached_tokens += response.usage.prompt_tokens_details.cached_tokens or 0
+    request_count = 1
+    if is_gpt5 and not content.strip():
         # The empty-response retry is a second billed request — fold its
         # tokens into the same usage log instead of losing the first
         # (wasted) request's cost.
         response = _call(max_tokens * 2)
         content = response.choices[0].message.content or ""
+        request_count = 2
         if response.usage:
             tokens_input += response.usage.prompt_tokens
             tokens_output += response.usage.completion_tokens
+            if getattr(response.usage, 'prompt_tokens_details', None):
+                cached_tokens += response.usage.prompt_tokens_details.cached_tokens or 0
 
     if tracker:
         tracker.log_openai(
             tokens_input=tokens_input,
             tokens_output=tokens_output,
+            cached_tokens=cached_tokens,
             model=ai_model,
             profiles_screened=profiles_screened,
             status='success',
             response_time_ms=int((time.time() - start_time) * 1000),
             use_flex=use_flex,
+            request_count=request_count,
         )
     return json.loads(_extract_json_from_text(content))
 

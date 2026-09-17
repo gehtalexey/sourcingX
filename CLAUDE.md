@@ -93,9 +93,16 @@ sourcingX/
 ## Architecture Decisions
 
 ### Screening is ALWAYS fresh per JD
-- Screening results are NOT stored in Supabase — each JD gets a fresh evaluation
+- SourcingX always re-screens from scratch — it never reads a saved score back to
+  skip a profile, so each JD gets a fresh evaluation every time
 - Profile enrichment data (raw Crustdata JSON) IS stored in Supabase
 - Session-level results are kept in `st.session_state['screening_results']`
+- On batch completion, results are ALSO saved to the shared `screening_results`
+  table (`update_profile_screening_batch()` in `db.py`, keyed by
+  `linkedin_url` + `compute_jd_hash(job_description)` + `source_project='sourcingx'`)
+  so other projects (agent-kalamata's autopilot) can see SourcingX's screenings.
+  This is write-only from SourcingX's side — it doesn't change the fresh-eval rule
+  above. Partial/cancelled batches are not persisted, only a full completed run.
 
 ### Experience & durations are pre-computed in Python
 - Total career experience is calculated in `dashboard.py` (search for `calculate_total_experience` or the experience limit check block)
@@ -330,7 +337,7 @@ unless the cooldown marker is respected.
 ### `profiles` table (enrichment data only)
 - `linkedin_url` (UNIQUE), `raw_data` (JSONB), `name`, `current_title`, `current_company`
 - `all_employers[]`, `all_titles[]`, `all_schools[]`, `skills[]` (GIN-indexed arrays)
-- `email`, `email_source`, `status` (enriched/screened/contacted/archived)
+- `email`, `email_source`, `enrichment_status` (enriched/not_found/failed — do NOT write a `status` column, it was dropped and causes a 400)
 - `enriched_at`, `screened_at`, `contacted_at` (timestamps)
 - Screening fields: `screening_score`, `screening_fit_level`, `screening_summary`, `screening_reasoning`
 

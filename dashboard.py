@@ -82,7 +82,7 @@ except ImportError:
 try:
     from db import (
         get_supabase_client, check_connection, save_enriched_profile,
-        update_profile_enrichment, update_profile_screening, update_profile_screening_batch, get_all_profiles, save_enriched_profiles_bulk,
+        update_profile_enrichment, update_profile_screening, update_profile_screening_batch, compute_jd_hash, get_all_profiles, save_enriched_profiles_bulk,
         get_pipeline_stats, get_profiles_by_fit_level, get_all_linkedin_urls,
         get_dedup_stats, profiles_to_dataframe, get_usage_summary, get_usage_logs,
         get_usage_by_date, get_enriched_urls, get_recently_enriched_urls,
@@ -10282,8 +10282,40 @@ with tab_screening:
                         st.session_state['screening_batch_mode'] = False
                         st.session_state['screening_results'] = all_results
 
-                        # Screening results are kept in session only — not saved to DB
-                        # Each JD requires fresh screening, so cached DB scores are not useful
+                        # SourcingX still always re-screens fresh per JD (never reads
+                        # these back to skip a profile) — this save is so the shared
+                        # screening_results table has SourcingX's screenings too,
+                        # matching what autopilot already writes there.
+                        # Only the results newly screened THIS run are saved — all_results
+                        # can also hold carried-over results from Continue/re-screen-selected,
+                        # which were evaluated against a different (or no) JD and must not be
+                        # relabeled as screenings for this job (Codex review, PR #132).
+                        newly_screened = all_results[batch_state.get('initial_count', 0):]
+                        if HAS_DATABASE and db_client and newly_screened:
+                            screening_rows = [
+                                {
+                                    'linkedin_url': r.get('linkedin_url'),
+                                    'score': r.get('score'),
+                                    'fit_level': r.get('fit'),
+                                    'summary': r.get('summary'),
+                                    'reasoning': r.get('reasoning'),
+                                }
+                                for r in newly_screened if r.get('linkedin_url')
+                            ]
+                            if screening_rows:
+                                _save_stats = update_profile_screening_batch(
+                                    db_client,
+                                    screening_rows,
+                                    jd_hash=compute_jd_hash(job_desc),
+                                    jd_title=(job_desc or '')[:200],
+                                    ai_model=batch_ai_model,
+                                )
+                                if _save_stats.get('errors'):
+                                    st.warning(
+                                        f"⚠️ {_save_stats['errors']} screening result(s) could not be "
+                                        f"saved to the shared database — other projects won't see them. "
+                                        f"Your results above are unaffected."
+                                    )
 
                         if st.session_state.get('_screening_active'):
                             _screening_session_end()
@@ -10431,6 +10463,7 @@ with tab_screening:
                     'screening_brief': screening_brief,  # Structured per-criterion path
                     'current_batch': 0,
                     'results': initial_results,  # Start with existing results if re-screening selected
+                    'initial_count': len(initial_results),  # Where newly-screened results start, for DB persistence
                     'is_continue': False,  # Always fresh screening
                     'max_workers': max_workers,
                 }

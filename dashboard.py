@@ -4672,18 +4672,27 @@ def _screening_api_call(client, ai_provider, ai_model, system_prompt, user_promp
 
     response = _call(max_tokens)
     content = response.choices[0].message.content or ""
+    tokens_input = response.usage.prompt_tokens if response.usage else 0
+    tokens_output = response.usage.completion_tokens if response.usage else 0
     if not content.strip():
+        # The empty-response retry is a second billed request — fold its
+        # tokens into the same usage log instead of losing the first
+        # (wasted) request's cost.
         response = _call(max_tokens * 2)
         content = response.choices[0].message.content or ""
+        if response.usage:
+            tokens_input += response.usage.prompt_tokens
+            tokens_output += response.usage.completion_tokens
 
-    if tracker and hasattr(response, 'usage') and response.usage:
+    if tracker:
         tracker.log_openai(
-            tokens_input=response.usage.prompt_tokens,
-            tokens_output=response.usage.completion_tokens,
+            tokens_input=tokens_input,
+            tokens_output=tokens_output,
             model=ai_model,
             profiles_screened=profiles_screened,
             status='success',
             response_time_ms=int((time.time() - start_time) * 1000),
+            use_flex=use_flex,
         )
     return json.loads(_extract_json_from_text(content))
 

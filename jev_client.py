@@ -224,7 +224,7 @@ def _format_employer(entry: dict) -> Optional[str]:
     if not title and not company:
         return None
     line = f"{title or 'Unknown title'} at {company or 'Unknown company'} ({start} - {end})"
-    description = entry.get("description")
+    description = entry.get("employee_description") or entry.get("description")
     if description:
         line += f"\n    {description}"
     return line

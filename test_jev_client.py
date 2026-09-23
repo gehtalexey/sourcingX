@@ -121,6 +121,26 @@ def test_build_candidate_text_strips_pii_keeps_career_data():
     assert "Python" in text
 
 
+def test_build_candidate_text_reads_employee_description_field():
+    """Codex review on PR #133 (round 6): the current enrichment mapper
+    (dashboard.py:4496, trimmed_emps) stores role text as
+    'employee_description', not 'description' -- without this fallback,
+    Jev misses role-specific evidence whenever a requirement is documented
+    in that text rather than the title or skills."""
+    profile = {
+        "raw_data": {
+            "current_employers": [{
+                "employee_title": "Engineer",
+                "employer_name": "Acme Corp",
+                "start_date": "2023-01", "end_date": None,
+                "employee_description": "Led the fraud-detection rewrite in Rust.",
+            }],
+        }
+    }
+    text = jev_client.build_candidate_text(profile)
+    assert "fraud-detection rewrite in Rust" in text
+
+
 def test_build_candidate_text_handles_flat_fields_fallback():
     profile = {"current_title": "Data Engineer", "current_company": "Foo Inc"}
     text = jev_client.build_candidate_text(profile)

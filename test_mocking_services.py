@@ -5,6 +5,7 @@ Mock OpenAI API calls, Supabase operations, error handling, and concurrency.
 
 import pytest
 import json
+import warnings
 from unittest.mock import MagicMock, patch, call
 import threading
 
@@ -307,3 +308,89 @@ class TestAPIResponseVariations:
 
         assert result['score'] == 8
         assert result['fit'] == 'Good Fit'
+
+
+class TestScreeningModelPicker:
+    """Tests for screening_models.py -- the one place that decides which
+    model/provider screens a candidate, replacing literal strings that used
+    to be typed into several places in dashboard.py."""
+
+    def test_default_model_is_live_dispatchable(self):
+        import screening_models
+        # The default itself must resolve to a provider screen_profile() can
+        # actually call, or every fallback path breaks.
+        assert screening_models.DEFAULT_SCREEN_MODEL in screening_models.SCREEN_MODELS
+        default_entry = screening_models.SCREEN_MODELS[screening_models.DEFAULT_SCREEN_MODEL]
+        assert default_entry["provider"] in screening_models.LIVE_DISPATCH_PROVIDERS
+
+    def test_get_screen_model_with_no_config_returns_default(self):
+        from screening_models import get_screen_model, DEFAULT_SCREEN_MODEL, SCREEN_MODELS
+        model, provider = get_screen_model(None)
+        assert model == DEFAULT_SCREEN_MODEL
+        assert provider == SCREEN_MODELS[DEFAULT_SCREEN_MODEL]["provider"]
+
+        model2, provider2 = get_screen_model({})
+        assert (model2, provider2) == (model, provider)
+
+    def test_get_screen_model_honors_recognized_live_config_value(self):
+        from screening_models import get_screen_model
+        model, provider = get_screen_model({"screen_model": "gpt-4.1-mini"})
+        assert model == "gpt-4.1-mini"
+        assert provider == "openai"
+
+    def test_get_screen_model_falls_back_on_unrecognized_value(self):
+        # A typo, or a model removed from SCREEN_MODELS, must never reach
+        # the call code as an unhandled string -- fail closed to the default.
+        from screening_models import get_screen_model, DEFAULT_SCREEN_MODEL, SCREEN_MODELS
+        model, provider = get_screen_model({"screen_model": "gpt-99-nonexistent"})
+        assert model == DEFAULT_SCREEN_MODEL
+        assert provider == SCREEN_MODELS[DEFAULT_SCREEN_MODEL]["provider"]
+
+    def test_get_screen_model_never_selects_jev_for_live_dispatch(self):
+        # Jev is listed in SCREEN_MODELS (for a shared display name/table
+        # other code can reference) but its provider isn't wired into
+        # screen_profile()'s live dispatch yet -- config.json can't select
+        # it via this function.
+        from screening_models import get_screen_model, DEFAULT_SCREEN_MODEL, SCREEN_MODELS, LIVE_DISPATCH_PROVIDERS
+        assert SCREEN_MODELS["jev"]["provider"] == "typesafe"
+        assert "typesafe" not in LIVE_DISPATCH_PROVIDERS
+
+        model, provider = get_screen_model({"screen_model": "jev"})
+        assert model == DEFAULT_SCREEN_MODEL
+        assert provider != "typesafe"
+
+    def test_every_registered_model_has_a_display_name(self):
+        from screening_models import SCREEN_MODELS
+        for name, entry in SCREEN_MODELS.items():
+            assert entry.get("display_name"), f"{name} is missing a display_name"
+            assert entry.get("provider"), f"{name} is missing a provider"
+
+
+class TestUsageTrackerPricingFallback:
+    """Tests for usage_tracker.py's pricing fallback. Before this fix, an
+    unrecognized model silently used gpt-4o-mini's rate -- the exact bug
+    Codex found for gpt-5.6-luna itself in PR #131 (underreporting cost by
+    up to 50%) before that model got its own pricing entry. Any future
+    unknown model (a typo, a renamed model, Jev if it's ever priced
+    per-token) should warn loudly instead of silently mispricing."""
+
+    def test_known_model_prices_without_warning(self):
+        from usage_tracker import calculate_openai_cost, OPENAI_PRICING
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            cost = calculate_openai_cost(1_000_000, 1_000_000, model="gpt-5.6-luna")
+        expected = OPENAI_PRICING["gpt-5.6-luna"]["input"] + OPENAI_PRICING["gpt-5.6-luna"]["output"]
+        assert cost == pytest.approx(expected)
+
+    def test_unknown_model_warns_and_falls_back_to_gpt4o_mini(self):
+        from usage_tracker import calculate_openai_cost, OPENAI_PRICING
+        with pytest.warns(UserWarning, match="totally-made-up-model"):
+            cost = calculate_openai_cost(1_000_000, 1_000_000, model="totally-made-up-model")
+        fallback = OPENAI_PRICING["gpt-4o-mini"]
+        assert cost == pytest.approx(fallback["input"] + fallback["output"])
+
+    def test_openai_pricing_for_unknown_model_warns_and_returns_fallback_dict(self):
+        from usage_tracker import _openai_pricing_for, OPENAI_PRICING
+        with pytest.warns(UserWarning):
+            pricing = _openai_pricing_for("another-made-up-model")
+        assert pricing == OPENAI_PRICING["gpt-4o-mini"]

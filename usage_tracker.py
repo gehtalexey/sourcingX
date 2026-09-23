@@ -4,6 +4,7 @@ Tracks API consumption across all providers: Crustdata, PhantomBuster, SalesQL, 
 """
 
 import time
+import warnings
 from datetime import datetime
 from typing import Optional
 from functools import wraps
@@ -45,6 +46,24 @@ OPENAI_PRICING = {
         'output': 10.00, # $10.00 per 1M output tokens
     }
 }
+
+
+def _openai_pricing_for(model: str) -> dict:
+    """Look up OPENAI_PRICING for `model`. An unrecognized model previously
+    fell back to gpt-4o-mini's rate silently -- underreporting cost by up to
+    50% (the exact gap Codex found in PR #131 for gpt-5.6-luna itself, before
+    that entry was added). Now warns loudly instead, so a new/renamed model
+    (e.g. wiring Jev in without a pricing entry) can't hide a cost bug."""
+    pricing = OPENAI_PRICING.get(model)
+    if pricing is None:
+        warnings.warn(
+            f"No OpenAI pricing entry for model {model!r} -- falling back to "
+            "gpt-4o-mini rates, which is almost certainly wrong. Add a real "
+            "entry to OPENAI_PRICING in usage_tracker.py.",
+            stacklevel=3,
+        )
+        pricing = OPENAI_PRICING['gpt-4o-mini']
+    return pricing
 
 
 class UsageTracker:
@@ -265,7 +284,7 @@ class UsageTracker:
                 (e.g. 2 when an empty-response retry fired)
         """
         # Calculate cost
-        pricing = OPENAI_PRICING.get(model, OPENAI_PRICING['gpt-4o-mini'])
+        pricing = _openai_pricing_for(model)
         cached_tokens = min(cached_tokens, tokens_input)
         uncached_input_tokens = tokens_input - cached_tokens
         cached_rate = pricing.get('cached_input', pricing['input'])
@@ -334,7 +353,7 @@ def calculate_openai_cost(tokens_input: int, tokens_output: int, model: str = 'g
     Returns:
         Cost in USD
     """
-    pricing = OPENAI_PRICING.get(model, OPENAI_PRICING['gpt-4o-mini'])
+    pricing = _openai_pricing_for(model)
     return (
         (tokens_input / 1_000_000) * pricing['input'] +
         (tokens_output / 1_000_000) * pricing['output']

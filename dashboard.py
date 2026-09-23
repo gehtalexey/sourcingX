@@ -53,6 +53,7 @@ from company_matching import (
     normalize_company_name as _normalize_company_name,
     company_matches_filter_list as _company_matches_filter_list,
 )
+from screening_models import get_screen_model, DEFAULT_SCREEN_MODEL
 from screening_policy import (
     get_system_prompt as _policy_system_prompt,
     build_user_prompt as _policy_user_prompt,
@@ -116,7 +117,7 @@ except ImportError:
 
 # Usage tracking module
 try:
-    from usage_tracker import UsageTracker, calculate_openai_cost
+    from usage_tracker import UsageTracker, calculate_openai_cost, OPENAI_PRICING
     HAS_USAGE_TRACKER = True
 except ImportError:
     HAS_USAGE_TRACKER = False
@@ -918,6 +919,8 @@ def load_config():
             if 'admin_usernames' in st.secrets:
                 # Streamlit secrets returns AttrDict for lists — coerce to list
                 config['admin_usernames'] = list(st.secrets['admin_usernames'])
+            if 'screen_model' in st.secrets:
+                config['screen_model'] = st.secrets['screen_model']
     except Exception:
         pass
 
@@ -4733,7 +4736,7 @@ def _screening_api_call(client, ai_provider, ai_model, system_prompt, user_promp
 
 def screen_profile(profile: dict, job_description: str, client,
                    tracker: 'UsageTracker' = None, mode: str = "detailed",
-                   ai_model: str = "gpt-5.6-luna",
+                   ai_model: str = DEFAULT_SCREEN_MODEL,
                    ai_provider: str = "openai", user_request: str = None,
                    screening_brief: dict = None, use_flex: bool = False) -> dict:
     """Screen a profile against a job's requirements using OpenAI or Anthropic.
@@ -5273,7 +5276,7 @@ def enrich_thin_profiles_for_batch(profiles: list, api_key: str, db_client=None,
 def screen_profiles_batch(profiles: list, job_description: str, openai_api_key: str,
                           max_workers: int = 15,
                           progress_callback=None, cancel_flag=None, mode: str = "detailed",
-                          ai_model: str = "gpt-5.6-luna",
+                          ai_model: str = DEFAULT_SCREEN_MODEL,
                           ai_provider: str = "openai", api_key: str = None,
                           user_request: str = None, screening_brief: dict = None,
                           use_flex: bool = False) -> list:
@@ -9886,12 +9889,14 @@ with tab_screening:
             key="screen_count"
         )
 
-        # Fixed settings - gpt-5.6-luna detailed mode
+        # Screening model: resolved from config.json's `screen_model` (falls
+        # back to DEFAULT_SCREEN_MODEL, today gpt-5.6-luna) instead of being
+        # a literal string here -- see screening_models.py.
         screening_mode = "Detailed"
-        ai_model = "gpt-5.6-luna"
-        ai_provider = "openai"
-        model_input_cost = 0.20   # $0.20/1M input tokens
-        model_output_cost = 1.20  # $1.20/1M output tokens
+        ai_model, ai_provider = get_screen_model(load_config())
+        _model_pricing = OPENAI_PRICING.get(ai_model, OPENAI_PRICING[DEFAULT_SCREEN_MODEL])
+        model_input_cost = _model_pricing['input']
+        model_output_cost = _model_pricing['output']
         output_tokens = 150
 
         # Flex tier: half price, best-effort speed (no turnaround guarantee).
@@ -9908,7 +9913,7 @@ with tab_screening:
 
         est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
         tier_label = " (flex)" if use_flex_tier else ""
-        st.info(f"Rubric: **Unified policy** | Model: **gpt-5.6-luna{tier_label}** | Est. cost: **${est_cost:.3f}**")
+        st.info(f"Rubric: **Unified policy** | Model: **{ai_model}{tier_label}** | Est. cost: **${est_cost:.3f}**")
 
         # Debug: Show available fields and test single profile (admin-only)
         if is_admin_user():
@@ -10102,7 +10107,7 @@ with tab_screening:
                 profiles_to_screen = batch_state.get('profiles', [])
                 job_desc = batch_state.get('job_description', '')
                 screen_mode = batch_state.get('mode', 'detailed')
-                batch_ai_model = batch_state.get('ai_model', 'gpt-5.6-luna')
+                batch_ai_model = batch_state.get('ai_model', DEFAULT_SCREEN_MODEL)
                 batch_ai_provider = batch_state.get('ai_provider', 'openai')
                 batch_api_key = batch_state.get('api_key', openai_key)
                 batch_use_flex = batch_state.get('use_flex_tier', False)
@@ -12592,10 +12597,15 @@ with tab_usage:
                     with metric_cols[2]:
                         openai = summary.get('openai', {})
                         cost = openai.get('cost_usd', 0)
+                        _live_model, _ = get_screen_model(load_config())
+                        _live_pricing = OPENAI_PRICING.get(_live_model, OPENAI_PRICING[DEFAULT_SCREEN_MODEL])
                         st.metric(
                             "OpenAI",
                             f"${cost:.4f}",
-                            help="gpt-5.6-luna: $0.20/1M input, $1.20/1M output (half that on flex tier)"
+                            help=(
+                                f"{_live_model}: ${_live_pricing['input']:.2f}/1M input, "
+                                f"${_live_pricing['output']:.2f}/1M output (half that on flex tier)"
+                            )
                         )
                         tokens_in = openai.get('tokens_input', 0)
                         tokens_out = openai.get('tokens_output', 0)

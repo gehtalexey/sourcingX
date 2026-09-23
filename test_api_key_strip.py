@@ -276,6 +276,27 @@ class TestDashboardLoaders:
         ):
             assert dashboard_module.load_salesql_key() == "salesql-key"
 
+    # -----------------------------------------------------------------------
+    # load_config()'s Streamlit-secrets override. Codex review on PR #134:
+    # this override copies a fixed list of named keys from st.secrets into
+    # config, and screen_model wasn't one of them -- so setting screen_model
+    # in Streamlit secrets had no effect at all, a deployed app would always
+    # fall back to the default model regardless of what was configured.
+    # Exercises the real load_config() body (not a patched stand-in), so
+    # monkeypatches dashboard.st.secrets directly rather than using the
+    # patch.object(..., "load_config", ...) style above.
+    # -----------------------------------------------------------------------
+
+    def test_load_config_copies_screen_model_from_streamlit_secrets(self, dashboard_module, monkeypatch):
+        monkeypatch.setattr(dashboard_module.st, "secrets", {"screen_model": "gpt-4.1-mini"})
+        config = dashboard_module.load_config()
+        assert config.get("screen_model") == "gpt-4.1-mini"
+
+    def test_load_config_without_screen_model_in_secrets_leaves_it_unset(self, dashboard_module, monkeypatch):
+        monkeypatch.setattr(dashboard_module.st, "secrets", {"api_key": "x"})
+        config = dashboard_module.load_config()
+        assert config.get("screen_model") is None
+
 
 # ---------------------------------------------------------------------------
 # db.get_supabase_client (URL + key, env source)

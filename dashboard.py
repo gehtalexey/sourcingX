@@ -919,6 +919,8 @@ def load_config():
             if 'admin_usernames' in st.secrets:
                 # Streamlit secrets returns AttrDict for lists — coerce to list
                 config['admin_usernames'] = list(st.secrets['admin_usernames'])
+            if 'screen_model' in st.secrets:
+                config['screen_model'] = st.secrets['screen_model']
     except Exception:
         pass
 

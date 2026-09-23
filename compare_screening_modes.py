@@ -1,11 +1,10 @@
 """
 Screening Mode Comparison Script
 =================================
-Tests 4 combinations on a sample of real profiles from the DB:
-  1. gpt-4o       + detailed
-  2. gpt-4o       + quick
-  3. gpt-4o-mini  + detailed
-  4. gpt-4o-mini  + quick
+Screens a sample of real profiles from the DB through each entry in COMBOS
+(currently: gpt-4o and Claude Haiku, both via the live structured
+per-criterion path -- see COMBOS below for the up-to-date list; "mode"
+no longer differentiates anything under that path, see its comment).
 
 Outputs a CSV + console summary so you can compare score quality.
 Run: python compare_screening_modes.py
@@ -85,6 +84,13 @@ SCREENING_BRIEF = {
     "exclusions": EXCLUSIONS,
 }
 
+# Codex review on PR #135: with nice_to_haves non-empty, screen_profile()'s
+# structured path fires a SECOND request per profile (the isolated
+# nice-to-have bonus pass, dashboard.py's `_NICE_TO_HAVE_SYSTEM`/
+# `_nice_to_have_prompt` call) on top of the main verdict call. Every
+# call-count and cost figure this script prints must account for both.
+CALLS_PER_PROFILE = 2 if NICE_TO_HAVES else 1
+
 # Freeform rendering kept only for display/logging in this script -- the
 # structured path above is what actually gets screened.
 JD = "\n".join([
@@ -94,10 +100,15 @@ JD = "\n".join([
     "Exclusions:\n" + "\n".join(f"- {e}" for e in EXCLUSIONS),
 ])
 
+# Codex review on PR #135: the structured per-criterion path (what
+# screening_brief now routes into) never branches on `mode` at all -- unlike
+# the legacy freeform path it replaces, "detailed" and "quick" send the
+# exact same requests. A "haiku / quick" combo next to "haiku / detailed"
+# would silently compare a combo against an identical copy of itself, at
+# real cost. Dropped rather than kept as a no-op comparison.
 COMBOS = [
     {"model": "gpt-4o-2024-08-06",        "mode": "detailed", "label": "gpt-4o / detailed",       "provider": "openai"},
     {"model": "claude-haiku-4-5-20251001","mode": "detailed", "label": "haiku / detailed",          "provider": "anthropic"},
-    {"model": "claude-haiku-4-5-20251001","mode": "quick",    "label": "haiku / quick",             "provider": "anthropic"},
 ]
 
 PRICING = {
@@ -369,14 +380,20 @@ def cost_summary():
     print("COST ESTIMATE — 4,000 profiles  (avg input ~3,167 tok based on actual prompt build)")
     print("  OpenAI:    caching automatic (87% hit rate from Mar 30 actuals)")
     print("  Haiku:     caching NOW ACTIVE via cache_control (charged at $0.08/1M after first call)")
+    print("  WARNING: AVG_IN/SYS_TOKENS/USER_TOKENS below were measured under the OLD")
+    print("  legacy freeform prompt path (PR #135 switched this script to the structured")
+    print("  screening_brief path, which builds a different system+user prompt). These")
+    print("  are placeholders carrying the doubled-call-count fix, NOT re-measured --")
+    print("  don't treat the dollar figures below as accurate until they're refreshed")
+    print("  against a real structured-path run.")
     print(f"{'-'*80}")
     print(f"{'Combo':<30} {'Avg in':>8} {'Avg out':>8} {'Cost/4000':>12} {'vs 4o-det':>12}")
     print("-" * 80)
 
     N = 4000
-    AVG_IN       = 3167   # actual measured from prompt build
-    SYS_TOKENS   = 2310   # system prompt (cacheable)
-    USER_TOKENS  =  857   # user prompt   (never cached — changes per profile)
+    AVG_IN       = 3167   # STALE -- see WARNING above
+    SYS_TOKENS   = 2310   # STALE -- see WARNING above
+    USER_TOKENS  =  857   # STALE -- see WARNING above
 
     baseline_cost = None
     for combo in COMBOS:
@@ -399,6 +416,14 @@ def cost_summary():
                     + cached_in * N * p["cached_input"]
                     + avg_out   * N * p["output"]) / 1_000_000
 
+        # Codex review on PR #135: the nice-to-have bonus pass is a second,
+        # separate call per profile (same input-token order of magnitude,
+        # much shorter output). Approximated as another full-price call
+        # rather than silently left out -- better to overstate than to
+        # understate a real-money estimate. Refine once real structured-path
+        # numbers replace the STALE constants above.
+        cost *= CALLS_PER_PROFILE
+
         if baseline_cost is None:
             baseline_cost = cost
         savings = f"-{round((1 - cost/baseline_cost)*100)}%" if baseline_cost else "—"
@@ -408,7 +433,10 @@ def cost_summary():
 def main():
     print("=" * 75)
     print("SourcingX — Screening Mode Comparison")
-    print(f"  Profiles: {SAMPLE_SIZE}  |  Combos: {len(COMBOS)}  |  Total API calls: {SAMPLE_SIZE * len(COMBOS)}")
+    print(f"  Profiles: {SAMPLE_SIZE}  |  Combos: {len(COMBOS)}  |  "
+          f"Total API calls: {SAMPLE_SIZE * len(COMBOS) * CALLS_PER_PROFILE} "
+          f"({CALLS_PER_PROFILE}/profile: main verdict"
+          + (" + nice-to-have bonus pass" if CALLS_PER_PROFILE > 1 else "") + ")")
     print(f"  Role: {ROLE_CONTEXT}")
     print("=" * 75)
 

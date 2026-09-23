@@ -82,6 +82,7 @@ try:
     from typesafe_sdk import (
         Choice,
         Noul,
+        RetryPolicy,
         Score,
         TypeSafeAPIConnectionError,
         TypeSafeAPITimeoutError,
@@ -91,7 +92,7 @@ try:
     )
     TYPESAFE_SDK_AVAILABLE = True
 except ImportError:
-    Choice = Noul = Score = TypeSafeClient = None  # type: ignore[assignment]
+    Choice = Noul = Score = TypeSafeClient = RetryPolicy = None  # type: ignore[assignment]
     TypeSafeAPIConnectionError = TypeSafeAPITimeoutError = None  # type: ignore[assignment]
     TypeSafeInternalServerError = TypeSafeRateLimitError = None  # type: ignore[assignment]
     TYPESAFE_SDK_AVAILABLE = False
@@ -594,7 +595,13 @@ def build_client() -> "TypeSafeClient":
                 os.environ["TYPESAFE_API_KEY"] = key
         except (OSError, ValueError):
             pass  # no config.json / unreadable -- TypeSafeClient() will raise its own error
-    return TypeSafeClient()
+    # Codex review on PR #133: the SDK's own default RetryPolicy(max_retries=2)
+    # means every system_one() call it makes can already take up to 3 tries on
+    # its own -- stacked with call_jev()'s own JEV_MAX_ATTEMPTS=3 outer loop,
+    # a single screening call could balloon to 9 HTTP requests instead of the
+    # documented 3. Disable the SDK's internal retries so call_jev()'s loop is
+    # the one and only retry layer.
+    return TypeSafeClient(retry=RetryPolicy(max_retries=0))
 
 
 # ============================================================================

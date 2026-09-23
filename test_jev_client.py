@@ -392,6 +392,35 @@ def test_build_client_raises_when_sdk_unavailable(monkeypatch):
         jev_client.build_client()
 
 
+def test_build_client_disables_sdk_internal_retries(monkeypatch, tmp_path):
+    """Codex review on PR #133: the SDK's own default retry policy
+    (max_retries=2) stacked with call_jev()'s own outer retry loop could
+    balloon one screening call into up to 9 HTTP requests instead of the
+    documented 3. build_client() must construct the client with the SDK's
+    internal retries disabled so call_jev()'s loop is the only retry
+    layer."""
+    captured = {}
+
+    class FakeRetryPolicy:
+        def __init__(self, max_retries):
+            captured["max_retries"] = max_retries
+
+    class FakeTypeSafeClient:
+        def __init__(self, retry=None):
+            captured["retry"] = retry
+
+    monkeypatch.setattr(jev_client, "TYPESAFE_SDK_AVAILABLE", True)
+    monkeypatch.setattr(jev_client, "TypeSafeClient", FakeTypeSafeClient)
+    monkeypatch.setattr(jev_client, "RetryPolicy", FakeRetryPolicy)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "test-key")
+    monkeypatch.chdir(tmp_path)  # no config.json here -- exercise the env-var path only
+
+    jev_client.build_client()
+
+    assert captured["max_retries"] == 0
+    assert isinstance(captured["retry"], FakeRetryPolicy)
+
+
 def test_build_questions_shape_with_fake_sdk_classes(monkeypatch):
     """Exercises build_questions()'s real logic (which question gets which
     instructions/criteria) with typesafe_sdk's Noul/Score/Choice

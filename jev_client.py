@@ -315,6 +315,7 @@ def build_questions(job_description: str, screening_brief: Optional[dict] = None
 
     role_context = (screening_brief or {}).get("role_context") or ""
     must_haves = (screening_brief or {}).get("must_haves") or []
+    exclusions = (screening_brief or {}).get("exclusions") or []
     jd_block = job_description or role_context or ""
 
     hard_filter_instructions = (
@@ -322,10 +323,15 @@ def build_questions(job_description: str, screening_brief: Optional[dict] = None
         f"{jd_block}\n\n"
         + (f"Must-have requirements:\n" + "\n".join(f"- {m}" for m in must_haves) + "\n\n"
            if must_haves else "")
+        + (f"Exclusions (candidate FAILS if any of these apply):\n"
+           + "\n".join(f"- {e}" for e in exclusions) + "\n\n"
+           if exclusions else "")
         + "Based only on the candidate profile text above, does this candidate "
-        "clearly pass the hard, must-have requirements of this job description? "
-        "Answer as a probability that they pass (near 1.0 = clearly passes, "
-        "near 0.0 = clearly fails, near 0.5 = genuinely unclear from the text)."
+        "clearly pass the hard, must-have requirements of this job description "
+        "AND clearly avoid every exclusion listed above? Answer as a probability "
+        "that they pass (near 1.0 = clearly passes and matches no exclusion, "
+        "near 0.0 = clearly fails a must-have or matches an exclusion, "
+        "near 0.5 = genuinely unclear from the text)."
     )
 
     fit_score_instructions = (

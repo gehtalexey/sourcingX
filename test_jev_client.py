@@ -410,6 +410,46 @@ def test_build_questions_shape_with_fake_sdk_classes(monkeypatch):
     assert jev_client.UNCLEAR_OR_OTHER in reject_reason.criteria
 
 
+def test_build_questions_hard_filter_includes_exclusions(monkeypatch):
+    """Codex review on PR #133: exclusions were only ever surfaced in the
+    reject-reason Choice (an explanation shown after a fail), never in the
+    hard-filter Noul question itself -- so a candidate matching an explicit
+    exclusion could still be told they "clearly pass" and get qualified.
+    The hard filter's instructions must name every exclusion and tell Jev to
+    fail the candidate if any of them apply."""
+
+    class FakeNoul:
+        def __init__(self, instructions):
+            self.instructions = instructions
+
+    class FakeScore:
+        def __init__(self, instructions, criteria):
+            self.instructions = instructions
+            self.criteria = criteria
+
+    class FakeChoice:
+        def __init__(self, instructions, criteria):
+            self.instructions = instructions
+            self.criteria = criteria
+
+    monkeypatch.setattr(jev_client, "TYPESAFE_SDK_AVAILABLE", True)
+    monkeypatch.setattr(jev_client, "Noul", FakeNoul)
+    monkeypatch.setattr(jev_client, "Score", FakeScore)
+    monkeypatch.setattr(jev_client, "Choice", FakeChoice)
+
+    questions = jev_client.build_questions(
+        "Senior backend engineer, Python, 5+ years",
+        screening_brief={
+            "must_haves": ["5+ years Python"],
+            "exclusions": ["Currently at a direct competitor"],
+        },
+    )
+
+    hard_filter = questions[jev_client.QUESTION_ID_HARD_FILTER]
+    assert "Currently at a direct competitor" in hard_filter.instructions
+    assert "exclusion" in hard_filter.instructions.lower()
+
+
 # ============================================================================
 # screen_with_jev -- end to end with a fake client (no network, no key)
 # ============================================================================

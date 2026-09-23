@@ -133,6 +133,36 @@ def test_build_candidate_text_never_crashes_on_empty_profile():
     assert jev_client.build_candidate_text(None) == "(no profile data available)"
 
 
+def test_build_candidate_text_falls_back_to_region_for_location():
+    """Codex review on PR #133: newer Crustdata responses use 'region'
+    instead of 'location' (normalizers.py already carries this fallback
+    elsewhere in the codebase) -- without it, location-based requirements
+    would look unanswerable for affected profiles."""
+    profile = {"raw_data": {"headline": "Engineer", "region": "Tel Aviv, Israel"}}
+    text = jev_client.build_candidate_text(profile)
+    assert "Tel Aviv, Israel" in text
+
+
+def test_build_candidate_text_falls_back_to_company_name_for_employer():
+    """Codex review on PR #133: Crustdata employment entries sometimes use
+    'company_name' instead of 'employer_name' (normalizers.py's own
+    pick_current_employer already handles this) -- without the fallback,
+    those roles render as 'Unknown company', losing company-history
+    evidence needed for company-specific requirements/exclusions."""
+    profile = {
+        "raw_data": {
+            "current_employers": [{
+                "employee_title": "Engineer",
+                "company_name": "Acme Corp",
+                "start_date": "2023-01", "end_date": None,
+            }],
+        }
+    }
+    text = jev_client.build_candidate_text(profile)
+    assert "Acme Corp" in text
+    assert "Unknown company" not in text
+
+
 def test_strip_personal_fields_never_mutates_input():
     raw = {"name": "Jane", "skills": ["Python"]}
     stripped = jev_client.strip_personal_fields(raw)

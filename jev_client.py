@@ -203,7 +203,7 @@ def _format_employer(entry: dict) -> Optional[str]:
     if not isinstance(entry, dict):
         return None
     title = entry.get("employee_title") or entry.get("title")
-    company = entry.get("employer_name") or entry.get("company")
+    company = entry.get("employer_name") or entry.get("company_name") or entry.get("company")
     start = entry.get("start_date") or ""
     end = entry.get("end_date") or "present"
     if not title and not company:
@@ -262,7 +262,7 @@ def build_candidate_text(profile: dict) -> str:
     if schools:
         lines.append("Education: " + ", ".join(str(s) for s in schools))
 
-    location = raw.get("location")
+    location = raw.get("location") or raw.get("region")
     if location:
         lines.append(f"Location: {location}")
 

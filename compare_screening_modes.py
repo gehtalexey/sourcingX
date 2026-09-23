@@ -111,11 +111,6 @@ COMBOS = [
     {"model": "claude-haiku-4-5-20251001","mode": "detailed", "label": "haiku / detailed",          "provider": "anthropic"},
 ]
 
-PRICING = {
-    "gpt-4o-2024-08-06":          {"input": 2.50,  "cached_input": 1.25,   "output": 10.00},
-    "gpt-4o-mini-2024-07-18":     {"input": 0.15,  "cached_input": 0.075,  "output": 0.60},
-    "claude-haiku-4-5-20251001":  {"input": 0.80,  "cached_input": 0.08,   "output": 4.00},
-}
 
 # -- Worker script (runs in subprocess, has access to full Streamlit env) ------
 PROJECT_DIR = str(Path(__file__).parent)
@@ -376,58 +371,35 @@ def compare(all_results: dict, profiles: list):
 
 # -- Cost table ----------------------------------------------------------------
 def cost_summary():
+    # Codex review on PR #135 (round 2): a doubled-but-otherwise-stale
+    # estimate, even with a warning printed above it, still puts an exact
+    # dollar figure in front of a user who may just read that number and
+    # trust it -- a warning doesn't stop that. The projection below was
+    # built for the legacy freeform path's prompt shape (single call,
+    # AVG_IN=3167/SYS_TOKENS=2310/USER_TOKENS=857, measured before PR #135).
+    # The structured path (this script's actual behavior since PR #135) has
+    # a different system+user prompt AND a second, separate bonus-pass call
+    # this script has never measured. Rather than publish a number built
+    # from the wrong prompt's token counts, this prints what's actually
+    # known and stops -- no dollar figure until a real structured-path run
+    # is measured (needs an approved-and-run comparison first; this script
+    # doesn't log per-call usage today, so add that before trusting any
+    # number here).
     print(f"\n{'-'*80}")
-    print("COST ESTIMATE — 4,000 profiles  (avg input ~3,167 tok based on actual prompt build)")
-    print("  OpenAI:    caching automatic (87% hit rate from Mar 30 actuals)")
-    print("  Haiku:     caching NOW ACTIVE via cache_control (charged at $0.08/1M after first call)")
-    print("  WARNING: AVG_IN/SYS_TOKENS/USER_TOKENS below were measured under the OLD")
-    print("  legacy freeform prompt path (PR #135 switched this script to the structured")
-    print("  screening_brief path, which builds a different system+user prompt). These")
-    print("  are placeholders carrying the doubled-call-count fix, NOT re-measured --")
-    print("  don't treat the dollar figures below as accurate until they're refreshed")
-    print("  against a real structured-path run.")
+    print("COST ESTIMATE — not available")
     print(f"{'-'*80}")
-    print(f"{'Combo':<30} {'Avg in':>8} {'Avg out':>8} {'Cost/4000':>12} {'vs 4o-det':>12}")
-    print("-" * 80)
-
-    N = 4000
-    AVG_IN       = 3167   # STALE -- see WARNING above
-    SYS_TOKENS   = 2310   # STALE -- see WARNING above
-    USER_TOKENS  =  857   # STALE -- see WARNING above
-
-    baseline_cost = None
-    for combo in COMBOS:
-        avg_out = 17 if combo["mode"] == "quick" else 100
-        p = PRICING[combo["model"]]
-
-        if combo["provider"] == "anthropic":
-            # First call: full rate for everything + cache write
-            # Remaining N-1: cached rate for system prompt, full rate for user prompt
-            first_call   = (AVG_IN * p["input"] + avg_out * p["output"]) / 1_000_000
-            cache_write  = (SYS_TOKENS * p["input"]) / 1_000_000   # one-time cache write cost
-            subsequent   = ((SYS_TOKENS * p["cached_input"] + USER_TOKENS * p["input"]) * (N-1)
-                            + avg_out * (N-1) * p["output"]) / 1_000_000
-            cost = first_call + cache_write + subsequent
-        else:
-            # OpenAI: 87% cache hit on system prompt
-            cached_in   = SYS_TOKENS * 0.87
-            uncached_in = AVG_IN - cached_in
-            cost = (uncached_in * N * p["input"]
-                    + cached_in * N * p["cached_input"]
-                    + avg_out   * N * p["output"]) / 1_000_000
-
-        # Codex review on PR #135: the nice-to-have bonus pass is a second,
-        # separate call per profile (same input-token order of magnitude,
-        # much shorter output). Approximated as another full-price call
-        # rather than silently left out -- better to overstate than to
-        # understate a real-money estimate. Refine once real structured-path
-        # numbers replace the STALE constants above.
-        cost *= CALLS_PER_PROFILE
-
-        if baseline_cost is None:
-            baseline_cost = cost
-        savings = f"-{round((1 - cost/baseline_cost)*100)}%" if baseline_cost else "—"
-        print(f"{combo['label']:<30} {AVG_IN:>8,} {avg_out:>8,} ${cost:>10.2f} {savings:>12}")
+    print("This script's projection table was built for the legacy freeform")
+    print("prompt path. PR #135 switched actual screening to the structured")
+    print("screening_brief path (different prompt, plus a separate nice-to-have")
+    print("bonus call per profile) -- the old token-count constants no longer")
+    print("apply, and this script doesn't yet log real per-call usage from the")
+    print("run it just did, so there's nothing accurate to compute from.")
+    print(f"Combos in this run: {', '.join(c['label'] for c in COMBOS)}")
+    print(f"Calls per profile: {CALLS_PER_PROFILE} "
+          "(main verdict" + (" + nice-to-have bonus pass" if CALLS_PER_PROFILE > 1 else "") + ")")
+    print("To get a real number: wire screen_profile()'s tracker= parameter into")
+    print("the worker script and report its logged cost for the run that just")
+    print("happened, instead of projecting a hypothetical one.")
 
 # -- Main ----------------------------------------------------------------------
 def main():

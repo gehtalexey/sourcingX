@@ -278,9 +278,23 @@ file or an in-progress plan, not just skim the changed-files list.
   200-profile bake-off (item D) calls `jev_client.screen_with_jev()` directly, not
   through `screen_profile()`.
 
-**In flight:** nothing right now. Alexey confirmed 2026-09-23 ("let's finish all of
-them") to continue straight through items A, C, and D. Next up: build item A (the
-model-settings module, narrowed scope, wiring in the now-merged Jev client).
+- **Item A — DONE, PR #134 open, 2 clean Codex rounds, awaiting Alexey's merge word.**
+  `screening_models.py` (new) + `get_screen_model()`, wired into `dashboard.py`'s live
+  call site, batch-resume fallback, and both `screen_profile()`/`screen_profiles_batch()`
+  signature defaults. Fixed a Codex-found P1 along the way: `load_config()`'s Streamlit
+  Cloud secrets override never copied `screen_model`, so the setting had no effect on a
+  deployed app. **Known constraint hit and worked around:** the GitHub token available
+  in this environment lacks `workflow` scope, so `.github/workflows/test.yml` cannot be
+  edited by Claude here — Alexey explicitly declined to touch anything himself
+  ("I don't touch anything... find a workaround"). Workaround used: new tests were
+  folded into existing CI-covered files (`test_mocking_services.py`,
+  `test_api_key_strip.py`) instead of adding new files to the workflow's focused list.
+  **This constraint applies to any future PR that adds a new test file** — either fold
+  new tests into an existing CI-covered file, or flag it for Alexey. `test_jev_client.py`
+  (from PR #133) still isn't in CI's list either — a known, not-yet-fixed gap, left alone
+  since folding a 642-line file into another would be worse than the problem.
+
+**In flight:** nothing right now. Next up: item C (fix `compare_screening_modes.py`).
 
 **Facts established the hard way:**
 - SourcingX has exactly one live screening path (`dashboard.py`'s own

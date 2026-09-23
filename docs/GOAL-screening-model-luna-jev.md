@@ -294,7 +294,19 @@ file or an in-progress plan, not just skim the changed-files list.
   (from PR #133) still isn't in CI's list either — a known, not-yet-fixed gap, left alone
   since folding a 642-line file into another would be worse than the problem.
 
-**In flight:** nothing right now. Next up: item C (fix `compare_screening_modes.py`).
+- **Item C — DONE, PR #135 open, 3 clean/fixed Codex rounds, awaiting Alexey's merge
+  word.** Fixed the wrong-prompt-path bug (now passes `screening_brief`, matching the
+  live dashboard). Codex also caught two real side effects of that fix: the "quick" vs
+  "detailed" combo comparison was silently comparing a combo against an identical copy
+  of itself (mode has no effect under the structured path — dropped "haiku / quick"),
+  and the nice-to-have bonus pass doubles the real call count per profile (added
+  `CALLS_PER_PROFILE`). Round 2 caught that a "doubled but still stale" cost estimate
+  was still a wrong number dressed as precise — `cost_summary()` no longer prints any
+  dollar figure; it states plainly what's known and what's needed for a real one
+  (wiring `tracker=` into the worker to report actual measured cost from a real run).
+
+**In flight:** nothing right now. Next up: item D (the 200-profile bake-off) — blocked
+on Alexey approving real spend, per this file's constraints. Not started.
 
 **Facts established the hard way:**
 - SourcingX has exactly one live screening path (`dashboard.py`'s own

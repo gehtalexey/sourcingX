@@ -1,11 +1,10 @@
 """
 Screening Mode Comparison Script
 =================================
-Tests 4 combinations on a sample of real profiles from the DB:
-  1. gpt-4o       + detailed
-  2. gpt-4o       + quick
-  3. gpt-4o-mini  + detailed
-  4. gpt-4o-mini  + quick
+Screens a sample of real profiles from the DB through each entry in COMBOS
+(currently: gpt-4o and Claude Haiku, both via the live structured
+per-criterion path -- see COMBOS below for the up-to-date list; "mode"
+no longer differentiates anything under that path, see its comment).
 
 Outputs a CSV + console summary so you can compare score quality.
 Run: python compare_screening_modes.py
@@ -47,35 +46,71 @@ if not OPENAI_KEY:
 SAMPLE_SIZE = 50
 WORKERS = 4
 
-# -- Job Description -----------------------------------------------------------
-JD = (
-    "We are looking for a VP Marketing with 10+ years of B2B SaaS marketing experience, "
-    "including at least 5 years in a VP or Head of Marketing leadership role managing a team of 5 or more. "
-    "The candidate must have proven ownership of pipeline generation — demand gen, ABM, or product marketing — "
-    "with measurable revenue impact such as MQLs, pipeline contribution, or CAC metrics. "
-    "They must have built and scaled a marketing organization across multiple functions "
-    "(demand gen, product marketing, content, brand) and worked cross-functionally with Sales, Product, and CS "
-    "to drive go-to-market strategy. "
-    "Candidates without in-house B2B SaaS experience, or with only B2C, agency, or brand-only backgrounds, "
-    "should be rejected. "
-    "Nice to have: experience marketing to technical audiences (developers, DevOps, security buyers), "
-    "PLG or self-serve funnel experience, and familiarity with modern marketing tools such as "
-    "HubSpot, Marketo, 6sense, or Salesforce. "
-    "Strong bonus for candidates who have built marketing from early stage to scale at a "
-    "well-funded or public B2B SaaS company."
-)
+# -- Screening criteria ---------------------------------------------------------
+# Structured the same way the dashboard's "Screening criteria" form builds
+# screening_brief (dashboard.py ~line 9863: role_context/must_haves/
+# nice_to_haves/exclusions, one item per line) -- NOT one freeform paragraph.
+# This used to be a single JD string passed as screen_profile()'s
+# user_request, which only reaches the LEGACY freeform prompt path
+# (screen_profile() only uses the structured per-criterion path -- the one
+# the live dashboard actually screens with -- when screening_brief is
+# supplied; job_description/user_request are ignored by that path). A
+# comparison run on the legacy path was comparing the wrong prompt.
+ROLE_CONTEXT = "VP Marketing, B2B SaaS, New York"
 
+MUST_HAVES = [
+    "10+ years of B2B SaaS marketing experience",
+    "At least 5 years in a VP or Head of Marketing leadership role managing a team of 5 or more",
+    "Proven ownership of pipeline generation (demand gen, ABM, or product marketing) with measurable revenue impact such as MQLs, pipeline contribution, or CAC metrics",
+    "Built and scaled a marketing organization across multiple functions (demand gen, product marketing, content, brand)",
+    "Worked cross-functionally with Sales, Product, and CS to drive go-to-market strategy",
+]
+
+NICE_TO_HAVES = [
+    "Experience marketing to technical audiences (developers, DevOps, security buyers)",
+    "PLG or self-serve funnel experience",
+    "Familiarity with modern marketing tools such as HubSpot, Marketo, 6sense, or Salesforce",
+    "Built marketing from early stage to scale at a well-funded or public B2B SaaS company",
+]
+
+EXCLUSIONS = [
+    "No in-house B2B SaaS marketing experience (only B2C, agency, or brand-only backgrounds)",
+]
+
+SCREENING_BRIEF = {
+    "role_context": ROLE_CONTEXT,
+    "must_haves": MUST_HAVES,
+    "nice_to_haves": NICE_TO_HAVES,
+    "exclusions": EXCLUSIONS,
+}
+
+# Codex review on PR #135: with nice_to_haves non-empty, screen_profile()'s
+# structured path fires a SECOND request per profile (the isolated
+# nice-to-have bonus pass, dashboard.py's `_NICE_TO_HAVE_SYSTEM`/
+# `_nice_to_have_prompt` call) on top of the main verdict call. Every
+# call-count and cost figure this script prints must account for both.
+CALLS_PER_PROFILE = 2 if NICE_TO_HAVES else 1
+
+# Freeform rendering kept only for display/logging in this script -- the
+# structured path above is what actually gets screened.
+JD = "\n".join([
+    f"Role: {ROLE_CONTEXT}",
+    "Must-haves:\n" + "\n".join(f"- {m}" for m in MUST_HAVES),
+    "Nice-to-haves:\n" + "\n".join(f"- {n}" for n in NICE_TO_HAVES),
+    "Exclusions:\n" + "\n".join(f"- {e}" for e in EXCLUSIONS),
+])
+
+# Codex review on PR #135: the structured per-criterion path (what
+# screening_brief now routes into) never branches on `mode` at all -- unlike
+# the legacy freeform path it replaces, "detailed" and "quick" send the
+# exact same requests. A "haiku / quick" combo next to "haiku / detailed"
+# would silently compare a combo against an identical copy of itself, at
+# real cost. Dropped rather than kept as a no-op comparison.
 COMBOS = [
     {"model": "gpt-4o-2024-08-06",        "mode": "detailed", "label": "gpt-4o / detailed",       "provider": "openai"},
     {"model": "claude-haiku-4-5-20251001","mode": "detailed", "label": "haiku / detailed",          "provider": "anthropic"},
-    {"model": "claude-haiku-4-5-20251001","mode": "quick",    "label": "haiku / quick",             "provider": "anthropic"},
 ]
 
-PRICING = {
-    "gpt-4o-2024-08-06":          {"input": 2.50,  "cached_input": 1.25,   "output": 10.00},
-    "gpt-4o-mini-2024-07-18":     {"input": 0.15,  "cached_input": 0.075,  "output": 0.60},
-    "claude-haiku-4-5-20251001":  {"input": 0.80,  "cached_input": 0.08,   "output": 4.00},
-}
 
 # -- Worker script (runs in subprocess, has access to full Streamlit env) ------
 PROJECT_DIR = str(Path(__file__).parent)
@@ -96,13 +131,11 @@ import streamlit as st
 
 # Import dashboard functions directly
 from dashboard import screen_profile, compute_role_durations_cached, trim_raw_profile
-from prompts import VP_MARKETING_NYC
-
-ROLE_PROMPT = VP_MARKETING_NYC["prompt"]
 
 def run(args):
     profiles = args["profiles"]
     jd       = args["jd"]
+    screening_brief = args["screening_brief"]
     model    = args["model"]
     mode     = args["mode"]
     key      = args["openai_key"]
@@ -121,10 +154,10 @@ def run(args):
     def screen_one(profile):
         name = profile.get("name") or "Unknown"
         t0 = time.time()
-        # NOTE: The dashboard now uses a single unified screening_policy path —
-        # role-specific prompts (ROLE_PROMPT/VP_MARKETING_NYC) are no longer
-        # honored by screen_profile(). The recruiter's intent is passed via
-        # user_request instead. We feed the JD text so the policy has context.
+        # Structured per-criterion path -- the same one dashboard.py's live
+        # screening UI uses (screen_profile() only takes this path when
+        # screening_brief is supplied; job_description is kept only for
+        # display/JD-hashing, it has no effect on what gets screened here).
         result = screen_profile(
             profile=profile,
             job_description=jd,
@@ -132,7 +165,7 @@ def run(args):
             mode=mode,
             ai_model=model,
             ai_provider=provider,
-            user_request=jd,
+            screening_brief=screening_brief,
         )
         elapsed = round(time.time() - t0, 2)
         return {
@@ -233,6 +266,7 @@ def run_combo(profiles: list, combo: dict) -> list:
     args_path.write_text(json.dumps({
         "profiles":      profiles,
         "jd":            JD,
+        "screening_brief": SCREENING_BRIEF,
         "model":         combo["model"],
         "mode":          combo["mode"],
         "provider":      combo["provider"],
@@ -337,51 +371,45 @@ def compare(all_results: dict, profiles: list):
 
 # -- Cost table ----------------------------------------------------------------
 def cost_summary():
+    # Codex review on PR #135 (round 2): a doubled-but-otherwise-stale
+    # estimate, even with a warning printed above it, still puts an exact
+    # dollar figure in front of a user who may just read that number and
+    # trust it -- a warning doesn't stop that. The projection below was
+    # built for the legacy freeform path's prompt shape (single call,
+    # AVG_IN=3167/SYS_TOKENS=2310/USER_TOKENS=857, measured before PR #135).
+    # The structured path (this script's actual behavior since PR #135) has
+    # a different system+user prompt AND a second, separate bonus-pass call
+    # this script has never measured. Rather than publish a number built
+    # from the wrong prompt's token counts, this prints what's actually
+    # known and stops -- no dollar figure until a real structured-path run
+    # is measured (needs an approved-and-run comparison first; this script
+    # doesn't log per-call usage today, so add that before trusting any
+    # number here).
     print(f"\n{'-'*80}")
-    print("COST ESTIMATE — 4,000 profiles  (avg input ~3,167 tok based on actual prompt build)")
-    print("  OpenAI:    caching automatic (87% hit rate from Mar 30 actuals)")
-    print("  Haiku:     caching NOW ACTIVE via cache_control (charged at $0.08/1M after first call)")
+    print("COST ESTIMATE — not available")
     print(f"{'-'*80}")
-    print(f"{'Combo':<30} {'Avg in':>8} {'Avg out':>8} {'Cost/4000':>12} {'vs 4o-det':>12}")
-    print("-" * 80)
-
-    N = 4000
-    AVG_IN       = 3167   # actual measured from prompt build
-    SYS_TOKENS   = 2310   # system prompt (cacheable)
-    USER_TOKENS  =  857   # user prompt   (never cached — changes per profile)
-
-    baseline_cost = None
-    for combo in COMBOS:
-        avg_out = 17 if combo["mode"] == "quick" else 100
-        p = PRICING[combo["model"]]
-
-        if combo["provider"] == "anthropic":
-            # First call: full rate for everything + cache write
-            # Remaining N-1: cached rate for system prompt, full rate for user prompt
-            first_call   = (AVG_IN * p["input"] + avg_out * p["output"]) / 1_000_000
-            cache_write  = (SYS_TOKENS * p["input"]) / 1_000_000   # one-time cache write cost
-            subsequent   = ((SYS_TOKENS * p["cached_input"] + USER_TOKENS * p["input"]) * (N-1)
-                            + avg_out * (N-1) * p["output"]) / 1_000_000
-            cost = first_call + cache_write + subsequent
-        else:
-            # OpenAI: 87% cache hit on system prompt
-            cached_in   = SYS_TOKENS * 0.87
-            uncached_in = AVG_IN - cached_in
-            cost = (uncached_in * N * p["input"]
-                    + cached_in * N * p["cached_input"]
-                    + avg_out   * N * p["output"]) / 1_000_000
-
-        if baseline_cost is None:
-            baseline_cost = cost
-        savings = f"-{round((1 - cost/baseline_cost)*100)}%" if baseline_cost else "—"
-        print(f"{combo['label']:<30} {AVG_IN:>8,} {avg_out:>8,} ${cost:>10.2f} {savings:>12}")
+    print("This script's projection table was built for the legacy freeform")
+    print("prompt path. PR #135 switched actual screening to the structured")
+    print("screening_brief path (different prompt, plus a separate nice-to-have")
+    print("bonus call per profile) -- the old token-count constants no longer")
+    print("apply, and this script doesn't yet log real per-call usage from the")
+    print("run it just did, so there's nothing accurate to compute from.")
+    print(f"Combos in this run: {', '.join(c['label'] for c in COMBOS)}")
+    print(f"Calls per profile: {CALLS_PER_PROFILE} "
+          "(main verdict" + (" + nice-to-have bonus pass" if CALLS_PER_PROFILE > 1 else "") + ")")
+    print("To get a real number: wire screen_profile()'s tracker= parameter into")
+    print("the worker script and report its logged cost for the run that just")
+    print("happened, instead of projecting a hypothetical one.")
 
 # -- Main ----------------------------------------------------------------------
 def main():
     print("=" * 75)
     print("SourcingX — Screening Mode Comparison")
-    print(f"  Profiles: {SAMPLE_SIZE}  |  Combos: {len(COMBOS)}  |  Total API calls: {SAMPLE_SIZE * len(COMBOS)}")
-    print(f"  Role prompt: VP_MARKETING_NYC")
+    print(f"  Profiles: {SAMPLE_SIZE}  |  Combos: {len(COMBOS)}  |  "
+          f"Total API calls: {SAMPLE_SIZE * len(COMBOS) * CALLS_PER_PROFILE} "
+          f"({CALLS_PER_PROFILE}/profile: main verdict"
+          + (" + nice-to-have bonus pass" if CALLS_PER_PROFILE > 1 else "") + ")")
+    print(f"  Role: {ROLE_CONTEXT}")
     print("=" * 75)
 
     profiles = load_profiles(SAMPLE_SIZE)

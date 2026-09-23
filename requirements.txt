@@ -10,3 +10,8 @@ bcrypt>=4.0.0
 plotly>=5.18.0
 anthropic>=0.39.0
 psutil>=5.9.0
+# TypeSafe SDK for jev_client.py (Jev question sets + verdicts). Same floor
+# agent-kalamata pins on its own Jev branch (requirements.txt on
+# origin/feat/jev-phase2-shadow-runner), confirmed installable on PyPI
+# (0.7.0/0.7.1 both published) before adding this line.
+typesafe-sdk>=0.7.0

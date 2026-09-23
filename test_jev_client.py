@@ -163,6 +163,43 @@ def test_build_candidate_text_falls_back_to_company_name_for_employer():
     assert "Unknown company" not in text
 
 
+def test_build_candidate_text_merges_flat_fields_into_thin_raw_data():
+    """Codex review on PR #133: a nonempty-but-thin raw_data (here, only a
+    headline -- no employers, no skills) previously won outright over
+    `profile`'s own usable top-level current_title/current_company/skills,
+    discarding real evidence. Must match screen_profile()'s own thin-profile
+    detection in dashboard.py (its `not current_employers and not
+    past_employers and not skills` check)."""
+    profile = {
+        "raw_data": {"headline": "Backend Engineer"},  # thin: no employers/skills
+        "current_title": "Backend Engineer",
+        "current_company": "Acme Corp",
+        "skills": ["Python", "PostgreSQL"],
+    }
+    text = jev_client.build_candidate_text(profile)
+    assert "Acme Corp" in text
+    assert "Python" in text
+
+
+def test_build_candidate_text_handles_string_skills_and_schools():
+    """Codex review on PR #133: the flattened profile shape can carry
+    skills/all_schools as a bare string ("Python") instead of a list --
+    joining that string directly iterates it character by character
+    ("P, y, t, h, o, n"), corrupting the evidence Jev sees."""
+    profile = {
+        "raw_data": {
+            "headline": "Engineer",
+            "skills": "Python",
+            "all_schools": "MIT",
+        }
+    }
+    text = jev_client.build_candidate_text(profile)
+    assert "Skills: Python" in text
+    assert "P, y, t, h, o, n" not in text
+    assert "Education: MIT" in text
+    assert "M, I, T" not in text
+
+
 def test_strip_personal_fields_never_mutates_input():
     raw = {"name": "Jane", "skills": ["Python"]}
     stripped = jev_client.strip_personal_fields(raw)

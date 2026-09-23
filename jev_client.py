@@ -200,6 +200,20 @@ def _get_raw_profile(profile: dict) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
+def _as_list(value: Any) -> list:
+    """Codex review on PR #133: the flattened profile shape can carry
+    `skills`/`all_schools` as a single comma-free string instead of a list
+    (e.g. "Python") -- joining a bare string with `", ".join(...)` iterates
+    it character by character ("P, y, t, h, o, n"), corrupting the evidence
+    Jev sees. Coerce a scalar string into a one-item list; leave a real list
+    (or anything else iterable-and-intentional) alone."""
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, list):
+        return value
+    return list(value) if value else []
+
+
 def _format_employer(entry: dict) -> Optional[str]:
     if not isinstance(entry, dict):
         return None
@@ -224,6 +238,28 @@ def build_candidate_text(profile: dict) -> str:
     as kalamata's own "career text ... stay" rule.
     """
     raw = strip_personal_fields(_get_raw_profile(profile))
+
+    # Codex review on PR #133: a nonempty-but-thin raw_data/raw_crustdata
+    # object (e.g. only a headline, no employers/skills) wins over `profile`
+    # in _get_raw_profile() even when `profile` itself carries usable flat
+    # current_title/current_company/skills fields alongside it -- exactly
+    # the condition screen_profile() in dashboard.py already detects
+    # (its own `if not raw.get('current_employers') and not
+    # raw.get('past_employers') and not raw.get('skills')` check, ~line
+    # 4772) and falls back on. Match that here so the same thin-profile
+    # shape doesn't silently lose evidence just for Jev.
+    if (
+        isinstance(profile, dict)
+        and not raw.get("current_employers")
+        and not raw.get("past_employers")
+        and not raw.get("skills")
+    ):
+        if profile.get("current_title") and "current_title" not in raw:
+            raw = {**raw, "current_title": profile["current_title"]}
+        if profile.get("current_company") and "current_company" not in raw:
+            raw = {**raw, "current_company": profile["current_company"]}
+        if profile.get("skills") and not raw.get("skills"):
+            raw = {**raw, "skills": profile["skills"]}
 
     lines = []
     headline = raw.get("headline") or raw.get("current_title")
@@ -257,11 +293,11 @@ def build_candidate_text(profile: dict) -> str:
 
     skills = raw.get("skills") or []
     if skills:
-        lines.append("Skills: " + ", ".join(str(s) for s in skills))
+        lines.append("Skills: " + ", ".join(str(s) for s in _as_list(skills)))
 
     schools = raw.get("all_schools") or raw.get("schools") or []
     if schools:
-        lines.append("Education: " + ", ".join(str(s) for s in schools))
+        lines.append("Education: " + ", ".join(str(s) for s in _as_list(schools)))
 
     location = raw.get("location") or raw.get("region")
     if location:

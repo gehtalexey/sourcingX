@@ -47,23 +47,52 @@ if not OPENAI_KEY:
 SAMPLE_SIZE = 50
 WORKERS = 4
 
-# -- Job Description -----------------------------------------------------------
-JD = (
-    "We are looking for a VP Marketing with 10+ years of B2B SaaS marketing experience, "
-    "including at least 5 years in a VP or Head of Marketing leadership role managing a team of 5 or more. "
-    "The candidate must have proven ownership of pipeline generation — demand gen, ABM, or product marketing — "
-    "with measurable revenue impact such as MQLs, pipeline contribution, or CAC metrics. "
-    "They must have built and scaled a marketing organization across multiple functions "
-    "(demand gen, product marketing, content, brand) and worked cross-functionally with Sales, Product, and CS "
-    "to drive go-to-market strategy. "
-    "Candidates without in-house B2B SaaS experience, or with only B2C, agency, or brand-only backgrounds, "
-    "should be rejected. "
-    "Nice to have: experience marketing to technical audiences (developers, DevOps, security buyers), "
-    "PLG or self-serve funnel experience, and familiarity with modern marketing tools such as "
-    "HubSpot, Marketo, 6sense, or Salesforce. "
-    "Strong bonus for candidates who have built marketing from early stage to scale at a "
-    "well-funded or public B2B SaaS company."
-)
+# -- Screening criteria ---------------------------------------------------------
+# Structured the same way the dashboard's "Screening criteria" form builds
+# screening_brief (dashboard.py ~line 9863: role_context/must_haves/
+# nice_to_haves/exclusions, one item per line) -- NOT one freeform paragraph.
+# This used to be a single JD string passed as screen_profile()'s
+# user_request, which only reaches the LEGACY freeform prompt path
+# (screen_profile() only uses the structured per-criterion path -- the one
+# the live dashboard actually screens with -- when screening_brief is
+# supplied; job_description/user_request are ignored by that path). A
+# comparison run on the legacy path was comparing the wrong prompt.
+ROLE_CONTEXT = "VP Marketing, B2B SaaS, New York"
+
+MUST_HAVES = [
+    "10+ years of B2B SaaS marketing experience",
+    "At least 5 years in a VP or Head of Marketing leadership role managing a team of 5 or more",
+    "Proven ownership of pipeline generation (demand gen, ABM, or product marketing) with measurable revenue impact such as MQLs, pipeline contribution, or CAC metrics",
+    "Built and scaled a marketing organization across multiple functions (demand gen, product marketing, content, brand)",
+    "Worked cross-functionally with Sales, Product, and CS to drive go-to-market strategy",
+]
+
+NICE_TO_HAVES = [
+    "Experience marketing to technical audiences (developers, DevOps, security buyers)",
+    "PLG or self-serve funnel experience",
+    "Familiarity with modern marketing tools such as HubSpot, Marketo, 6sense, or Salesforce",
+    "Built marketing from early stage to scale at a well-funded or public B2B SaaS company",
+]
+
+EXCLUSIONS = [
+    "No in-house B2B SaaS marketing experience (only B2C, agency, or brand-only backgrounds)",
+]
+
+SCREENING_BRIEF = {
+    "role_context": ROLE_CONTEXT,
+    "must_haves": MUST_HAVES,
+    "nice_to_haves": NICE_TO_HAVES,
+    "exclusions": EXCLUSIONS,
+}
+
+# Freeform rendering kept only for display/logging in this script -- the
+# structured path above is what actually gets screened.
+JD = "\n".join([
+    f"Role: {ROLE_CONTEXT}",
+    "Must-haves:\n" + "\n".join(f"- {m}" for m in MUST_HAVES),
+    "Nice-to-haves:\n" + "\n".join(f"- {n}" for n in NICE_TO_HAVES),
+    "Exclusions:\n" + "\n".join(f"- {e}" for e in EXCLUSIONS),
+])
 
 COMBOS = [
     {"model": "gpt-4o-2024-08-06",        "mode": "detailed", "label": "gpt-4o / detailed",       "provider": "openai"},
@@ -96,13 +125,11 @@ import streamlit as st
 
 # Import dashboard functions directly
 from dashboard import screen_profile, compute_role_durations_cached, trim_raw_profile
-from prompts import VP_MARKETING_NYC
-
-ROLE_PROMPT = VP_MARKETING_NYC["prompt"]
 
 def run(args):
     profiles = args["profiles"]
     jd       = args["jd"]
+    screening_brief = args["screening_brief"]
     model    = args["model"]
     mode     = args["mode"]
     key      = args["openai_key"]
@@ -121,10 +148,10 @@ def run(args):
     def screen_one(profile):
         name = profile.get("name") or "Unknown"
         t0 = time.time()
-        # NOTE: The dashboard now uses a single unified screening_policy path —
-        # role-specific prompts (ROLE_PROMPT/VP_MARKETING_NYC) are no longer
-        # honored by screen_profile(). The recruiter's intent is passed via
-        # user_request instead. We feed the JD text so the policy has context.
+        # Structured per-criterion path -- the same one dashboard.py's live
+        # screening UI uses (screen_profile() only takes this path when
+        # screening_brief is supplied; job_description is kept only for
+        # display/JD-hashing, it has no effect on what gets screened here).
         result = screen_profile(
             profile=profile,
             job_description=jd,
@@ -132,7 +159,7 @@ def run(args):
             mode=mode,
             ai_model=model,
             ai_provider=provider,
-            user_request=jd,
+            screening_brief=screening_brief,
         )
         elapsed = round(time.time() - t0, 2)
         return {
@@ -233,6 +260,7 @@ def run_combo(profiles: list, combo: dict) -> list:
     args_path.write_text(json.dumps({
         "profiles":      profiles,
         "jd":            JD,
+        "screening_brief": SCREENING_BRIEF,
         "model":         combo["model"],
         "mode":          combo["mode"],
         "provider":      combo["provider"],
@@ -381,7 +409,7 @@ def main():
     print("=" * 75)
     print("SourcingX — Screening Mode Comparison")
     print(f"  Profiles: {SAMPLE_SIZE}  |  Combos: {len(COMBOS)}  |  Total API calls: {SAMPLE_SIZE * len(COMBOS)}")
-    print(f"  Role prompt: VP_MARKETING_NYC")
+    print(f"  Role: {ROLE_CONTEXT}")
     print("=" * 75)
 
     profiles = load_profiles(SAMPLE_SIZE)

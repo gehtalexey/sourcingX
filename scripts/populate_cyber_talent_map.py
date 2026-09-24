@@ -37,7 +37,6 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from crustdata_search import search_people_db_v2  # noqa: E402
-from db import get_supabase_client  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +471,7 @@ def is_valid_analytics(entry) -> bool:
 # Per-market processing
 # ---------------------------------------------------------------------------
 
-def process_market(role_key: str, country: str, client) -> dict:
+def process_market(role_key: str, country: str) -> dict:
     """Pull and compute analytics for one role x country market (no DB save).
 
     Returns a dict with keys: analytics, profiles_pulled, saved, errors,
@@ -541,11 +540,6 @@ def main():
                         help="Process all 168 role x country markets. Big credit-consuming run.")
     args = parser.parse_args()
 
-    client = get_supabase_client()
-    if client is None:
-        log("ERROR: could not get Supabase client (check config.json)")
-        sys.exit(1)
-
     existing = load_existing_output()
 
     if args.only:
@@ -553,7 +547,7 @@ def main():
             log(f"ERROR: --only value must be 'role_key::country', got {args.only!r}")
             sys.exit(1)
         role_key, country = args.only.split("::", 1)
-        result = process_market(role_key, country, client)
+        result = process_market(role_key, country)
         market_id = f"{role_key}::{country}"
         existing[market_id] = result["analytics"]
         write_output(existing)
@@ -590,7 +584,7 @@ def main():
                     continue
 
                 try:
-                    result = process_market(role["key"], country, client)
+                    result = process_market(role["key"], country)
                 except Exception as e:
                     log(f"[{idx}/{total_markets}] {role['label']} × {country} -> FAILED: {e}")
                     failed.append({"market_id": market_id, "error": str(e)})

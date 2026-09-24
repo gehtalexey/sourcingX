@@ -491,7 +491,7 @@ class TestFilterSearchDoesNotSaveThinRows:
         logs = []
         monkeypatch.setattr(mod, "log", logs.append)
 
-        result = mod.process_market("security-engineer", "Norway", client=MagicMock())
+        result = mod.process_market("security-engineer", "Norway")
 
         spy.assert_not_called()
         assert result["saved"] == 0

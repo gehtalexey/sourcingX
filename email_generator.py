@@ -780,7 +780,8 @@ def generate_emails_batch(
     cancel_flag=None,
     generate_type: str = 'both',
     position: str = None,
-    ai_provider: str = 'openai'
+    ai_provider: str = 'openai',
+    company: str = None
 ) -> list:
     """Generate emails for multiple profiles in parallel.
 
@@ -798,6 +799,7 @@ def generate_emails_batch(
         generate_type: What to generate - 'both', 'subject_only', or 'opener_only'
         position: Optional position/role being recruited for
         ai_provider: "openai" or "anthropic"
+        company: Optional hiring company name to mention instead of neutral wording
 
     Returns:
         List of results with profile info + generated email content
@@ -828,7 +830,8 @@ def generate_emails_batch(
                 ai_model=ai_model, tracker=tracker,
                 generate_type=generate_type,
                 position=position,
-                ai_provider=ai_provider
+                ai_provider=ai_provider,
+                company=company
             )
 
             # Add profile info

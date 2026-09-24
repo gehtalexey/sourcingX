@@ -602,6 +602,35 @@ def test_thin_profile_gets_no_invention_note_in_user_prompt():
     assert 'do not claim anything they built' in client.last_user_prompt
 
 
+def test_generate_emails_batch_passes_company_through_to_prompt(monkeypatch):
+    import email_generator
+
+    captured = {}
+
+    class _CapturingClientForBatch(_CapturingOpenAIClient):
+        def _create(self, **kwargs):
+            for msg in kwargs.get('messages', []):
+                if msg.get('role') == 'system':
+                    captured['system_prompt'] = msg.get('content')
+            return super()._create(**kwargs)
+
+    def _fake_openai(api_key=None):
+        return _CapturingClientForBatch([CLEAN_OPENER])
+
+    monkeypatch.setattr(email_generator, 'OpenAI', _fake_openai)
+
+    results = email_generator.generate_emails_batch(
+        [THIN_PROFILE],
+        api_key='test-key',
+        generate_type='opener_only',
+        ai_provider='openai',
+        company='Acme'
+    )
+
+    assert len(results) == 1
+    assert 'at Acme' in captured['system_prompt']
+
+
 def test_profile_with_descriptions_gets_no_thin_profile_note():
     client = _CapturingOpenAIClient([CLEAN_OPENER])
     profile = {

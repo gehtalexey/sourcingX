@@ -39,6 +39,7 @@ from dashboard import (
     _decision_to_fit_label,
     _stability_verdict_failed,
     _resolve_three_state_decision,
+    _result_bucket,
 )
 
 
@@ -509,6 +510,35 @@ class TestScreeningNotesClearedOnRescreen:
         assert "jd_title" not in row
         assert "ai_model" not in row
         assert "screening_notes" in row and row["screening_notes"] is None
+
+
+class TestResultBucket:
+    """_result_bucket(r) -> str. Codex review (PR #144, round 2, issue 3):
+    NEEDS VERIFICATION rows store fit_level "Maybe" (agent-kalamata reads
+    that column), but the UI must treat them as their own group, separate
+    from an ordinary borderline "Maybe", in filters/downloads/email-opener
+    selection so they're never silently treated as outreach-ready."""
+
+    def test_needs_verification_decision_is_its_own_bucket(self):
+        r = {"fit": "Maybe", "decision": "NEEDS VERIFICATION"}
+        assert _result_bucket(r) == "Needs Verification"
+
+    def test_ordinary_maybe_stays_maybe(self):
+        r = {"fit": "Maybe", "decision": "GO"}
+        assert _result_bucket(r) == "Maybe"
+
+    def test_good_fit_passes_through(self):
+        r = {"fit": "Good Fit", "decision": "GO"}
+        assert _result_bucket(r) == "Good Fit"
+
+    def test_not_a_fit_passes_through(self):
+        r = {"fit": "Not a Fit", "decision": "NO GO"}
+        assert _result_bucket(r) == "Not a Fit"
+
+    def test_missing_decision_key_falls_back_to_fit(self):
+        # Legacy results without a `decision` field at all.
+        r = {"fit": "Maybe"}
+        assert _result_bucket(r) == "Maybe"
 
     def test_not_met_still_forces_no_go_even_with_hard_filter_set(self):
         must_haves = [

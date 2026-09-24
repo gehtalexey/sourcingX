@@ -4590,6 +4590,21 @@ def _decision_to_fit_label(decision: str, score: int) -> str:
     return "Good Fit" if s >= GO_CONFIDENCE_THRESHOLD else "Maybe"
 
 
+def _result_bucket(r: dict) -> str:
+    """The recruiter-facing DISPLAY bucket for a screening result row --
+    like `fit`, but breaks NEEDS VERIFICATION out of the "Maybe" fit_level
+    into its own group for filters/downloads/sorts. Storage keeps
+    fit_level "Maybe" for these rows (see _decision_to_fit_label's
+    docstring -- agent-kalamata filters on that column); this is a
+    display-only distinction so a recruiter can tell "worth a glance,
+    borderline score" apart from "unproven must-have, go check it" and so
+    UI actions (GO/Maybe filters, downloads, email-opener generation)
+    don't silently treat an unverified candidate as outreach-ready."""
+    if r.get('decision') == 'NEEDS VERIFICATION':
+        return 'Needs Verification'
+    return r.get('fit', '') or ''
+
+
 def _tri(v):
     """Tri-state truthiness for a verdict field ('met'/'matched'). Returns
     True/False ONLY for explicit, unambiguous signals; anything else (missing
@@ -10665,42 +10680,45 @@ with tab_screening:
 
             # Summary stats (unified policy: Good Fit = GO, Maybe = borderline
             # NO GO, Not a Fit = NO GO). NEEDS VERIFICATION rows store
-            # fit_level "Maybe" (so downstream Maybe-based filters/exports
-            # keep working) but are broken out here via `decision` so
-            # recruiters can see them as their own bucket.
-            needs_verif_count = sum(1 for r in screening_results if r.get('decision') == 'NEEDS VERIFICATION')
-            stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
-            good_fit = sum(1 for r in screening_results if r.get('fit') == 'Good Fit')
-            maybe_fit = sum(1 for r in screening_results
-                            if r.get('fit') == 'Maybe' and r.get('decision') != 'NEEDS VERIFICATION')
-            not_fit = sum(1 for r in screening_results if r.get('fit') == 'Not a Fit')
+            # fit_level "Maybe" (so downstream Maybe-based DB reads/exports
+            # keep working) but _result_bucket breaks them out here into
+            # their own recruiter-facing group.
+            good_fit = sum(1 for r in screening_results if _result_bucket(r) == 'Good Fit')
+            maybe_fit = sum(1 for r in screening_results if _result_bucket(r) == 'Maybe')
+            needs_verif_count = sum(1 for r in screening_results if _result_bucket(r) == 'Needs Verification')
+            not_fit = sum(1 for r in screening_results if _result_bucket(r) == 'Not a Fit')
 
+            stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
             stats_col1.metric("GO", good_fit, delta=None)
             stats_col2.metric("MAYBE", maybe_fit, delta=None)
             stats_col3.metric("NEEDS VERIFICATION", needs_verif_count, delta=None)
             stats_col4.metric("NO GO", not_fit, delta=None)
 
-            # Filter by fit level
+            # Filter by fit level — "Needs Verification" is its own option,
+            # separate from "Maybe", even though it stores fit_level "Maybe".
             fit_filter = st.multiselect(
                 "Filter by fit level",
-                options=["Good Fit", "Maybe", "Not a Fit", "Error"],
-                default=["Good Fit", "Maybe"],
+                options=["Good Fit", "Maybe", "Needs Verification", "Not a Fit", "Error"],
+                default=["Good Fit", "Maybe", "Needs Verification"],
                 key="fit_filter"
             )
 
             # Filter and sort results — GO first, then by score desc.
             # Unified-policy results have a 'decision' field ("GO"/"NO GO");
             # legacy role-prompt results don't, so fall back to score.
-            filtered_results = [r for r in screening_results if r.get('fit') in fit_filter]
+            filtered_results = [r for r in screening_results if _result_bucket(r) in fit_filter]
             def _sort_key(r):
-                # Bucket order: GO → Maybe → NO GO; then score desc within bucket
-                fit = r.get('fit', '')
-                if fit == 'Good Fit':
+                # Bucket order: GO → Maybe → Needs Verification → NO GO;
+                # then score desc within bucket
+                bucket_name = _result_bucket(r)
+                if bucket_name == 'Good Fit':
                     bucket = 0
-                elif fit == 'Maybe':
+                elif bucket_name == 'Maybe':
                     bucket = 1
-                else:
+                elif bucket_name == 'Needs Verification':
                     bucket = 2
+                else:
+                    bucket = 3
                 return (bucket, -int(r.get('score', 0) or 0))
             sorted_results = sorted(filtered_results, key=_sort_key)
 
@@ -10873,8 +10891,20 @@ with tab_screening:
                     enrich_df = screening_df[screening_df['fit'] == 'Good Fit'].copy() if 'fit' in screening_df.columns else screening_df.copy()
                     st.caption(f"GO candidates: {len(enrich_df)}")
                 elif candidate_source == "GO + Maybe":
-                    enrich_df = screening_df[screening_df['fit'].isin(['Good Fit', 'Maybe'])].copy() if 'fit' in screening_df.columns else screening_df.copy()
-                    st.caption(f"GO + Maybe candidates: {len(enrich_df)}")
+                    # "Maybe" here means genuinely borderline (GO decision,
+                    # low score) -- exclude NEEDS VERIFICATION rows (fit
+                    # also stores "Maybe") since an unproven must-have isn't
+                    # the same as "worth a glance", and finding an email is
+                    # a step toward outreach we shouldn't take for them yet.
+                    if 'fit' in screening_df.columns:
+                        is_go = screening_df['fit'] == 'Good Fit'
+                        is_maybe = screening_df['fit'] == 'Maybe'
+                        if 'decision' in screening_df.columns:
+                            is_maybe = is_maybe & (screening_df['decision'] != 'NEEDS VERIFICATION')
+                        enrich_df = screening_df[is_go | is_maybe].copy()
+                    else:
+                        enrich_df = screening_df.copy()
+                    st.caption(f"GO + Maybe candidates: {len(enrich_df)} (needs-verification excluded)")
                 else:
                     enrich_df = screening_df.copy()
                     st.caption(f"All candidates: {len(enrich_df)}")
@@ -11017,12 +11047,16 @@ with tab_screening:
                 remaining = [c for c in df.columns if c not in priority_cols and c != 'index']
                 return blank_tenure_sentinel(df[ordered + remaining]).to_csv(index=False)
 
-            # Unified-policy buckets
-            go_list = [r for r in screening_results if r.get('fit') == 'Good Fit']
-            maybe_list = [r for r in screening_results if r.get('fit') == 'Maybe']
-            no_go_list = [r for r in screening_results if r.get('fit') == 'Not a Fit']
+            # Unified-policy buckets. NEEDS VERIFICATION rows store fit_level
+            # "Maybe" but are broken out via _result_bucket into their own
+            # download — they're unproven, not "worth a glance", so they no
+            # longer land in the plain Maybe export.
+            go_list = [r for r in screening_results if _result_bucket(r) == 'Good Fit']
+            maybe_list = [r for r in screening_results if _result_bucket(r) == 'Maybe']
+            needs_verif_list = [r for r in screening_results if _result_bucket(r) == 'Needs Verification']
+            no_go_list = [r for r in screening_results if _result_bucket(r) == 'Not a Fit']
 
-            exp_col1, exp_col2, exp_col3, exp_col4, exp_col5 = st.columns(5)
+            exp_col1, exp_col2, exp_col3, exp_col4, exp_col5, exp_col6 = st.columns(6)
 
             with exp_col1:
                 st.download_button(
@@ -11047,6 +11081,16 @@ with tab_screening:
 
             with exp_col3:
                 st.download_button(
+                    f"Needs Verification ({len(needs_verif_list)})",
+                    prepare_screening_export(needs_verif_list),
+                    "screening_needs_verification.csv",
+                    "text/csv",
+                    disabled=len(needs_verif_list) == 0,
+                    key="export_needs_verification"
+                )
+
+            with exp_col4:
+                st.download_button(
                     f"NO GO ({len(no_go_list)})",
                     prepare_screening_export(no_go_list),
                     "screening_no_go.csv",
@@ -11055,7 +11099,7 @@ with tab_screening:
                     key="export_no_go"
                 )
 
-            with exp_col4:
+            with exp_col5:
                 st.download_button(
                     f"All Results ({len(sorted_results)})",
                     prepare_screening_export(sorted_results),
@@ -11063,7 +11107,7 @@ with tab_screening:
                     "text/csv"
                 )
 
-            with exp_col5:
+            with exp_col6:
                 st.button("Clear Results", key="clear_screening", on_click=_cb_clear_screening_results)
 
 # ========== TAB 6: Emails ==========
@@ -11154,7 +11198,7 @@ with tab_emails:
                     options=["Good Fit", "Maybe"],
                     default=["Good Fit"],
                     key="email_fit_filter",
-                    help="Good Fit = GO, Maybe = borderline NO GO (score ≥ threshold)"
+                    help="Good Fit = GO, Maybe = borderline NO GO (score ≥ threshold). Needs-verification candidates are never included here — they're not outreach-ready yet."
                 )
 
             # Third row: custom instruction (optional)
@@ -11174,8 +11218,13 @@ with tab_emails:
                 else:
                     email_full_instruction = email_custom_instruction
 
-            # Filter profiles by selected buckets (Good Fit = GO, Maybe = borderline)
-            filtered_profiles = [r for r in profiles_with_raw if r.get('fit') in email_fit_filter]
+            # Filter profiles by selected buckets (Good Fit = GO, Maybe =
+            # borderline). Uses _result_bucket, not raw `fit`, so NEEDS
+            # VERIFICATION rows (which store fit_level "Maybe") are ALWAYS
+            # excluded here regardless of the Maybe checkbox -- an unproven
+            # must-have isn't outreach-ready, so it never enters email
+            # generation even under "Maybe = worth a glance".
+            filtered_profiles = [r for r in profiles_with_raw if _result_bucket(r) in email_fit_filter]
 
             # Test batch size and cost estimate
             email_test_col1, email_test_col2, email_test_col3 = st.columns([1, 1, 2])

@@ -115,6 +115,32 @@ def normalize_company_name(name: str) -> str:
     return cleaned.strip()
 
 
+def _emp_field(emp, field):
+    """Read a job/employer entry field, old or new Crustdata profile shape.
+
+    Old shape (legacy `/screener/*` endpoints): employee_title, employer_name,
+    employee_description, employer_linkedin_description.
+    New shape (current enrichment endpoints, ~88% of stored profiles and ALL
+    results of the app's new search): title, name (company), description
+    (role description). No employer-level description field exists in the
+    new shape.
+
+    Mirrors dashboard.py's `_emp_field()` (PR #139) so the two stay in sync.
+
+    `field` is one of: 'title', 'company', 'description'. Anything else
+    falls back to a plain `.get(field)`.
+    """
+    if not isinstance(emp, dict):
+        return None
+    if field == 'title':
+        return emp.get('employee_title') or emp.get('title')
+    if field == 'company':
+        return emp.get('employer_name') or emp.get('name')
+    if field == 'description':
+        return emp.get('employee_description') or emp.get('description')
+    return emp.get(field)
+
+
 def normalize_school_name(name: str) -> str:
     """Clean school name by mapping long Israeli school names to short versions."""
     if not name:
@@ -263,6 +289,11 @@ def trim_profile_for_email(raw: dict) -> dict:
         if key in raw:
             trimmed[key] = raw[key]
 
+    # Location: old shape has it at raw['location'], new shape only has
+    # raw['region'] at the top level.
+    if not trimmed.get('location') and raw.get('region'):
+        trimmed['location'] = raw['region']
+
     # Include summary/about section (truncated) - good for personal angles
     if raw.get('summary'):
         summary = raw['summary']
@@ -275,17 +306,19 @@ def trim_profile_for_email(raw: dict) -> dict:
     if 'current_employers' in raw:
         trimmed['current_employers'] = []
         for emp in (raw['current_employers'] or [])[:2]:
-            title = (emp.get('employee_title') or '').strip()
+            title = (_emp_field(emp, 'title') or '').strip()
             if not title:
                 continue
             entry = {
                 'title': title,
-                'company': normalize_company_name(emp.get('employer_name', '')),
+                'company': normalize_company_name(_emp_field(emp, 'company') or ''),
                 'start_date': emp.get('start_date'),
+                # employer_linkedin_description only exists in the old shape;
+                # the new shape has no employer-level description field.
                 'company_description': _first_sentence(emp.get('employer_linkedin_description')),
             }
             # Include what they do in the role (if available)
-            role_desc = emp.get('employee_description') or emp.get('description')
+            role_desc = _emp_field(emp, 'description')
             if role_desc:
                 entry['role_description'] = _first_sentence(role_desc)
             trimmed['current_employers'].append(entry)
@@ -294,7 +327,7 @@ def trim_profile_for_email(raw: dict) -> dict:
     if 'past_employers' in raw:
         trimmed['past_employers'] = []
         for emp in (raw['past_employers'] or [])[:5]:  # Up to 5 for career path
-            title = (emp.get('employee_title') or '').strip()
+            title = (_emp_field(emp, 'title') or '').strip()
             if not title:
                 continue
             end_date = emp.get('end_date')
@@ -303,11 +336,11 @@ def trim_profile_for_email(raw: dict) -> dict:
                 continue
             entry = {
                 'title': title,
-                'company': normalize_company_name(emp.get('employer_name', '')),
+                'company': normalize_company_name(_emp_field(emp, 'company') or ''),
                 'start_date': emp.get('start_date'),
                 'end_date': end_date,
             }
-            # Company description helps understand industry/domain
+            # Company description helps understand industry/domain (old shape only)
             company_desc = emp.get('employer_linkedin_description')
             if company_desc:
                 entry['company_description'] = _first_sentence(company_desc)
@@ -356,7 +389,8 @@ def trim_profile_for_email(raw: dict) -> dict:
     # Detect interesting career patterns
     patterns = []
     titles = [e.get('title', '').lower() for e in trimmed.get('past_employers', [])]
-    current_title = trimmed.get('current_employers', [{}])[0].get('title', '').lower()
+    current_employers_list = trimmed.get('current_employers') or [{}]
+    current_title = current_employers_list[0].get('title', '').lower()
 
     # Manager/Lead to IC transition
     if any('lead' in t or 'manager' in t or 'head' in t for t in titles) and \
@@ -645,8 +679,8 @@ def generate_emails_batch(
             current_title = ''
             current_company = ''
             if emp:
-                current_title = emp.get('employee_title', '')
-                current_company = normalize_company_name(emp.get('employer_name', ''))
+                current_title = _emp_field(emp, 'title') or ''
+                current_company = normalize_company_name(_emp_field(emp, 'company') or '')
 
             result['name'] = name
             result['current_title'] = current_title or profile.get('current_title', '')
@@ -663,7 +697,7 @@ def generate_emails_batch(
                 parts = name.split(' ', 1)
                 result['first_name'] = parts[0]
                 result['last_name'] = parts[1] if len(parts) > 1 else ''
-            result['location'] = raw.get('location', '') or profile.get('location', '')
+            result['location'] = raw.get('location', '') or raw.get('region', '') or profile.get('location', '')
 
             # Get university from education
             university = ''

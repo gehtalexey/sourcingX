@@ -5,6 +5,8 @@ Mock OpenAI API calls, Supabase operations, error handling, and concurrency.
 
 import pytest
 import json
+import csv
+import argparse
 import warnings
 from unittest.mock import MagicMock, patch, call
 import threading
@@ -394,3 +396,278 @@ class TestUsageTrackerPricingFallback:
         with pytest.warns(UserWarning):
             pricing = _openai_pricing_for("another-made-up-model")
         assert pricing == OPENAI_PRICING["gpt-4o-mini"]
+
+
+class TestBakeoffKalamata:
+    """Tests for bakeoff_kalamata.py (docs/GOAL-screening-bakeoff-vs-kalamata.md):
+    the script that samples kalamata's already-screened candidates, screens
+    them through Jev, and reports Luna/Jev/kalamata verdicts side by side.
+    No Supabase, no Jev SDK, no network anywhere in this class -- every test
+    below exercises pure functions or mocks screen_with_jev."""
+
+    # -- brief_to_job_description: must match dashboard.py:9873-9878 exactly --
+
+    def test_brief_to_job_description_matches_dashboard_format(self):
+        import bakeoff_kalamata as bk
+        brief = {
+            "role_context": "Senior Backend Engineer, Tel Aviv",
+            "must_haves": ["5+ years backend", "Strong Python"],
+            "nice_to_haves": ["Docker"],
+            "exclusions": ["Pure team leads"],
+        }
+        expected = "\n".join([
+            "Role: Senior Backend Engineer, Tel Aviv",
+            "Must-haves:\n- 5+ years backend\n- Strong Python",
+            "Nice-to-haves:\n- Docker",
+            "Exclusions:\n- Pure team leads",
+        ])
+        assert bk.brief_to_job_description(brief) == expected
+
+    def test_brief_to_job_description_omits_empty_sections(self):
+        import bakeoff_kalamata as bk
+        brief = {"role_context": "VP Marketing", "must_haves": [], "nice_to_haves": [], "exclusions": []}
+        assert bk.brief_to_job_description(brief) == "Role: VP Marketing"
+
+    def test_brief_to_job_description_empty_brief_is_empty_string(self):
+        import bakeoff_kalamata as bk
+        assert bk.brief_to_job_description({}) == ""
+
+    # -- thin-profile eligibility (must never feed the dashboard a thin profile) --
+
+    def test_eligible_profile_with_skills(self):
+        import bakeoff_kalamata as bk
+        assert bk.is_eligible_profile({"raw_data": {"skills": ["Python"], "summary": None}})
+
+    def test_eligible_profile_with_summary_only(self):
+        import bakeoff_kalamata as bk
+        assert bk.is_eligible_profile({"raw_data": {"skills": [], "summary": "Great engineer"}})
+
+    def test_thin_profile_missing_both_is_ineligible(self):
+        import bakeoff_kalamata as bk
+        assert not bk.is_eligible_profile({"raw_data": {"skills": [], "summary": ""}})
+
+    def test_profile_with_no_raw_data_is_ineligible(self):
+        import bakeoff_kalamata as bk
+        assert not bk.is_eligible_profile({"raw_data": None})
+        assert not bk.is_eligible_profile({})
+
+    def test_eligible_profile_accepts_json_string_raw_data(self):
+        import bakeoff_kalamata as bk
+        profile = {"raw_data": json.dumps({"skills": ["Go"], "summary": None})}
+        assert bk.is_eligible_profile(profile)
+
+    # -- kalamata row exclusion + grouping --
+
+    def test_row_excluded_when_score_is_null(self):
+        import bakeoff_kalamata as bk
+        assert bk.is_excluded_kalamata_row("some notes", None)
+
+    def test_row_excluded_when_notes_start_unenrichable(self):
+        import bakeoff_kalamata as bk
+        assert bk.is_excluded_kalamata_row("[Unenrichable] no linkedin data", 5)
+
+    def test_row_not_excluded_otherwise(self):
+        import bakeoff_kalamata as bk
+        assert not bk.is_excluded_kalamata_row("looks fine", 8)
+        assert not bk.is_excluded_kalamata_row(None, 3)
+
+    def test_classify_group_yes(self):
+        import bakeoff_kalamata as bk
+        assert bk.classify_kalamata_group("qualified", None) == "yes"
+
+    def test_classify_group_no_prescreen(self):
+        import bakeoff_kalamata as bk
+        assert bk.classify_kalamata_group("not_qualified", "[Prescreen] too junior") == "no_prescreen"
+
+    def test_classify_group_no_fullscreen(self):
+        import bakeoff_kalamata as bk
+        assert bk.classify_kalamata_group("not_qualified", "missed a must-have") == "no_fullscreen"
+
+    def test_classify_group_none_for_unknown_result(self):
+        import bakeoff_kalamata as bk
+        assert bk.classify_kalamata_group("incomplete", None) is None
+
+    def test_kalamata_reason_prefers_notes(self):
+        import bakeoff_kalamata as bk
+        row = {"screening_notes": "x" * 250, "screening_detail": {"summary": "unused"}}
+        reason = bk.kalamata_reason(row)
+        assert reason == "x" * 200
+
+    def test_kalamata_reason_falls_back_to_detail_summary(self):
+        import bakeoff_kalamata as bk
+        row = {"screening_notes": "", "screening_detail": {"summary": "Strong SRE background"}}
+        assert bk.kalamata_reason(row) == "Strong SRE background"
+
+    def test_kalamata_reason_empty_when_nothing_available(self):
+        import bakeoff_kalamata as bk
+        assert bk.kalamata_reason({"screening_notes": None, "screening_detail": None}) == ""
+
+    # -- deterministic sampling --
+
+    def test_deterministic_sample_same_seed_same_input_same_pick(self):
+        import bakeoff_kalamata as bk
+        urls = [f"https://www.linkedin.com/in/person-{i}" for i in range(20)]
+        pick1 = bk.deterministic_sample(urls, 5, seed=20260924)
+        pick2 = bk.deterministic_sample(list(reversed(urls)), 5, seed=20260924)
+        assert pick1 == pick2  # sorted first, so input order doesn't matter
+        assert len(pick1) == 5
+
+    def test_deterministic_sample_different_seed_can_differ(self):
+        import bakeoff_kalamata as bk
+        urls = [f"https://www.linkedin.com/in/person-{i}" for i in range(30)]
+        pick_a = bk.deterministic_sample(urls, 10, seed=1)
+        pick_b = bk.deterministic_sample(urls, 10, seed=2)
+        assert pick_a != pick_b
+
+    def test_deterministic_sample_returns_all_when_k_exceeds_pool(self):
+        import bakeoff_kalamata as bk
+        urls = ["a", "b", "c"]
+        assert bk.deterministic_sample(urls, 10, seed=1) == ["a", "b", "c"]
+
+    # -- verdict mapping --
+
+    def test_luna_verdict_good_fit_and_maybe_are_yes(self):
+        import bakeoff_kalamata as bk
+        assert bk.luna_verdict("Good Fit") == "yes"
+        assert bk.luna_verdict("Maybe") == "yes"
+
+    def test_luna_verdict_not_a_fit_is_no(self):
+        import bakeoff_kalamata as bk
+        assert bk.luna_verdict("Not a Fit") == "no"
+
+    def test_luna_verdict_unknown_or_missing_is_none(self):
+        import bakeoff_kalamata as bk
+        assert bk.luna_verdict("Error") is None
+        assert bk.luna_verdict(None) is None
+
+    def test_jev_verdict_from_result(self):
+        import bakeoff_kalamata as bk
+        assert bk.jev_verdict_from_result("qualified") == "yes"
+        assert bk.jev_verdict_from_result("not_qualified") == "no"
+        assert bk.jev_verdict_from_result(None) is None
+
+    # -- agreement math --
+
+    def test_compute_agreement_counts_only_rows_with_both_present(self):
+        import bakeoff_kalamata as bk
+        rows = [
+            {"a": "yes", "b": "yes"},
+            {"a": "yes", "b": "no"},
+            {"a": "no", "b": "no"},
+            {"a": "missing", "b": "yes"},  # excluded: 'a' not yes/no
+        ]
+        result = bk.compute_agreement(rows, "a", "b")
+        assert result["matches"] == 2
+        assert result["total"] == 3
+        assert result["rate"] == pytest.approx(2 / 3, abs=1e-3)
+
+    def test_compute_agreement_no_eligible_rows_gives_none_rate(self):
+        import bakeoff_kalamata as bk
+        rows = [{"a": "missing", "b": "missing"}]
+        result = bk.compute_agreement(rows, "a", "b")
+        assert result == {"matches": 0, "total": 0, "rate": None}
+
+    # -- review_sample determinism --
+
+    def test_pick_review_sample_deterministic_and_sorted(self):
+        import bakeoff_kalamata as bk
+        rows = [{"linkedin_url": f"https://www.linkedin.com/in/p{i}"} for i in range(50)]
+        sample1 = bk.pick_review_sample(rows, seed=20260924, limit=30)
+        sample2 = bk.pick_review_sample(list(reversed(rows)), seed=20260924, limit=30)
+        assert len(sample1) == 30
+        assert sample1 == sample2
+        urls = [r["linkedin_url"] for r in sample1]
+        assert urls == sorted(urls)
+
+    def test_pick_review_sample_returns_all_when_fewer_than_limit(self):
+        import bakeoff_kalamata as bk
+        rows = [{"linkedin_url": "https://www.linkedin.com/in/only-one"}]
+        assert bk.pick_review_sample(rows, seed=1, limit=30) == rows
+
+    # -- jev dry run must never call screen_with_jev --
+
+    def test_jev_dry_run_never_calls_screen_with_jev(self, tmp_path, monkeypatch):
+        import bakeoff_kalamata as bk
+
+        sample = {
+            "seed": 1,
+            "positions": ["pos-a"],
+            "rows": [
+                {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                 "group": "yes", "kalamata_verdict": "yes", "kalamata_score": 8, "kalamata_reason": "ok"},
+            ],
+        }
+        sample_path = tmp_path / "sample.json"
+        sample_path.write_text(json.dumps(sample), encoding="utf-8")
+        briefs_path = tmp_path / "briefs.json"
+        briefs_path.write_text(json.dumps({"pos-a": {"role_context": "Backend Engineer"}}), encoding="utf-8")
+        out_path = tmp_path / "jev_results.csv"
+
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: object())
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {
+            "https://www.linkedin.com/in/candidate-1": {"raw_data": {"skills": ["Python"]}},
+        })
+
+        called = {"n": 0}
+
+        def _fail_if_called(*args, **kwargs):
+            called["n"] += 1
+            raise AssertionError("screen_with_jev must not be called without --yes")
+
+        monkeypatch.setattr(bk.jev_client, "screen_with_jev", _fail_if_called)
+        monkeypatch.setattr(bk.jev_client, "build_client", _fail_if_called)
+
+        args = argparse.Namespace(
+            sample=str(sample_path), briefs=str(briefs_path), out=str(out_path),
+            yes=False, limit=None, workers=4,
+        )
+        bk.cmd_jev(args)
+
+        assert called["n"] == 0
+        assert not out_path.exists()
+
+    def test_jev_with_yes_calls_screen_with_jev_and_writes_csv(self, tmp_path, monkeypatch):
+        import bakeoff_kalamata as bk
+
+        sample = {
+            "seed": 1,
+            "positions": ["pos-a"],
+            "rows": [
+                {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                 "group": "yes", "kalamata_verdict": "yes", "kalamata_score": 8, "kalamata_reason": "ok"},
+            ],
+        }
+        sample_path = tmp_path / "sample.json"
+        sample_path.write_text(json.dumps(sample), encoding="utf-8")
+        briefs_path = tmp_path / "briefs.json"
+        briefs_path.write_text(json.dumps({"pos-a": {"role_context": "Backend Engineer"}}), encoding="utf-8")
+        out_path = tmp_path / "jev_results.csv"
+
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: object())
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {
+            "https://www.linkedin.com/in/candidate-1": {"raw_data": {"skills": ["Python"]}},
+        })
+        monkeypatch.setattr(bk.jev_client, "build_client", lambda: "fake-client")
+
+        def _fake_screen(profile, job_description, client=None, screening_brief=None):
+            assert client == "fake-client"
+            return {
+                "screening_result": "qualified", "screening_score": 8,
+                "reason": "Fit score: qualified", "jev_model": "jev-1.0",
+                "input_tokens": 100, "output_tokens": 10,
+            }
+
+        monkeypatch.setattr(bk.jev_client, "screen_with_jev", _fake_screen)
+
+        args = argparse.Namespace(
+            sample=str(sample_path), briefs=str(briefs_path), out=str(out_path),
+            yes=True, limit=None, workers=2,
+        )
+        bk.cmd_jev(args)
+
+        assert out_path.exists()
+        with open(out_path, encoding="utf-8-sig", newline="") as f:
+            written = list(csv.DictReader(f))
+        assert len(written) == 1
+        assert written[0]["jev_verdict"] == "yes"
+        assert written[0]["error"] == ""

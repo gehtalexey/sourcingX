@@ -127,6 +127,9 @@ try:
     from crustdata_search import (
         search_people_db_v2,
         build_filters as build_search_filters,
+        build_filters_from_search_form,
+        effective_form_value,
+        CREDITS_PER_RESULT_SEMANTIC,
         normalize_search_results_to_df,
         check_credits as check_crustdata_credits,
         expand_variations,
@@ -6090,6 +6093,21 @@ with tab_search:
                 placeholder="e.g. senior backend engineers with Kubernetes experience in Tel Aviv",
                 height=80,
             )
+            # Combined search: send the structured filters below along with the
+            # description. Crustdata then treats the filters as a hard constraint
+            # (top-level mode "exact") and the description only ranks within them.
+            # Uses build_filters_from_search_form(), the same translation the
+            # filter search's Search button uses, so both send identical filters.
+            semantic_use_filters = st.checkbox(
+                "Also apply the filters below",
+                key="crust_semantic_use_filters",
+                help=(
+                    "Only people who match the Search Filters below (title, company, "
+                    "location, country, seniority, experience, ...) are returned; "
+                    "your description ranks them. Blacklist / not-relevant / past "
+                    "candidates are still removed after the search."
+                ),
+            )
             sem_col1, sem_col2 = st.columns([1, 3])
             with sem_col1:
                 semantic_limit = st.number_input(
@@ -6102,6 +6120,16 @@ with tab_search:
                 semantic_submitted = st.button(
                     "Search by description", key="crust_semantic_search_btn",
                 )
+            _sem_form_filters = (
+                build_filters_from_search_form(st.session_state) if semantic_use_filters else {}
+            )
+            if semantic_use_filters and not _sem_form_filters:
+                st.caption("No filters set below yet — this will run as a description-only search.")
+            st.caption(
+                f"Estimated cost: up to {int(semantic_limit) * CREDITS_PER_RESULT_SEMANTIC:.2f} credits "
+                f"({int(semantic_limit)} results × {CREDITS_PER_RESULT_SEMANTIC} credits)"
+                + (" — description + filters" if _sem_form_filters else "")
+            )
 
             if semantic_submitted:
                 if not semantic_query or not semantic_query.strip():
@@ -6114,6 +6142,7 @@ with tab_search:
                             semantic_query.strip(),
                             limit=int(semantic_limit),
                             api_key=api_key,
+                            filters=_sem_form_filters or None,
                         )
                         sem_shimmed = [
                             semantic_profile_to_legacy_shape(p)
@@ -6189,6 +6218,8 @@ with tab_search:
                         st.session_state['_last_semantic_params'] = {
                             'query': semantic_query.strip(),
                             'limit': int(semantic_limit),
+                            # Load More must send the same filters with the cursor.
+                            'filters': _sem_form_filters or None,
                         }
                         # Deliberately NOT saving these results to the DB (the filter
                         # search below skips the save too). save_enriched_profiles_bulk()
@@ -6212,8 +6243,29 @@ with tab_search:
                                 'crust_semantic_query': semantic_query.strip(),
                                 'crust_semantic_limit': int(semantic_limit),
                             }
+                            if _sem_form_filters:
+                                # Combined search: also store the filter widgets (and the
+                                # checkbox) so the reload button refills them and the hash
+                                # differs from a description-only run. Description-only
+                                # hashes are unchanged.
+                                _sem_filters_state['crust_semantic_use_filters'] = True
+                                for _fk, _ek in _PS_AI_EXPANDED.items():
+                                    _sem_filters_state[_fk] = effective_form_value(st.session_state, _fk, _ek)
+                                for _fk in (
+                                    'crust_search_seniority', 'crust_search_headcount',
+                                    'crust_search_function', 'crust_search_industry',
+                                    'crust_search_country', 'crust_search_continent',
+                                    'crust_search_geo_city', 'crust_search_geo_radius',
+                                    'crust_search_exp_min', 'crust_search_exp_max',
+                                    'crust_search_min_connections', 'crust_search_exact_company',
+                                    'crust_search_recently_changed', 'crust_search_has_email',
+                                ):
+                                    if _fk in st.session_state:
+                                        _sem_filters_state[_fk] = st.session_state[_fk]
                             _sem_hash = hash_search_filters(_sem_filters_state)
                             _sem_summary = summarize_search_filters(_sem_filters_state)
+                            if _sem_form_filters:
+                                _sem_summary += " + filters"
                             _sem_result_urls = []
                             _sem_seen_u = set()
                             for _p in _sem_clean:
@@ -6236,7 +6288,8 @@ with tab_search:
 
                         _sem_note = f" ({_sem_removed} already-seen removed)" if _sem_removed else ""
                         st.session_state['_search_loaded_msg'] = (
-                            f"Found **{len(_sem_clean):,}** profiles matching your description{_sem_note}. "
+                            f"Found **{len(_sem_clean):,}** profiles matching your description"
+                            f"{' and filters' if _sem_form_filters else ''}{_sem_note}. "
                             f"Read the **Fit** column (strong/possible/weak) — description search always "
                             f"returns results, so a low count doesn't mean poor quality and a high count "
                             f"doesn't guarantee good matches."
@@ -6486,24 +6539,9 @@ with tab_search:
 
         # --- Helper to get effective value for a field ---
         def _effective_val(input_key, expanded_key):
-            """Merge text input + AI multiselect selections. Both contribute."""
-            parts = []
-            # Manual text input (comma-separated values)
-            raw = st.session_state.get(input_key, '').strip()
-            if raw:
-                parts.extend([v.strip() for v in raw.split(',') if v.strip()])
-            # AI-selected values
-            sel = st.session_state.get(f"sel_{expanded_key}", [])
-            if sel:
-                parts.extend(sel)
-            # Dedupe preserving order
-            seen = set()
-            unique = []
-            for p in parts:
-                if p.lower() not in seen:
-                    seen.add(p.lower())
-                    unique.append(p)
-            return ', '.join(unique)
+            """Merge text input + AI multiselect selections. Both contribute.
+            Same helper build_filters_from_search_form() uses."""
+            return effective_form_value(st.session_state, input_key, expanded_key)
 
         # Handle clear filters
         if clear_submitted:
@@ -6622,33 +6660,12 @@ with tab_search:
                 else:
                     st.session_state.pop('_people_search_repeat', None)
 
-                filters = build_search_filters(
-                    title=effective_title if effective_title else None,
-                    company=effective_company if effective_company else None,
-                    location=effective_location if effective_location else None,
-                    seniority=search_seniority if search_seniority else None,
-                    headcount=search_headcount if search_headcount else None,
-                    experience_min=search_exp_min if search_exp_min > 0 else None,
-                    experience_max=search_exp_max if search_exp_max > 0 else None,
-                    skill_groups=skill_groups if skill_groups else None,
-                    keywords=effective_keywords if effective_keywords else None,
-                    past_companies=effective_past_companies if effective_past_companies else None,
-                    past_titles=effective_past_titles if effective_past_titles else None,
-                    school=effective_school if effective_school else None,
-                    recently_changed_jobs=search_recently_changed if search_recently_changed else None,
-                    has_verified_email=search_has_email if search_has_email else None,
-                    function_categories=search_function if search_function else None,
-                    industries=search_industry if search_industry else None,
-                    country=search_country if search_country else None,
-                    continent=search_continent if search_continent else None,
-                    geo_city=search_geo_city if search_geo_city else None,
-                    geo_radius_km=int(search_geo_radius) if search_geo_radius > 0 else None,
-                    min_connections=int(search_min_connections) if search_min_connections > 0 else None,
-                    exact_company=search_exact_company,
-                    # not_relevant and blacklist are applied client-side in _clean_page()
-                    # rather than as API filters — sending them to Crustdata changes its
-                    # scoring universe and degrades result quality.
-                )
+                # Same widget -> filter translation the "Also apply the filters
+                # below" description search uses (build_filters_from_search_form).
+                # not_relevant and blacklist are applied client-side in _clean_page()
+                # rather than as API filters — sending them to Crustdata changes its
+                # scoring universe and degrades result quality.
+                filters = build_filters_from_search_form(st.session_state)
 
                 try:
                     # First request (API caps at 1000 per request)
@@ -7087,6 +7104,7 @@ with tab_search:
                                             limit=_lm_sem_p.get('limit', 20),
                                             cursor=cursor_val,
                                             api_key=api_key,
+                                            filters=_lm_sem_p.get('filters') or None,
                                         )
                                         raw['profiles'] = [
                                             semantic_profile_to_legacy_shape(p)

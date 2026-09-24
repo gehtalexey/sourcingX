@@ -22,6 +22,9 @@ import pytest
 
 from crustdata_search import (
     search_people_semantic,
+    search_people_db_v2,
+    build_filters,
+    build_filters_from_search_form,
     semantic_profile_to_legacy_shape,
     normalize_search_results_to_df,
     CRUSTDATA_SEMANTIC_SEARCH_ENDPOINT,
@@ -126,6 +129,145 @@ class TestSemanticSearchRequest:
             with pytest.raises(ValueError):
                 search_people_semantic("   ", api_key="test-key")
             mock_post.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Combined search — description + structured filters in one request
+# ---------------------------------------------------------------------------
+
+# A sample of Search-tab widget values (session_state keys).
+_FORM_STATE = {
+    "crust_search_title": "backend engineer",
+    "crust_search_country": "Israel",
+    "crust_search_company": "Wiz",
+    "crust_search_seniority": ["Senior"],
+    "crust_search_exp_min": 3,
+    "crust_search_exp_max": 0,
+    "crust_search_geo_radius": 0,
+    "crust_search_min_connections": 0,
+}
+
+
+def _empty_ok():
+    return _mock_response(json_data={"profiles": [], "total_count": 0})
+
+
+def _walk_fields(node, out):
+    if isinstance(node, dict):
+        if "field" in node:
+            out.append(node["field"])
+        for c in node.get("conditions", []):
+            _walk_fields(c, out)
+    return out
+
+
+class TestCombinedSearchRequest:
+    def test_body_has_query_filters_and_exact_mode(self):
+        filters = build_filters_from_search_form(_FORM_STATE)
+        with patch("crustdata_search.requests.post") as mock_post:
+            mock_post.return_value = _empty_ok()
+            search_people_semantic(
+                "builds data pipelines at scale", filters=filters, api_key="test-key"
+            )
+            body = mock_post.call_args.kwargs["json"]
+            assert body["search"] == {
+                "query": "builds data pipelines at scale",
+                "mode": "hybrid",
+            }
+            assert "query" not in body  # nested under search, never top-level
+            assert body["mode"] == "exact"
+            assert body["filters"]["op"] == "and"
+            assert body["filters"]["conditions"]
+
+    def test_headers_are_bearer_and_version(self):
+        with patch("crustdata_search.requests.post") as mock_post:
+            mock_post.return_value = _empty_ok()
+            search_people_semantic(
+                "x", filters=build_filters_from_search_form(_FORM_STATE), api_key="test-key"
+            )
+            headers = mock_post.call_args.kwargs["headers"]
+            assert headers["Authorization"] == "Bearer test-key"
+            assert headers["x-api-version"] == CRUSTDATA_API_VERSION
+            assert mock_post.call_args.args[0] == CRUSTDATA_SEMANTIC_SEARCH_ENDPOINT
+
+    def test_description_only_request_is_unchanged(self):
+        for empty in (None, {}):
+            with patch("crustdata_search.requests.post") as mock_post:
+                mock_post.return_value = _empty_ok()
+                search_people_semantic("founding engineers", filters=empty, api_key="test-key")
+                body = mock_post.call_args.kwargs["json"]
+                assert body == {
+                    "search": {"query": "founding engineers", "mode": "hybrid"},
+                    "limit": 20,
+                }
+
+    def test_filters_match_what_the_structured_v2_search_sends(self):
+        filters = build_filters_from_search_form(_FORM_STATE)
+        with patch("crustdata_search.requests.post") as mock_post:
+            mock_post.return_value = _empty_ok()
+            search_people_semantic("x", filters=filters, api_key="test-key")
+            combined_filters = mock_post.call_args.kwargs["json"]["filters"]
+
+            search_people_db_v2(filters, api_key="test-key")
+            structured_filters = mock_post.call_args.kwargs["json"]["filters"]
+
+        assert combined_filters == structured_filters
+        fields = _walk_fields(combined_filters, [])
+        assert "experience.employment_details.current.title" in fields
+        assert "basic_profile.headline" in fields
+        assert "experience.employment_details.current.name" in fields
+        assert "experience.employment_details.current.seniority_level" in fields
+        assert "basic_profile.location.country" in fields
+        assert "years_of_experience_raw" in fields  # as a FILTER only
+        # No legacy column names leak through.
+        assert "column" not in str(combined_filters)
+
+    def test_form_translation_matches_direct_build_filters_call(self):
+        # Mirrors the kwargs the filter search's Search button used to pass
+        # to build_filters() inline, before it switched to the shared helper.
+        expected = build_filters(
+            title="backend engineer",
+            company="Wiz",
+            seniority=["Senior"],
+            experience_min=3,
+            country="Israel",
+            exact_company=False,
+        )
+        assert build_filters_from_search_form(_FORM_STATE) == expected
+
+    def test_form_translation_merges_ai_selected_values(self):
+        state = dict(_FORM_STATE, sel_expanded_titles=["Backend Engineer", "server engineer"])
+        f = build_filters_from_search_form(state)
+        title_group = f["filters"]["conditions"][0]
+        values = {c["value"] for c in title_group["conditions"]}
+        # "Backend Engineer" is a case-insensitive duplicate of the typed value.
+        assert values == {"backend engineer", "server engineer"}
+
+    def test_empty_form_gives_no_filters(self):
+        assert build_filters_from_search_form({}) == {}
+        assert build_filters_from_search_form({"crust_search_exp_min": 0}) == {}
+
+    def test_years_of_experience_raw_never_requested_as_a_field(self):
+        filters = build_filters_from_search_form(
+            dict(_FORM_STATE, crust_search_exp_max=10)
+        )
+        with patch("crustdata_search.requests.post") as mock_post:
+            mock_post.return_value = _empty_ok()
+            search_people_semantic("x", filters=filters, api_key="test-key")
+            body = mock_post.call_args.kwargs["json"]
+        assert "years_of_experience_raw" not in (body.get("fields") or [])
+        assert "fields" not in body
+
+    def test_explicit_managed_recall_still_forced_to_exact_with_filters(self):
+        with patch("crustdata_search.requests.post") as mock_post:
+            mock_post.return_value = _empty_ok()
+            search_people_semantic(
+                "x",
+                recall_mode="managed",
+                filters=build_filters_from_search_form(_FORM_STATE),
+                api_key="test-key",
+            )
+            assert mock_post.call_args.kwargs["json"]["mode"] == "exact"
 
 
 # ---------------------------------------------------------------------------

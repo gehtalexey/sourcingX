@@ -772,6 +772,91 @@ def _remap_filters(node):
 
 
 # =============================================================================
+# SEARCH-TAB FORM -> FILTERS
+# =============================================================================
+
+def effective_form_value(state, input_key: str, expanded_key: str) -> str:
+    """Merge a Search-tab text box (comma-separated) with its AI-suggested
+    multiselect (`sel_<expanded_key>`), deduped case-insensitively, order kept.
+    Returns a comma-joined string ("" when both are empty)."""
+    parts = []
+    raw = str(state.get(input_key, '') or '').strip()
+    if raw:
+        parts.extend([v.strip() for v in raw.split(',') if v.strip()])
+    sel = state.get(f"sel_{expanded_key}", []) or []
+    if sel:
+        parts.extend(sel)
+    seen = set()
+    unique = []
+    for p in parts:
+        if p.lower() not in seen:
+            seen.add(p.lower())
+            unique.append(p)
+    return ', '.join(unique)
+
+
+def build_filters_from_search_form(state) -> Dict[str, Any]:
+    """Turn the Search tab's structured filter widgets (read from a
+    session_state-like mapping, keyed `crust_search_*`) into a build_filters()
+    dict. The one translation used by both the filter search and the
+    "description + filters" search, so both send exactly the same filters.
+    Returns {} when no filter is set."""
+    def _num(key):
+        try:
+            return int(state.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    title = effective_form_value(state, 'crust_search_title', 'expanded_titles')
+    company = effective_form_value(state, 'crust_search_company', 'expanded_companies')
+    location = effective_form_value(state, 'crust_search_location', 'expanded_locations')
+    keywords = effective_form_value(state, 'crust_search_keywords', 'expanded_keywords')
+    skills = effective_form_value(state, 'crust_search_skills', 'expanded_skills')
+    past_titles = effective_form_value(state, 'crust_search_past_titles', 'expanded_past_titles')
+    past_companies = effective_form_value(state, 'crust_search_past_companies', 'expanded_past_companies')
+    school = effective_form_value(state, 'crust_search_school', 'expanded_schools')
+    seniority = state.get('crust_search_seniority') or []
+    headcount = state.get('crust_search_headcount') or []
+    function = state.get('crust_search_function') or []
+    industry = state.get('crust_search_industry') or []
+    country = state.get('crust_search_country') or ''
+    continent = state.get('crust_search_continent') or ''
+    geo_city = state.get('crust_search_geo_city') or ''
+    geo_radius = _num('crust_search_geo_radius')
+    exp_min = _num('crust_search_exp_min')
+    exp_max = _num('crust_search_exp_max')
+    min_connections = _num('crust_search_min_connections')
+    skill_groups = [skills] if skills else []
+
+    return build_filters(
+        title=title or None,
+        company=company or None,
+        location=location or None,
+        seniority=seniority or None,
+        headcount=headcount or None,
+        experience_min=exp_min if exp_min > 0 else None,
+        experience_max=exp_max if exp_max > 0 else None,
+        skill_groups=skill_groups or None,
+        keywords=keywords or None,
+        past_companies=past_companies or None,
+        past_titles=past_titles or None,
+        school=school or None,
+        recently_changed_jobs=True if state.get('crust_search_recently_changed') else None,
+        has_verified_email=True if state.get('crust_search_has_email') else None,
+        function_categories=function or None,
+        industries=industry or None,
+        country=country or None,
+        continent=continent or None,
+        geo_city=geo_city or None,
+        geo_radius_km=geo_radius if geo_radius > 0 else None,
+        min_connections=min_connections if min_connections > 0 else None,
+        exact_company=bool(state.get('crust_search_exact_company')),
+        # not_relevant and blacklist are applied client-side, as in the
+        # filter search — sending them changes Crustdata's scoring universe.
+    )
+
+
+# =============================================================================
 # API FUNCTIONS
 # =============================================================================
 
@@ -878,6 +963,7 @@ def search_people_semantic(
     search_mode: str = "hybrid",
     recall_mode: str = "managed",
     api_key: str = None,
+    filters: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Natural-language ("search by description") people search — beta.
@@ -897,9 +983,18 @@ def search_people_semantic(
         search_mode: "hybrid" (default, keyword+vector), "lexical" (exact
             terms only), or "semantic" (vector/meaning only).
         recall_mode: "managed" (default — query is the main signal) or
-            "exact" (only used if filters are added later; kept here so
-            callers can opt in without a signature change).
+            "exact" (filters are a hard constraint, the query only ranks
+            within them). Forced to "exact" whenever `filters` is given.
         api_key: Optional API key (loads from config.json / env var if omitted).
+        filters: Optional structured filters — the SAME build_filters()
+            output the filter search sends (e.g. from
+            build_filters_from_search_form()). Remapped to the v2 field
+            grammar with _remap_filters(), exactly like search_people_db_v2().
+            When given, the request carries both `search.query` and
+            `filters`, with top-level `mode: "exact"` (verified live
+            2026-09-24). No `fields` list is sent, so
+            `years_of_experience_raw` is only ever used as a filter, never
+            requested as a field (this account gets a permission_error for it).
 
     Returns:
         {
@@ -923,7 +1018,13 @@ def search_people_semantic(
         "search": {"query": query.strip(), "mode": search_mode},
         "limit": max(1, min(limit, 100)),
     }
-    if recall_mode == "exact":
+    raw_filters = None
+    if filters:
+        raw_filters = filters.get("filters") if "filters" in filters else filters
+    if raw_filters:
+        body["filters"] = _remap_filters(raw_filters)
+        body["mode"] = "exact"
+    elif recall_mode == "exact":
         body["mode"] = "exact"
     if cursor:
         body["cursor"] = cursor
@@ -2887,6 +2988,8 @@ __all__ = [
     'SENIORITY_LEVELS',
     'HEADCOUNT_RANGES',
     'CREDITS_PER_RESULT_SEMANTIC',
+    'build_filters_from_search_form',
+    'effective_form_value',
     'CREDITS_PER_RESULT_V2',
     'CREDITS_PER_ENRICH_PROFILE_BASE',
     'BATCH_ENRICH_FIELDS',

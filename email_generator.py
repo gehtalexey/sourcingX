@@ -204,12 +204,48 @@ def _opener_violations(text: str) -> list:
     return violations
 
 
+def _split_position_company(position: str):
+    """Split a free-typed position string into (role, company).
+
+    Recruiters often type the position as "Applied AI Engineer at Dwelly"
+    rather than passing role and company separately. If `position` ends in
+    " at <company>" (case-insensitive, matching the LAST " at "), split it
+    into the role and the company, stripping trailing punctuation or a
+    trailing parenthetical like " (remote)" off the company.
+
+    Returns (position, None) unchanged when there's no " at " to split on.
+    """
+    if not position:
+        return position, None
+
+    match = re.match(r'^(.*\S)\s+at\s+(\S.*)$', position, re.IGNORECASE)
+    if not match:
+        return position, None
+
+    role, company = match.group(1), match.group(2)
+
+    # Strip a trailing parenthetical, e.g. "Dwelly (remote)" -> "Dwelly"
+    company = re.sub(r'\s*\([^)]*\)\s*$', '', company).strip()
+    # Strip trailing punctuation
+    company = company.rstrip(' .,;:-').strip()
+
+    if not company:
+        return position, None
+
+    return role, company
+
+
 def build_email_prompt(sender: str, tone: str, length: str, custom_instruction: str = None, position: str = None, generate_type: str = 'both', company: str = None) -> str:
     """Build the system prompt for email generation."""
 
     sender_desc = SENDER_PERSONAS.get(sender, 'a recruiter')
     tone_desc = TONE_DESCRIPTIONS.get(tone, TONE_DESCRIPTIONS['professional'])
     length_desc = LENGTH_DESCRIPTIONS.get(length, LENGTH_DESCRIPTIONS['medium'])
+
+    # An explicit `company` always wins. Otherwise, try to pull it out of a
+    # free-typed position like "Applied AI Engineer at Dwelly".
+    if company is None:
+        position, company = _split_position_company(position)
 
     custom_section = f"\n\nADDITIONAL INSTRUCTIONS FROM USER:\n{custom_instruction}" if custom_instruction else ""
     position_section = f" for a **{position}** position" if position else ""

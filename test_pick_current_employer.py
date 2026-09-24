@@ -318,7 +318,50 @@ def test_trim_profile_for_email_old_format_unchanged():
 
 # ===== Opener concrete-detail fixes (build_email_prompt / _opener_violations / retry) =====
 
-from email_generator import build_email_prompt, _opener_violations, generate_email_for_profile
+from email_generator import (
+    build_email_prompt,
+    _opener_violations,
+    _split_position_company,
+    generate_email_for_profile,
+)
+
+
+def test_position_with_at_company_splits_into_role_and_company():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium', position='Applied AI Engineer at Dwelly')
+    assert 'at Dwelly' in prompt
+    assert '**Applied AI Engineer**' in prompt
+    assert 'at a tech company' not in prompt
+
+
+def test_position_without_at_stays_neutral():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium', position='DevOps Engineer')
+    assert 'at a tech company' in prompt
+    assert '**DevOps Engineer**' in prompt
+
+
+def test_explicit_company_overrides_position_text():
+    prompt = build_email_prompt(
+        'recruiter', 'professional', 'medium',
+        position='Applied AI Engineer at Dwelly', company='Wiz'
+    )
+    assert 'at Wiz' in prompt
+    assert 'a tech company' not in prompt
+    # Position text is passed through unsplit since an explicit company won.
+    assert '**Applied AI Engineer at Dwelly**' in prompt
+
+
+def test_split_position_company_handles_trailing_parenthetical():
+    role, company = _split_position_company('Backend Engineer at Monday.com (remote)')
+    assert role == 'Backend Engineer'
+    assert company == 'Monday.com'
+
+
+def test_split_position_company_no_at_returns_unchanged():
+    assert _split_position_company('DevOps Engineer') == ('DevOps Engineer', None)
+
+
+def test_split_position_company_none_returns_none():
+    assert _split_position_company(None) == (None, None)
 
 
 def test_prompt_has_no_israeli_tech_company_wording():

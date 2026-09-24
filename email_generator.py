@@ -746,10 +746,24 @@ Generate a personalized subject line and email opener. Remember: subject and ope
 Your previous opener violated these rules: {'; '.join(violations)}.
 Rewrite the opener so it fixes ALL of these violations while still following every rule above."""
                 try:
-                    result = _post_process(_call_model(corrective_prompt))
+                    retry_result = _post_process(_call_model(corrective_prompt))
                 except (json.JSONDecodeError, Exception):
-                    # Retry failed - keep the first (violating) result rather than error out.
-                    pass
+                    # Retry call itself failed - only the bad first result exists.
+                    # Keep the subject line (if any) but drop the still-broken opener.
+                    result['email_opener'] = ''
+                    result['opener_error'] = (
+                        f"Opener broke the writing rules twice: {'; '.join(violations)}"
+                    )
+                else:
+                    # Validate the retry result too - it may still break the rules.
+                    retry_opener = retry_result.get('email_opener')
+                    retry_violations = _opener_violations(retry_opener) if retry_opener else violations
+                    if retry_violations:
+                        retry_result['email_opener'] = ''
+                        retry_result['opener_error'] = (
+                            f"Opener broke the writing rules twice: {'; '.join(retry_violations)}"
+                        )
+                    result = retry_result
 
         return result
 

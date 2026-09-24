@@ -470,15 +470,69 @@ def test_retry_returns_clean_opener_after_one_violation_exactly_two_calls():
     assert result['email_opener'] == json.loads(CLEAN_OPENER)['email_opener']
 
 
-def test_retry_returns_second_attempt_when_still_violating_no_exception():
+def test_retry_still_violating_returns_empty_opener_with_opener_error():
     client = _StubOpenAIClient([VIOLATING_OPENER, VIOLATING_OPENER])
     result = generate_email_for_profile(
         _profile_with_data(), client,
         generate_type='opener_only', ai_provider='openai'
     )
     assert client.call_count == 2
-    assert result['email_opener'] == json.loads(VIOLATING_OPENER)['email_opener']
+    assert result['email_opener'] == ''
+    assert 'Opener broke the writing rules twice' in result['opener_error']
     assert 'error' not in result
+
+
+class _StubOpenAIClientRetryRaises:
+    """Stub client whose FIRST call returns a queued response and whose
+    SECOND call (the corrective retry) raises, to simulate the retry
+    itself failing after a bad first opener."""
+
+    def __init__(self, first_content):
+        self._first_content = first_content
+        self.call_count = 0
+        chat = type('Chat', (), {})()
+        completions = type('Completions', (), {})()
+        completions.create = self._create
+        chat.completions = completions
+        self.chat = chat
+
+    def _create(self, **kwargs):
+        self.call_count += 1
+        if self.call_count == 1:
+            return _StubOpenAIResponse(self._first_content)
+        raise RuntimeError('simulated API failure on retry')
+
+
+def test_retry_exception_with_bad_first_returns_empty_opener_with_error():
+    client = _StubOpenAIClientRetryRaises(VIOLATING_OPENER)
+    result = generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert client.call_count == 2
+    assert result['email_opener'] == ''
+    assert 'Opener broke the writing rules twice' in result['opener_error']
+    assert 'error' not in result
+
+
+VIOLATING_BOTH = json.dumps({
+    "subject_line": "Kubernetes at CyberArk?",
+    "subject_angle": "company",
+    "email_opener": "Your work at CyberArk aligns well with the mission here.",
+    "opener_angle": "career"
+})
+
+
+def test_retry_still_violating_keeps_subject_line_when_generated():
+    client = _StubOpenAIClient([VIOLATING_BOTH, VIOLATING_BOTH])
+    result = generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='both', ai_provider='openai'
+    )
+    assert client.call_count == 2
+    assert result['email_opener'] == ''
+    assert 'Opener broke the writing rules twice' in result['opener_error']
+    assert result['subject_line'] == 'Kubernetes at CyberArk?'
 
 
 def test_clean_opener_first_try_makes_only_one_call():

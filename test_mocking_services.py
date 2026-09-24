@@ -683,6 +683,8 @@ class TestBakeoffKalamata:
                  "group": "yes", "kalamata_verdict": "yes", "kalamata_score": 8, "kalamata_reason": "ok"},
                 {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-2",
                  "group": "no_fullscreen", "kalamata_verdict": "no", "kalamata_score": 3, "kalamata_reason": "meh"},
+                {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-3",
+                 "group": "no_prescreen", "kalamata_verdict": "no", "kalamata_score": 2, "kalamata_reason": "meh2"},
             ],
         }
         sample_path = tmp_path / "sample.json"
@@ -712,11 +714,21 @@ class TestBakeoffKalamata:
                 "jev_reason": "", "jev_model": "", "input_tokens": "", "output_tokens": "",
                 "error": "RuntimeError: boom",
             })
+            # candidate-3 has no error and no yes/no verdict -- Jev's normal
+            # fail-open "incomplete" outcome. Must NOT be retried, must be
+            # kept as-is in the output.
+            writer.writerow({
+                "position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-3",
+                "jev_verdict": "", "jev_score": "", "jev_fit_level": "incomplete",
+                "jev_reason": "fail-open: low confidence", "jev_model": "jev-1.0",
+                "input_tokens": 40, "output_tokens": 3, "error": "",
+            })
 
         monkeypatch.setattr(bk, "_load_supabase_client", lambda: object())
         monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {
             "https://www.linkedin.com/in/candidate-1": {"raw_data": {"skills": ["Python"]}},
             "https://www.linkedin.com/in/candidate-2": {"raw_data": {"skills": ["Go"]}},
+            "https://www.linkedin.com/in/candidate-3": {"raw_data": {"skills": ["Rust"]}},
         })
         monkeypatch.setattr(bk.jev_client, "build_client", lambda: "fake-client")
 
@@ -738,7 +750,7 @@ class TestBakeoffKalamata:
         )
         bk.cmd_jev(args)
 
-        # Only the error row should have been retried.
+        # Only the error row should have been retried -- not the fail-open one.
         assert len(calls) == 1
         assert calls[0] == {"raw_data": {"skills": ["Go"]}}
 
@@ -747,10 +759,68 @@ class TestBakeoffKalamata:
         keys = [(row["position_id"], row["linkedin_url"]) for row in written]
         assert keys.count(("pos-a", "https://www.linkedin.com/in/candidate-1")) == 1
         assert keys.count(("pos-a", "https://www.linkedin.com/in/candidate-2")) == 1
+        assert keys.count(("pos-a", "https://www.linkedin.com/in/candidate-3")) == 1
         by_url = {row["linkedin_url"]: row for row in written}
         assert by_url["https://www.linkedin.com/in/candidate-1"]["jev_verdict"] == "yes"
         assert by_url["https://www.linkedin.com/in/candidate-2"]["jev_verdict"] == "no"
         assert by_url["https://www.linkedin.com/in/candidate-2"]["error"] == ""
+        # candidate-3's fail-open row is untouched, exactly as it was on disk.
+        assert by_url["https://www.linkedin.com/in/candidate-3"]["jev_verdict"] == ""
+        assert by_url["https://www.linkedin.com/in/candidate-3"]["jev_fit_level"] == "incomplete"
+        assert by_url["https://www.linkedin.com/in/candidate-3"]["error"] == ""
+
+    def test_jev_resume_fail_open_row_alone_is_not_retried(self, tmp_path, monkeypatch):
+        """A resume run where every existing row is a fail-open incomplete
+        (no error, no yes/no verdict) must make zero Jev calls."""
+        import bakeoff_kalamata as bk
+
+        sample = {
+            "seed": 1,
+            "positions": ["pos-a"],
+            "rows": [
+                {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                 "group": "yes", "kalamata_verdict": "yes", "kalamata_score": 8, "kalamata_reason": "ok"},
+            ],
+        }
+        sample_path = tmp_path / "sample.json"
+        sample_path.write_text(json.dumps(sample), encoding="utf-8")
+        briefs_path = tmp_path / "briefs.json"
+        briefs_path.write_text(json.dumps({"pos-a": {"role_context": "Backend Engineer"}}), encoding="utf-8")
+        out_path = tmp_path / "jev_results.csv"
+
+        fieldnames = [
+            "position_id", "linkedin_url", "jev_verdict", "jev_score", "jev_fit_level",
+            "jev_reason", "jev_model", "input_tokens", "output_tokens", "error",
+        ]
+        with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerow({
+                "position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                "jev_verdict": "", "jev_score": "", "jev_fit_level": "incomplete",
+                "jev_reason": "fail-open: low confidence", "jev_model": "jev-1.0",
+                "input_tokens": 40, "output_tokens": 3, "error": "",
+            })
+
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: object())
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {})
+        monkeypatch.setattr(bk.jev_client, "build_client", lambda: "fake-client")
+
+        def _fail_if_called(*args, **kwargs):
+            raise AssertionError("a fail-open row must not be retried")
+
+        monkeypatch.setattr(bk.jev_client, "screen_with_jev", _fail_if_called)
+
+        args = argparse.Namespace(
+            sample=str(sample_path), briefs=str(briefs_path), out=str(out_path),
+            yes=True, limit=None, workers=2,
+        )
+        bk.cmd_jev(args)
+
+        with open(out_path, encoding="utf-8-sig", newline="") as f:
+            written = list(csv.DictReader(f))
+        assert len(written) == 1
+        assert written[0]["jev_fit_level"] == "incomplete"
 
     # -- report: a real zero score must survive, not become blank --
 
@@ -1022,3 +1092,120 @@ class TestBakeoffKalamata:
         row = report["rows"][0]
         assert row["luna_verdict"] == "yes"
         assert row["name"] == "Alice"
+
+    def test_cmd_report_falls_back_to_pipeline_url_when_luna_saved_there(self, tmp_path, monkeypatch):
+        """Luna's saved row lives under the raw pipeline linkedin_url, not
+        the matched profile_url -- report must still find it."""
+        import bakeoff_kalamata as bk
+
+        sample = {
+            "seed": 1,
+            "positions": ["pos-a"],
+            "rows": [
+                {
+                    "position_id": "pos-a",
+                    "linkedin_url": "https://www.linkedin.com/in/pipeline-alias",
+                    "profile_url": "https://www.linkedin.com/in/canonical-123",
+                    "group": "yes", "kalamata_verdict": "yes",
+                    "kalamata_score": 8, "kalamata_reason": "ok",
+                },
+            ],
+        }
+        sample_path = tmp_path / "sample.json"
+        sample_path.write_text(json.dumps(sample), encoding="utf-8")
+        briefs_path = tmp_path / "briefs.json"
+        briefs_path.write_text(json.dumps({"pos-a": {"role_context": "Backend Engineer"}}), encoding="utf-8")
+        jev_path = tmp_path / "jev.csv"
+        jev_path.write_text("", encoding="utf-8-sig")
+
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: object())
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {
+            "https://www.linkedin.com/in/canonical-123": {
+                "name": "Alice", "current_title": "Engineer", "current_company": "Acme",
+            },
+        })
+
+        def _fake_fetch_screening_results(client, jd_hash, urls):
+            # Luna saved this one under the pipeline URL, not the canonical
+            # profile_url -- no row exists for canonical-123 at all.
+            return [{
+                "linkedin_url": "https://www.linkedin.com/in/pipeline-alias",
+                "screening_score": 6, "screening_fit_level": "Good Fit",
+                "screening_summary": "Solid fit", "screened_at": "2026-01-01T00:00:00Z",
+            }]
+
+        monkeypatch.setattr(bk, "_fetch_screening_results", _fake_fetch_screening_results)
+
+        out_dir = tmp_path / "out"
+        args = argparse.Namespace(
+            sample=str(sample_path), jev=str(jev_path), briefs=str(briefs_path),
+            out_dir=str(out_dir), seed=1,
+        )
+        bk.cmd_report(args)
+
+        report = json.loads((out_dir / "bakeoff.json").read_text(encoding="utf-8"))
+        row = report["rows"][0]
+        assert row["luna_verdict"] == "yes"
+        assert row["luna_score"] == 6
+
+    def test_cmd_report_jev_status_incomplete_for_fail_open_row(self, tmp_path, monkeypatch):
+        """A Jev row with no error and no yes/no verdict (fail-open) reports
+        jev_status="incomplete" (jev_verdict stays "missing"), distinct from
+        a row with no Jev result at all, and is counted in incomplete_jev."""
+        import bakeoff_kalamata as bk
+
+        sample = {
+            "seed": 1,
+            "positions": ["pos-a"],
+            "rows": [
+                {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                 "group": "yes", "kalamata_verdict": "yes", "kalamata_score": 8, "kalamata_reason": "ok"},
+                {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-2",
+                 "group": "no_fullscreen", "kalamata_verdict": "no", "kalamata_score": 3, "kalamata_reason": "meh"},
+            ],
+        }
+        sample_path = tmp_path / "sample.json"
+        sample_path.write_text(json.dumps(sample), encoding="utf-8")
+        briefs_path = tmp_path / "briefs.json"
+        briefs_path.write_text(json.dumps({"pos-a": {"role_context": "Backend Engineer"}}), encoding="utf-8")
+
+        jev_path = tmp_path / "jev.csv"
+        with open(jev_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                "position_id", "linkedin_url", "jev_verdict", "jev_score", "jev_fit_level",
+                "jev_reason", "jev_model", "input_tokens", "output_tokens", "error",
+            ])
+            writer.writeheader()
+            # candidate-1: fail-open, no error, no yes/no verdict.
+            writer.writerow({
+                "position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                "jev_verdict": "", "jev_score": "", "jev_fit_level": "incomplete",
+                "jev_reason": "fail-open: low confidence", "jev_model": "jev-1.0",
+                "input_tokens": 40, "output_tokens": 3, "error": "",
+            })
+            # candidate-2: no row at all in the CSV (genuinely missing).
+
+        out_dir = tmp_path / "out"
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: object())
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {})
+        monkeypatch.setattr(bk, "_fetch_screening_results", lambda client, jd_hash, urls: [])
+
+        args = argparse.Namespace(
+            sample=str(sample_path), jev=str(jev_path), briefs=str(briefs_path),
+            out_dir=str(out_dir), seed=1,
+        )
+        bk.cmd_report(args)
+
+        report = json.loads((out_dir / "bakeoff.json").read_text(encoding="utf-8"))
+        rows_by_url = {r["linkedin_url"]: r for r in report["rows"]}
+
+        cand1 = rows_by_url["https://www.linkedin.com/in/candidate-1"]
+        assert cand1["jev_verdict"] == "missing"
+        assert cand1["jev_status"] == "incomplete"
+
+        cand2 = rows_by_url["https://www.linkedin.com/in/candidate-2"]
+        assert cand2["jev_verdict"] == "missing"
+        assert cand2["jev_status"] == "missing"
+
+        assert report["summary"]["pos-a"]["incomplete_jev"] == 1
+        assert report["summary"]["pos-a"]["missing_jev"] == 2

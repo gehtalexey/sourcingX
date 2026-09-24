@@ -527,12 +527,16 @@ def cmd_jev(args):
         with open(out_path, newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 key = (row.get("position_id"), row.get("linkedin_url"))
-                jev_verdict = (row.get("jev_verdict") or "").strip()
-                is_failed = bool((row.get("error") or "").strip()) or jev_verdict not in ("yes", "no")
-                if is_failed:
+                has_error = bool((row.get("error") or "").strip())
+                if has_error:
                     # Retry this row -- drop it from existing_rows so it isn't
                     # written twice, and leave it out of `done` so it lands in todo.
                     continue
+                # No error but an unknown/blank jev_verdict is Jev's normal
+                # fail-open "incomplete" outcome (see jev_client), not a
+                # failure -- keep it as done, don't re-call. cmd_report
+                # reports it as jev_status="incomplete", distinct from a
+                # genuinely missing row.
                 existing_rows.append(row)
                 done.add(key)
 
@@ -655,12 +659,32 @@ def cmd_report(args):
     for r in sample["rows"]:
         norm_url = preferred_match_url(r)
         profile = profiles_by_url.get(norm_url) or {}
-        luna_row = luna_by_key.get((r["position_id"], norm_url))
+
+        # Luna's saved row is looked up by normalized profile_url first (the
+        # URL the dashboard actually screened and saved under), and only
+        # falls back to the normalized pipeline linkedin_url when that
+        # misses -- some rows were screened before profile_url existed, or
+        # Luna was run against the raw pipeline URL directly.
+        profile_norm = normalize_linkedin_url(r.get("profile_url")) or r.get("profile_url")
+        pipeline_norm = normalize_linkedin_url(r.get("linkedin_url")) or r.get("linkedin_url")
+        luna_row = luna_by_key.get((r["position_id"], profile_norm)) if profile_norm else None
+        if luna_row is None and pipeline_norm and pipeline_norm != profile_norm:
+            luna_row = luna_by_key.get((r["position_id"], pipeline_norm))
+
         jev_row = jev_rows.get((r["position_id"], r["linkedin_url"]))
 
         luna_v = luna_verdict(luna_row.get("screening_fit_level")) if luna_row else None
         jev_raw_verdict = (jev_row or {}).get("jev_verdict") or None
         jev_v = jev_raw_verdict if jev_raw_verdict in ("yes", "no") else None
+        jev_error = (jev_row or {}).get("error") or ""
+        if jev_v:
+            jev_status = jev_v
+        elif jev_row and not jev_error:
+            # Row exists, no error, but no yes/no verdict -- Jev's fail-open
+            # "incomplete" outcome, not a missing call.
+            jev_status = "incomplete"
+        else:
+            jev_status = "missing"
         kal_v = r["kalamata_verdict"]
 
         bakeoff_rows.append({
@@ -674,6 +698,7 @@ def cmd_report(args):
             "luna_score": luna_row.get("screening_score") if luna_row else "",
             "luna_reason": ((luna_row or {}).get("screening_summary") or "")[:200],
             "jev_verdict": jev_v or "missing",
+            "jev_status": jev_status,
             "jev_score": _score_value((jev_row or {}).get("jev_score")),
             "jev_reason": (jev_row or {}).get("jev_reason") or "",
             "kalamata_verdict": kal_v,
@@ -690,7 +715,7 @@ def cmd_report(args):
     csv_path = out_dir / "bakeoff.csv"
     fieldnames = list(bakeoff_rows[0].keys()) if bakeoff_rows else [
         "position_id", "group", "linkedin_url", "name", "current_title", "current_company",
-        "luna_verdict", "luna_score", "luna_reason", "jev_verdict", "jev_score", "jev_reason",
+        "luna_verdict", "luna_score", "luna_reason", "jev_verdict", "jev_status", "jev_score", "jev_reason",
         "kalamata_verdict", "kalamata_score", "kalamata_reason",
         "luna_vs_kalamata_disagree", "jev_vs_kalamata_disagree", "luna_vs_jev_disagree",
     ]
@@ -712,6 +737,7 @@ def cmd_report(args):
             "luna_jev_agreement": compute_agreement(rows_for, "luna_verdict", "jev_verdict"),
             "missing_luna": sum(1 for r in rows_for if r["luna_verdict"] == "missing"),
             "missing_jev": sum(1 for r in rows_for if r["jev_verdict"] == "missing"),
+            "incomplete_jev": sum(1 for r in rows_for if r.get("jev_status") == "incomplete"),
         }
 
     disagreements = [

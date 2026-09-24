@@ -13,6 +13,8 @@ These tests pin two real-world scenarios that surfaced the bug:
   SourcingX stored Vesttoo for the same reason.
 """
 
+import json
+
 from normalizers import pick_current_employer
 
 
@@ -312,3 +314,134 @@ def test_trim_profile_for_email_old_format_unchanged():
     past = trimmed['past_employers'][0]
     assert past['title'] == 'Director'
     assert past['company'] == 'CyberArk'
+
+
+# ===== Opener concrete-detail fixes (build_email_prompt / _opener_violations / retry) =====
+
+from email_generator import build_email_prompt, _opener_violations, generate_email_for_profile
+
+
+def test_prompt_has_no_israeli_tech_company_wording():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium', company='Wiz')
+    assert 'Israeli tech company' not in prompt
+
+
+def test_prompt_includes_passed_company_and_sender():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium', company='Wiz')
+    assert 'Wiz' in prompt
+    assert 'recruiter' in prompt
+
+
+def test_prompt_neutral_wording_when_company_none():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium', company=None)
+    assert 'at a tech company' in prompt
+    assert 'Israeli tech company' not in prompt
+
+
+def test_prompt_contains_concrete_detail_instruction_and_bans():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium')
+    assert 'CONCRETE DETAIL' in prompt
+    assert 'NEVER start opener with "Your"' in prompt
+    assert 'aligns' in prompt
+    assert 'mission' in prompt
+
+
+def test_opener_violations_flags_your_start():
+    assert _opener_violations('Your work at CyberArk stands out.') == ['starts with "Your"']
+
+
+def test_opener_violations_flags_aligns_well():
+    violations = _opener_violations('This role aligns well with your background.')
+    assert any('aligns' in v for v in violations)
+
+
+def test_opener_violations_flags_the_mission():
+    violations = _opener_violations('Excited about the mission you are building toward.')
+    assert any('mission' in v for v in violations)
+
+
+def test_opener_violations_clean_opener_returns_empty():
+    assert _opener_violations(
+        "Building the migration tooling that moved CyberArk's data pipeline to Kubernetes is the kind of hands-on work we need."
+    ) == []
+
+
+class _StubOpenAIResponse:
+    def __init__(self, content, prompt_tokens=10, completion_tokens=5):
+        message = type('Msg', (), {'content': content})()
+        choice = type('Choice', (), {'message': message})()
+        usage = type('Usage', (), {'prompt_tokens': prompt_tokens, 'completion_tokens': completion_tokens})()
+        self.choices = [choice]
+        self.usage = usage
+
+
+class _StubOpenAIClient:
+    """Stub OpenAI-shaped client that returns queued responses in order."""
+
+    def __init__(self, contents):
+        self._queue = list(contents)
+        self.call_count = 0
+        chat = type('Chat', (), {})()
+        completions = type('Completions', (), {})()
+        completions.create = self._create
+        chat.completions = completions
+        self.chat = chat
+
+    def _create(self, **kwargs):
+        self.call_count += 1
+        content = self._queue.pop(0)
+        return _StubOpenAIResponse(content)
+
+
+def _profile_with_data():
+    return {
+        'raw_data': {
+            'name': 'Test Candidate',
+            'current_employers': [
+                {'title': 'Backend Engineer', 'employer_name': 'CyberArk', 'start_date': '2020-01-01'}
+            ],
+            'skills': ['Python'],
+        }
+    }
+
+
+VIOLATING_OPENER = json.dumps({
+    "email_opener": "Your work at CyberArk aligns well with the mission here.",
+    "opener_angle": "career"
+})
+
+CLEAN_OPENER = json.dumps({
+    "email_opener": "Building the migration tooling that moved CyberArk's pipeline to Kubernetes shows real depth.",
+    "opener_angle": "career"
+})
+
+
+def test_retry_returns_clean_opener_after_one_violation_exactly_two_calls():
+    client = _StubOpenAIClient([VIOLATING_OPENER, CLEAN_OPENER])
+    result = generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert client.call_count == 2
+    assert result['email_opener'] == json.loads(CLEAN_OPENER)['email_opener']
+
+
+def test_retry_returns_second_attempt_when_still_violating_no_exception():
+    client = _StubOpenAIClient([VIOLATING_OPENER, VIOLATING_OPENER])
+    result = generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert client.call_count == 2
+    assert result['email_opener'] == json.loads(VIOLATING_OPENER)['email_opener']
+    assert 'error' not in result
+
+
+def test_clean_opener_first_try_makes_only_one_call():
+    client = _StubOpenAIClient([CLEAN_OPENER])
+    result = generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert client.call_count == 1
+    assert result['email_opener'] == json.loads(CLEAN_OPENER)['email_opener']

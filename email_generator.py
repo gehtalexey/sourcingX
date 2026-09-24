@@ -177,8 +177,34 @@ LENGTH_DESCRIPTIONS = {
     'long': '2-3 sentences',
 }
 
+# Words banned from the opener, checked case-insensitively.
+OPENER_BANNED_WORDS = ('aligns', 'aligns well', 'mission', 'passionate', 'impressive', 'i came across')
 
-def build_email_prompt(sender: str, tone: str, length: str, custom_instruction: str = None, position: str = None, generate_type: str = 'both') -> str:
+
+def _opener_violations(text: str) -> list:
+    """Check an opener for hard-rule violations.
+
+    Returns a list of short violation descriptions (empty if clean).
+    - Starts with "Your" (case-insensitive, after stripping quotes/whitespace)
+    - Contains any of OPENER_BANNED_WORDS (case-insensitive)
+    """
+    violations = []
+    if not text:
+        return violations
+
+    stripped = text.strip().strip('"\'').strip()
+    if re.match(r'^your\b', stripped, re.IGNORECASE):
+        violations.append('starts with "Your"')
+
+    lowered = text.lower()
+    for word in OPENER_BANNED_WORDS:
+        if word in lowered:
+            violations.append(f'contains banned word "{word}"')
+
+    return violations
+
+
+def build_email_prompt(sender: str, tone: str, length: str, custom_instruction: str = None, position: str = None, generate_type: str = 'both', company: str = None) -> str:
     """Build the system prompt for email generation."""
 
     sender_desc = SENDER_PERSONAS.get(sender, 'a recruiter')
@@ -187,6 +213,7 @@ def build_email_prompt(sender: str, tone: str, length: str, custom_instruction: 
 
     custom_section = f"\n\nADDITIONAL INSTRUCTIONS FROM USER:\n{custom_instruction}" if custom_instruction else ""
     position_section = f" for a **{position}** position" if position else ""
+    company_desc = f"at {company}" if company else "at a tech company"
 
     # Output format based on generate_type
     if generate_type == 'subject_only':
@@ -210,7 +237,7 @@ def build_email_prompt(sender: str, tone: str, length: str, custom_instruction: 
 }"""
         generate_desc = "a personalized subject line and email opener"
 
-    return f"""You are {sender_desc} at an Israeli tech company writing {generate_desc} for candidates{position_section}.
+    return f"""You are {sender_desc} {company_desc} writing {generate_desc} for candidates{position_section}.
 
 Return ONLY valid JSON:
 {json_format}
@@ -220,9 +247,17 @@ Return ONLY valid JSON:
 - NEVER start opener with "Your", "Leading", or "Handling".
 - NEVER use: "impressive", "exciting", "dynamic", "thrilling", "fascinating", "cutting edge", "at the forefront"
 - NEVER use: "I noticed", "I came across", "caught my eye", "I hope this finds you well", "Reaching out because"
+- NEVER use: "aligns", "aligns well", "mission", "passionate"
 - NEVER use exclamation marks (!) or ask generic questions about feelings/motivation.
 - NEVER mention companies from before 2021 or mention the same company twice.
 - Subject and opener MUST use DIFFERENT angles.
+
+## CONCRETE DETAIL (required)
+The opener must cite ONE concrete thing from the person's OWN profile: a product or system
+they built, a migration they ran, a launch they shipped, or a named project mentioned in
+their experience descriptions or summary. Their title, years of experience, or company name
+alone is NOT a concrete detail - go find something they actually did. End the opener with a
+short observation about why that specific thing is interesting.
 
 ## SUBJECT LINE
 Under 10 words, under 60 chars. Must mention something specific from their profile. Rotate formats:
@@ -429,7 +464,8 @@ def generate_email_for_profile(
     tracker=None,
     generate_type: str = 'both',
     position: str = None,
-    ai_provider: str = 'openai'
+    ai_provider: str = 'openai',
+    company: str = None
 ) -> dict:
     """Generate email subject line and/or opener for a single profile.
 
@@ -445,6 +481,7 @@ def generate_email_for_profile(
         generate_type: What to generate - 'both', 'subject_only', or 'opener_only'
         position: Optional position/role being recruited for (e.g., 'DevOps Engineer', 'Sales Manager')
         ai_provider: "openai" or "anthropic"
+        company: Optional hiring company name to mention instead of neutral wording
 
     Returns:
         Dict with subject_line, subject_angle, email_opener, opener_angle
@@ -472,11 +509,11 @@ def generate_email_for_profile(
     trimmed = trim_profile_for_email(raw)
 
     # Build prompts
-    system_prompt = build_email_prompt(sender, tone, length, custom_instruction, position, generate_type)
+    system_prompt = build_email_prompt(sender, tone, length, custom_instruction, position, generate_type, company)
 
     # Customize user prompt based on generate_type
     if generate_type == 'subject_only':
-        user_prompt = f"""## Candidate Profile:
+        base_user_prompt = f"""## Candidate Profile:
 ```json
 {json.dumps(trimmed, indent=2, default=str)}
 ```
@@ -484,21 +521,22 @@ def generate_email_for_profile(
 Generate ONLY a personalized subject line. Return JSON with: subject_line, subject_angle."""
     elif generate_type == 'opener_only':
         length_desc = LENGTH_DESCRIPTIONS.get(length, LENGTH_DESCRIPTIONS['medium'])
-        user_prompt = f"""## Candidate Profile:
+        base_user_prompt = f"""## Candidate Profile:
 ```json
 {json.dumps(trimmed, indent=2, default=str)}
 ```
 
 Generate ONLY a personalized email opener ({length_desc}). Return JSON with: email_opener, opener_angle."""
     else:  # both
-        user_prompt = f"""## Candidate Profile:
+        base_user_prompt = f"""## Candidate Profile:
 ```json
 {json.dumps(trimmed, indent=2, default=str)}
 ```
 
 Generate a personalized subject line and email opener. Remember: subject and opener MUST use DIFFERENT angles."""
 
-    try:
+    def _call_model(user_prompt: str) -> dict:
+        """Make one model call and return the parsed JSON result. May raise."""
         if ai_provider == 'anthropic':
             # Anthropic API call
             response = client.messages.create(
@@ -529,7 +567,7 @@ Generate a personalized subject line and email opener. Remember: subject and ope
             if raw_content.strip().startswith('```'):
                 raw_content = re.sub(r'^```(?:json)?\s*', '', raw_content.strip())
                 raw_content = re.sub(r'\s*```$', '', raw_content.strip())
-            result = json.loads(raw_content)
+            return json.loads(raw_content)
         else:
             # OpenAI API call
             response = client.chat.completions.create(
@@ -556,8 +594,9 @@ Generate a personalized subject line and email opener. Remember: subject and ope
                     response_time_ms=elapsed_ms
                 )
 
-            result = json.loads(response.choices[0].message.content)
+            return json.loads(response.choices[0].message.content)
 
+    def _post_process(result: dict) -> dict:
         # Fill in empty values for fields not generated based on generate_type
         if generate_type == 'subject_only':
             result.setdefault('email_opener', '')
@@ -574,6 +613,27 @@ Generate a personalized subject line and email opener. Remember: subject and ope
         for key in ('subject_line', 'email_opener'):
             if result.get(key):
                 result[key] = result[key].replace('—', ' -').replace('–', ' -')
+
+        return result
+
+    try:
+        result = _post_process(_call_model(base_user_prompt))
+
+        # If an opener was generated, check it against the hard rules and retry
+        # once (max 2 model calls total) if it violates them.
+        opener = result.get('email_opener')
+        if opener:
+            violations = _opener_violations(opener)
+            if violations:
+                corrective_prompt = base_user_prompt + f"""
+
+Your previous opener violated these rules: {'; '.join(violations)}.
+Rewrite the opener so it fixes ALL of these violations while still following every rule above."""
+                try:
+                    result = _post_process(_call_model(corrective_prompt))
+                except (json.JSONDecodeError, Exception):
+                    # Retry failed - keep the first (violating) result rather than error out.
+                    pass
 
         return result
 

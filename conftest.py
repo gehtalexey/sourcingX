@@ -9,8 +9,104 @@ This module provides:
 """
 
 import json
+import os
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
 import pytest
+import requests.adapters
 from unittest.mock import MagicMock, patch
+
+
+# ---------------------------------------------------------------------------
+# Keep the test suite away from the live Supabase database.
+#
+# Without this, tests that run dashboard code (e.g. screen_profiles_batch)
+# picked up real creds from config.json and wrote junk rows into the live
+# api_usage_logs table. Tests that truly need the real DB must be marked
+# @pytest.mark.live_db.
+# ---------------------------------------------------------------------------
+
+# Manual scripts that hit the live DB at import time, not pytest tests.
+# Run them by hand (python test_structured_real.py); the guard below would
+# otherwise abort collection whenever config.json is present.
+collect_ignore = ["test_structured_real.py"]
+
+_LIVE_DB_ALLOWED = False
+_ORIGINAL_ADAPTER_SEND = requests.adapters.HTTPAdapter.send
+
+
+def _configured_supabase_host():
+    """Host of the configured supabase_url (config.json or env), if any."""
+    url = os.environ.get('SUPABASE_URL', '')
+    try:
+        config_path = Path(__file__).parent / 'config.json'
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                url = json.load(f).get('supabase_url') or url
+    except Exception:
+        pass
+    return (urlparse(url.strip()).hostname or '').lower() if url else ''
+
+
+_SUPABASE_HOST = _configured_supabase_host()
+
+
+def _guarded_send(self, request, *args, **kwargs):
+    host = (urlparse(request.url).hostname or '').lower()
+    if not _LIVE_DB_ALLOWED and (
+        host.endswith('supabase.co') or (_SUPABASE_HOST and host == _SUPABASE_HOST)
+    ):
+        raise RuntimeError(
+            "tests must not reach live Supabase "
+            f"({request.method} {host}{urlparse(request.url).path}, "
+            f"test: {os.environ.get('PYTEST_CURRENT_TEST', 'collection')}). "
+            "Mock the client, or mark the test @pytest.mark.live_db."
+        )
+    return _ORIGINAL_ADAPTER_SEND(self, request, *args, **kwargs)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "live_db: test deliberately uses the real Supabase database"
+    )
+    # Installed session-wide (not per test) so import-time code is covered too.
+    requests.adapters.HTTPAdapter.send = _guarded_send
+
+
+def pytest_unconfigure(config):
+    requests.adapters.HTTPAdapter.send = _ORIGINAL_ADAPTER_SEND
+
+
+@pytest.fixture(autouse=True)
+def _no_live_supabase(request, monkeypatch):
+    """Make every Supabase client lookup return None unless marked live_db."""
+    global _LIVE_DB_ALLOWED
+    if request.node.get_closest_marker("live_db"):
+        _LIVE_DB_ALLOWED = True
+        yield
+        _LIVE_DB_ALLOWED = False
+        return
+
+    db_mod = sys.modules.get('db')
+    real_getter = getattr(db_mod, 'get_supabase_client', None)
+    if db_mod is not None:
+        monkeypatch.setattr(db_mod, 'get_supabase_client', lambda: None, raising=False)
+    # Modules that did `from db import get_supabase_client` hold their own copy.
+    if real_getter is not None:
+        for mod in list(sys.modules.values()):
+            try:
+                same = getattr(mod, 'get_supabase_client', None) is real_getter
+            except Exception:
+                continue
+            if same and mod is not db_mod:
+                monkeypatch.setattr(mod, 'get_supabase_client', lambda: None)
+    dash = sys.modules.get('dashboard')
+    if dash is not None:
+        monkeypatch.setattr(dash, '_get_db_client', lambda: None, raising=False)
+        monkeypatch.setattr(dash, 'get_usage_tracker', lambda: None, raising=False)
+    yield
 
 
 class MockOpenAIResponse:

@@ -10293,14 +10293,14 @@ with tab_screening:
         _ai_usd = _est['ai_usd'] / 2 if use_flex_tier else _est['ai_usd']
         tier_label = " (flex)" if use_flex_tier else ""
         _ai_basis = (
-            f"last run: ${_est['ai_cost_per_candidate']:.4f}/candidate"
+            f"last run: \\${_est['ai_cost_per_candidate']:.4f}/candidate"
             if _est['from_history'] else
-            f"no run logged yet, assuming ${_est['ai_cost_per_candidate']:.3f}/candidate"
+            f"no run logged yet, assuming \\${_est['ai_cost_per_candidate']:.3f}/candidate"
         )
         st.info(
             f"Rubric: **Unified policy** | Model: **{ai_model}{tier_label}**\n\n"
             f"**{_n_thin} profiles need a top-up = {_est['crustdata_credits']} Crustdata credits** · "
-            f"**AI ≈ ${_ai_usd:.2f}** for {len(_est_profiles)} candidates ({_ai_basis})"
+            f"**AI ≈ \\${_ai_usd:.2f}** for {len(_est_profiles)} candidates ({_ai_basis})"
         )
 
         # Debug: Show available fields and test single profile (admin-only)

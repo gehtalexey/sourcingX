@@ -16,19 +16,21 @@ from dashboard import count_passed_email_split
 
 
 def _function_skip_count(df: pd.DataFrame) -> tuple:
-    """Reimplement the skip logic from enrich_profiles_with_salesql exactly.
+    """Reimplement the skip logic from enrich_profiles_with_salesql exactly:
+    a row is skipped only when `salesql_email` or `email` holds a real
+    address (a string with an '@').
 
     Returns (have_email, need_email). If this and count_passed_email_split
     disagree on any row, the caption lies to the user about the work that
     will happen on click.
     """
+    def _real(v):
+        return isinstance(v, str) and '@' in v.strip()
+
     have = 0
     need = 0
     for _, row in df.iterrows():
-        if row.get('salesql_email') and not pd.isna(row.get('salesql_email')) and row.get('salesql_email') != '':
-            have += 1
-            continue
-        if row.get('email') and not pd.isna(row.get('email')) and row.get('email') != '':
+        if _real(row.get('salesql_email')) or _real(row.get('email')):
             have += 1
             continue
         need += 1
@@ -151,3 +153,98 @@ def test_total_invariant_holds_for_random_mix():
     have, need = count_passed_email_split(df)
     assert have + need == len(df)
     assert (have, need) == _function_skip_count(df)
+
+
+# ---------------------------------------------------------------------------
+# The false "All profiles already have emails!" message
+# ---------------------------------------------------------------------------
+
+PLACEHOLDERS = ['', None, np.nan, '   ', 'nan', 'None', 'not found', 'N/A']
+
+
+def test_placeholders_after_a_missed_lookup_count_as_no_email():
+    """A lookup that found nothing leaves salesql_email empty or holding a
+    placeholder. None of those may count as 'has email' -- that is what made
+    the UI say 'All profiles already have emails!' after 0 were found."""
+    from dashboard import has_email_mask, count_salesql_lookups
+
+    df = pd.DataFrame({
+        'linkedin_url': [f'https://www.linkedin.com/in/p{i}' for i in range(len(PLACEHOLDERS))],
+        'salesql_email': PLACEHOLDERS,
+        'email': PLACEHOLDERS,
+    })
+    assert int(has_email_mask(df).sum()) == 0
+    assert count_passed_email_split(df) == (0, len(PLACEHOLDERS))
+    # Every one of them is still offered for lookup.
+    assert count_salesql_lookups(df) == len(PLACEHOLDERS)
+
+
+def test_lookup_count_skips_rows_without_url_and_respects_limit():
+    from dashboard import count_salesql_lookups
+
+    df = pd.DataFrame({
+        'linkedin_url': ['https://www.linkedin.com/in/a', None, 'https://www.linkedin.com/in/c', ''],
+        'email': ['', '', 'c@x.com', ''],
+    })
+    assert count_salesql_lookups(df) == 1
+    assert count_salesql_lookups(df, limit=0) == 1
+    df2 = pd.DataFrame({'linkedin_url': [f'https://www.linkedin.com/in/{i}' for i in range(5)]})
+    assert count_salesql_lookups(df2, limit=3) == 3
+
+
+def test_run_message_says_found_n_of_m():
+    from dashboard import salesql_run_message
+
+    assert "found 0 of 7" in salesql_run_message(0, 7)
+    assert "found 3 of 7" in salesql_run_message(3, 7)
+    assert "already have" not in salesql_run_message(0, 7)
+
+
+def test_enrich_run_reports_found_and_looked_up(monkeypatch):
+    """A run where SalesQL misses everything reports found 0 of N, and the
+    rows stay counted as needing an email (no false 'all have emails')."""
+    import dashboard
+    from dashboard import enrich_profiles_with_salesql, has_email_mask
+
+    monkeypatch.setattr(dashboard, "_global_rate_limit_wait", lambda: None)
+    monkeypatch.setattr(dashboard, "get_usage_tracker", lambda: None)
+    monkeypatch.setattr(dashboard, "enrich_with_salesql",
+                        lambda url, key, personal_only=True, tracker=None: {'emails': [], 'error': 'Profile not found'})
+
+    df = pd.DataFrame({'linkedin_url': [f'https://www.linkedin.com/in/m{i}' for i in range(4)]})
+    out = enrich_profiles_with_salesql(df, "test-key", max_workers=2)
+    assert out.attrs['salesql_stats'] == {'looked_up': 4, 'found': 0}
+    assert int(has_email_mask(out).sum()) == 0
+
+
+# ---------------------------------------------------------------------------
+# SalesQL billing: a miss costs nothing (salesql-api skill billing rule)
+# ---------------------------------------------------------------------------
+
+def _logged(**kwargs):
+    from unittest.mock import MagicMock
+    from usage_tracker import UsageTracker
+
+    db = MagicMock()
+    db.insert.return_value = [{}]
+    UsageTracker(db).log_salesql(**kwargs)
+    return db.insert.call_args.args[1]
+
+
+def test_salesql_hit_logs_one_credit():
+    row = _logged(lookups=1, emails_found=1)
+    assert row['credits_used'] == 1
+    assert row['status'] == 'success'
+
+
+def test_salesql_miss_logs_zero_credits_but_keeps_the_row():
+    row = _logged(lookups=1, emails_found=0)
+    assert row['credits_used'] == 0
+    assert row['status'] == 'not_found'
+    assert row['request_count'] == 1
+
+
+def test_salesql_error_is_not_billed():
+    row = _logged(lookups=1, status='error', error_message='API error 500', billed=False)
+    assert row['credits_used'] == 0
+    assert row['status'] == 'error'

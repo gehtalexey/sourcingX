@@ -236,19 +236,29 @@ class UsageTracker:
         self,
         lookups: int = 1,
         emails_found: int = 0,
-        status: str = 'success',
+        status: str = None,
         error_message: str = None,
-        response_time_ms: int = None
+        response_time_ms: int = None,
+        billed: bool = None,
     ) -> Optional[dict]:
         """Log SalesQL email lookup usage.
 
-        SalesQL has 5000 lookups/day limit.
+        Billing rule (salesql-api skill): SalesQL charges a credit only for a
+        lookup that returns at least one email or phone. No-result lookups
+        are free, and with match_if_direct_email=true only a Direct email is
+        charged. So credits_used = lookups when billed, else 0. The row is
+        still written for a miss (status 'not_found') so the hit rate stays
+        auditable. `billed` defaults to "an email came back".
         """
+        if billed is None:
+            billed = emails_found > 0
+        if status is None:
+            status = 'success' if billed else 'not_found'
         return self.log_usage(
             provider='salesql',
             operation='email_lookup',
             request_count=lookups,
-            credits_used=lookups,  # Each lookup counts against daily limit
+            credits_used=lookups if billed else 0,
             status=status,
             error_message=error_message,
             response_time_ms=response_time_ms,
@@ -358,6 +368,109 @@ def calculate_openai_cost(tokens_input: int, tokens_output: int, model: str = 'g
         (tokens_input / 1_000_000) * pricing['input'] +
         (tokens_output / 1_000_000) * pricing['output']
     )
+
+
+# Fallback AI cost per screened candidate when there is no logged history for
+# the model yet. Screening makes 2 model calls per candidate (verdict + bonus
+# pass); ~$0.003 per candidate is the observed figure for gpt-5.6-luna
+# (the old token-based estimate was ~4x too low). Once a run is logged, the
+# real per-candidate cost from api_usage_logs replaces this.
+DEFAULT_SCREEN_COST_PER_CANDIDATE = 0.003
+
+# Two logged screening calls further apart than this belong to different runs.
+SCREEN_RUN_GAP_MINUTES = 10
+
+
+def cost_per_candidate_from_logs(rows: list, gap_minutes: int = SCREEN_RUN_GAP_MINUTES) -> Optional[float]:
+    """Real AI cost per candidate of the most recent screening run.
+
+    `rows` are api_usage_logs rows for one screening model (operation
+    'screen', any order). The latest run = the newest row plus every row
+    before it with no gap longer than `gap_minutes` between neighbours.
+    Cost per candidate (standard rate) = sum(cost_usd) / sum(metadata.profiles_screened);
+    the bonus-pass call logs profiles_screened=0, so its tokens count toward
+    cost without double-counting the candidate. Returns None when there is
+    nothing usable (no rows, no candidates, no cost)."""
+    parsed = []
+    for r in rows or []:
+        try:
+            ts = datetime.fromisoformat(str(r.get('created_at', '')).replace('Z', '+00:00'))
+        except ValueError:
+            continue
+        if ts.tzinfo is not None:
+            ts = ts.replace(tzinfo=None)
+        parsed.append((ts, r))
+    if not parsed:
+        return None
+    parsed.sort(key=lambda x: x[0], reverse=True)
+
+    run = [parsed[0][1]]
+    for (newer_ts, _), (ts, r) in zip(parsed, parsed[1:]):
+        if (newer_ts - ts).total_seconds() > gap_minutes * 60:
+            break
+        run.append(r)
+
+    # Normalise to the standard (non-flex) rate: a flex row was billed at
+    # half price, so double it back. The caller halves again when the next
+    # run is on flex.
+    cost = sum(
+        float(r.get('cost_usd') or 0) * (2 if (r.get('metadata') or {}).get('service_tier') == 'flex' else 1)
+        for r in run
+    )
+    candidates = sum(int((r.get('metadata') or {}).get('profiles_screened') or 0) for r in run)
+    if candidates <= 0 or cost <= 0:
+        return None
+    return cost / candidates
+
+
+def recent_screening_cost_per_candidate(db_client, model: str, limit: int = 1000) -> Optional[float]:
+    """Read recent api_usage_logs screening rows for `model` and return the
+    last run's real cost per candidate (see cost_per_candidate_from_logs).
+    Returns None on no history or any read failure."""
+    if not db_client or not model:
+        return None
+    try:
+        rows = db_client.select(
+            'api_usage_logs',
+            'created_at,cost_usd,metadata',
+            {
+                'operation': 'eq.screen',
+                'status': 'eq.success',
+                'metadata->>model': f'eq.{model}',
+            },
+            limit=limit,
+            order_by='created_at.desc',
+        )
+    except Exception as e:
+        print(f"[UsageTracker] Could not read screening history: {e}")
+        return None
+    return cost_per_candidate_from_logs(rows)
+
+
+def estimate_screening_cost(n_candidates: int, n_thin: int,
+                            recent_cost_per_candidate: Optional[float] = None) -> dict:
+    """What an AI Screen click will cost, before it runs.
+
+    n_candidates: profiles that will be screened.
+    n_thin: of those, profiles missing both skills and summary (and not on
+        the re-enrich cooldown) -- each gets a 1-credit Crustdata top-up.
+    recent_cost_per_candidate: last run's real AI $/candidate from the logs;
+        None falls back to DEFAULT_SCREEN_COST_PER_CANDIDATE.
+
+    Returns {crustdata_credits, crustdata_usd, ai_usd, ai_cost_per_candidate,
+    from_history}."""
+    n_candidates = max(0, int(n_candidates or 0))
+    n_thin = max(0, min(int(n_thin or 0), n_candidates))
+    from_history = bool(recent_cost_per_candidate and recent_cost_per_candidate > 0)
+    per_candidate = recent_cost_per_candidate if from_history else DEFAULT_SCREEN_COST_PER_CANDIDATE
+    credits = n_thin * CRUSTDATA_PRICING_V2_ENRICH['credits_per_profile_base']
+    return {
+        'crustdata_credits': credits,
+        'crustdata_usd': credits * CRUSTDATA_PRICING['cost_per_credit'],
+        'ai_usd': n_candidates * per_candidate,
+        'ai_cost_per_candidate': per_candidate,
+        'from_history': from_history,
+    }
 
 
 def track_api_call(tracker: UsageTracker, provider: str, operation: str):

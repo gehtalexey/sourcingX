@@ -4208,13 +4208,23 @@ _duration_cache = {}
 _DURATION_CACHE_MAX = 1000
 
 def _hash_profile_for_cache(raw: dict) -> str:
-    """Create a stable hash key for caching duration calculations."""
-    key_parts = [
-        raw.get('linkedin_url', '') or raw.get('linkedin_flagship_url', ''),
-        str(len(raw.get('past_employers') or [])),
-        str(len(raw.get('current_employers') or [])),
-    ]
-    return hashlib.md5('|'.join(key_parts).encode()).hexdigest()
+    """Create a stable hash key for caching duration calculations.
+
+    Keyed on the actual content compute_role_durations() reads (past/current
+    employers + skills), not on a URL field — ~55% of new-format profiles
+    have neither linkedin_url nor linkedin_flagship_url set (they use
+    linkedin_profile_url / flagship_profile_url instead), so keying on those
+    URL fields let two different candidates with the same job counts collide
+    on the same cache key and share cached durations.
+    """
+    content = {
+        'past': raw.get('past_employers'),
+        'current': raw.get('current_employers'),
+        'skills': raw.get('skills'),
+    }
+    return hashlib.md5(
+        json.dumps(content, sort_keys=True, default=str).encode()
+    ).hexdigest()
 
 def compute_role_durations_cached(raw: dict) -> str:
     """Cached wrapper for compute_role_durations - avoids recomputing for same profile."""
@@ -4235,6 +4245,29 @@ def compute_role_durations_cached(raw: dict) -> str:
 
     _duration_cache[cache_key] = result
     return result
+
+
+def _emp_field(emp, field):
+    """Read a job/employer entry field, old or new Crustdata profile shape.
+
+    Old shape (legacy `/screener/*` endpoints): employee_title, employer_name,
+    employee_description, employer_linkedin_description.
+    New shape (current enrichment endpoints, ~88% of stored profiles as of
+    2026-09): title, name (company), description (role description). No
+    employer-level description field exists in the new shape.
+
+    `field` is one of: 'title', 'company', 'description'. Anything else
+    falls back to a plain `.get(field)`.
+    """
+    if not isinstance(emp, dict):
+        return None
+    if field == 'title':
+        return emp.get('employee_title') or emp.get('title')
+    if field == 'company':
+        return emp.get('employer_name') or emp.get('name')
+    if field == 'description':
+        return emp.get('employee_description') or emp.get('description')
+    return emp.get(field)
 
 
 def compute_role_durations(raw):
@@ -4282,11 +4315,11 @@ def compute_role_durations(raw):
 
     for emp_key in ['past_employers', 'current_employers']:
         for emp in (raw.get(emp_key) or []):
-            title = (emp.get('employee_title') or '').strip()
+            title = (_emp_field(emp, 'title') or '').strip()
             if not title:
                 continue
             has_roles = True
-            company = emp.get('employer_name', '?')
+            company = _emp_field(emp, 'company') or '?'
             start = _parse_date(emp.get('start_date'))
             end, is_current = _role_end(emp, today)
             months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if start and end else 0
@@ -4401,19 +4434,19 @@ def compute_role_durations(raw):
     military_positions = []
     for emp_key in ['past_employers', 'current_employers']:
         for emp in (raw.get(emp_key) or []):
-            title = (emp.get('employee_title') or '').strip()
+            title = (_emp_field(emp, 'title') or '').strip()
             if not title:
                 continue
             start = _parse_date(emp.get('start_date'))
             end, _is_current_mil = _role_end(emp, today)
             if not start:
                 continue
-            is_military = is_military_position(title, emp.get('employer_name'))
+            is_military = is_military_position(title, _emp_field(emp, 'company'))
             all_starts.append(start)
             if is_military:
                 mil_months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if end else 0
                 military_months += mil_months
-                military_positions.append(f"{title} at {emp.get('employer_name', '?')} ({_fmt_duration(mil_months)})")
+                military_positions.append(f"{title} at {_emp_field(emp, 'company') or '?'} ({_fmt_duration(mil_months)})")
             else:
                 all_starts_non_mil.append(start)
 
@@ -4447,17 +4480,17 @@ def compute_role_durations(raw):
         swe_roles = []
         for emp_key in ['past_employers', 'current_employers']:
             for emp in (raw.get(emp_key) or []):
-                title = (emp.get('employee_title') or '').strip()
+                title = (_emp_field(emp, 'title') or '').strip()
                 if not title:
                     continue
                 title_lower = title.lower()
-                if is_military_position(title, emp.get('employer_name')):
+                if is_military_position(title, _emp_field(emp, 'company')):
                     continue
                 if any(kw in title_lower for kw in _swe_keywords):
                     start = _parse_date(emp.get('start_date'))
                     end, _is_current_swe = _role_end(emp, today)
                     months = max(0, (end.year - start.year) * 12 + (end.month - start.month)) if start and end else 0
-                    swe_roles.append(f'{title} at {emp.get("employer_name", "?")} ({_fmt_duration(months)})')
+                    swe_roles.append(f'{title} at {_emp_field(emp, "company") or "?"} ({_fmt_duration(months)})')
         if swe_roles:
             lines.append('')
             lines.append(f'SWE HALF-CREDIT CHECK: candidate has Software Engineer roles AND DevOps skills ({", ".join(list(devops_overlap)[:5])}):')
@@ -4478,25 +4511,31 @@ def trim_raw_profile(raw):
         return raw
 
     trimmed = {}
-    for key in ['name', 'title', 'headline', 'location', 'summary', 'skills',
+    for key in ['name', 'title', 'headline', 'summary', 'skills',
                 'languages', 'all_titles', 'all_employers', 'all_schools',
                 'all_degrees', 'linkedin_flagship_url', 'num_of_connections']:
         if key in raw:
             trimmed[key] = raw[key]
 
+    # Old profiles carry 'location'; new profiles carry 'region' instead.
+    # Keep it under the old key name so the prompt shape stays the same.
+    location = raw.get('location') or raw.get('region')
+    if location:
+        trimmed['location'] = location
+
     for emp_key in ['past_employers', 'current_employers']:
         if emp_key in raw:
             trimmed_emps = []
             for emp in (raw[emp_key] or []):
-                title = (emp.get('employee_title') or '').strip()
+                title = (_emp_field(emp, 'title') or '').strip()
                 if not title:
                     continue
                 trimmed_emps.append({
                     'employee_title': title,
-                    'employer_name': emp.get('employer_name'),
+                    'employer_name': _emp_field(emp, 'company'),
                     'start_date': emp.get('start_date'),
                     'end_date': emp.get('end_date'),
-                    'employee_description': emp.get('employee_description') or None,
+                    'employee_description': _emp_field(emp, 'description') or None,
                     'employer_description': _first_sentence(emp.get('employer_linkedin_description'))
                 })
             trimmed[emp_key] = trimmed_emps

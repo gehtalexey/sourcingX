@@ -159,6 +159,28 @@ class TestCurrentCompanyTenureMonths:
         assert months is not None
         assert 5 <= months <= 7
 
+    def test_new_format_single_current_employer(self):
+        """New Crustdata profile shape uses 'name' for company instead of
+        'employer_name' (~88% of stored profiles as of 2026-09) — must
+        compute tenure identically to the old shape."""
+        today = datetime.now(timezone.utc)
+        start_year = today.year if today.month > 6 else today.year - 1
+        start_month = today.month - 6 if today.month > 6 else today.month + 6
+        start_date = f"{start_year}-{start_month:02d}-01"
+        raw = {
+            "current_employers": [
+                {
+                    "name": "Acme Corp",
+                    "title": "Senior Backend Engineer",
+                    "start_date": start_date,
+                    "end_date": None,
+                }
+            ]
+        }
+        months = current_company_tenure_months(raw)
+        assert months is not None
+        assert 5 <= months <= 7
+
     def test_internal_promotion_does_not_reset_tenure(self):
         """Two current positions at the SAME company → tenure is from the
         EARLIEST start_date."""

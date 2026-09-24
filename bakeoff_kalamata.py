@@ -75,6 +75,12 @@ PRESCREEN_PREFIX = "[Prescreen]"
 
 DEFAULT_PROFILE_CHUNK = 150
 
+# fetch_profiles_by_urls' OR filter repeats the quoted URL list 3x
+# (linkedin_url.in, original_url.in, original_urls.ov) -- same batch size as
+# dashboard.py:596-601's "exact pass" for the same reason (PostgREST GET
+# query strings are rejected past ~20k chars).
+PROFILE_OR_CHUNK = 60
+
 
 # ============================================================================
 # Pure helpers -- no I/O, fully unit-testable.
@@ -182,6 +188,25 @@ def kalamata_reason(row: dict) -> str:
             if val:
                 return str(val)[:200]
     return ""
+
+
+def quote_url_list(urls) -> str:
+    """Comma-joined, double-quoted values for a PostgREST `in.(...)` (or
+    `ov.{...}`) filter -- matches dashboard.py:601
+    (`','.join(f'"{u}"' for u in batch)`). Without quoting, a URL is sent to
+    PostgREST as a bare, unescaped token; that's how dashboard.py's own fix at
+    that line came to exist."""
+    return ','.join(f'"{u}"' for u in urls)
+
+
+def preferred_match_url(row: dict) -> Optional[str]:
+    """The URL to match profiles / Luna verdicts against for a sample row --
+    prefer `profile_url` (the profiles.linkedin_url the row was actually
+    matched to, and what got written into the upload CSV Luna screened), and
+    fall back to the pipeline `linkedin_url` only when profile_url is missing
+    (e.g. an older sample.json written before profile_url existed)."""
+    raw = row.get("profile_url") or row.get("linkedin_url")
+    return normalize_linkedin_url(raw) or raw
 
 
 def deterministic_sample(candidates, k: int, seed: int) -> list:
@@ -314,20 +339,46 @@ def dedupe_candidates_by_url(rows: list) -> list:
     return list(best.values())
 
 
-def fetch_profiles_by_urls(client: SupabaseClient, urls, chunk_size: int = DEFAULT_PROFILE_CHUNK) -> dict:
+def fetch_profiles_by_urls(client: SupabaseClient, urls, chunk_size: int = PROFILE_OR_CHUNK) -> dict:
+    """Look up profiles by linkedin_url OR original_url OR original_urls --
+    pipeline URLs from kalamata are often aliases of the profile's stored
+    canonical URL, not the canonical URL itself (dashboard.py:596-613,
+    _fetch_candidate_profiles_for_urls). Mirrors that OR filter shape here,
+    and indexes the result under every normalized alias (linkedin_url,
+    original_url, each original_urls[] entry) so a lookup by any alias finds
+    the same profile row."""
     normalized = sorted({normalize_linkedin_url(u) or u for u in urls if u})
     by_url = {}
+    columns = "linkedin_url,raw_data,name,current_title,current_company,original_url,original_urls"
     for i in range(0, len(normalized), chunk_size):
         chunk = normalized[i:i + chunk_size]
-        rows = client.select(
-            "profiles",
-            "linkedin_url,raw_data,name,current_title,current_company",
-            filters={"linkedin_url": f"in.({','.join(chunk)})"},
-            limit=len(chunk),
-        )
+        quoted = quote_url_list(chunk)
+        filters = {
+            "or": (
+                f"(linkedin_url.in.({quoted}),"
+                f"original_url.in.({quoted}),"
+                f"original_urls.ov.{{{quoted}}})"
+            ),
+        }
+        try:
+            rows = client.select("profiles", columns, filters=filters, limit=len(chunk) * 5)
+        except Exception:
+            # Fallback if the combined OR is rejected (e.g. original_urls
+            # column missing on an un-migrated DB) -- plain linkedin_url
+            # lookup, matching dashboard.py:611-613.
+            rows = client.select(
+                "profiles", columns,
+                filters={"linkedin_url": f"in.({quoted})"},
+                limit=len(chunk),
+            )
         for row in rows:
-            key = normalize_linkedin_url(row.get("linkedin_url")) or row.get("linkedin_url")
-            by_url[key] = row
+            aliases = set()
+            for raw in (row.get("linkedin_url"), row.get("original_url"), *(row.get("original_urls") or [])):
+                norm = normalize_linkedin_url(raw) or raw
+                if norm:
+                    aliases.add(norm)
+            for alias in aliases:
+                by_url[alias] = row
     return by_url
 
 
@@ -336,9 +387,10 @@ def _fetch_screening_results(client: SupabaseClient, jd_hash: str, urls) -> list
     these URLs. Paged in chunks to stay clear of PostgREST's URL-length/row
     limits, same chunking as fetch_profiles_by_urls."""
     all_rows = []
-    urls = sorted(set(urls))
-    for i in range(0, len(urls), DEFAULT_PROFILE_CHUNK):
-        chunk = urls[i:i + DEFAULT_PROFILE_CHUNK]
+    normalized = sorted({normalize_linkedin_url(u) or u for u in urls if u})
+    for i in range(0, len(normalized), DEFAULT_PROFILE_CHUNK):
+        chunk = normalized[i:i + DEFAULT_PROFILE_CHUNK]
+        quoted = quote_url_list(chunk)
         rows = client.select(
             "screening_results",
             "linkedin_url,screening_score,screening_fit_level,screening_summary,"
@@ -346,7 +398,7 @@ def _fetch_screening_results(client: SupabaseClient, jd_hash: str, urls) -> list
             filters={
                 "source_project": "eq.sourcingx",
                 "jd_hash": f"eq.{jd_hash}",
-                "linkedin_url": f"in.({','.join(chunk)})",
+                "linkedin_url": f"in.({quoted})",
             },
             limit=len(chunk) * 5,
         )
@@ -402,7 +454,11 @@ def cmd_sample(args):
             norm = normalize_linkedin_url(row["linkedin_url"]) or row["linkedin_url"]
             profile = profiles_by_url.get(norm)
             if profile and is_eligible_profile(profile):
-                groups[group].append(row)
+                enriched = dict(row)
+                enriched["profile_url"] = (
+                    normalize_linkedin_url(profile.get("linkedin_url")) or profile.get("linkedin_url")
+                )
+                groups[group].append(enriched)
 
         pos_eligible = {g: len(groups.get(g, [])) for g in ("yes", "no_fullscreen", "no_prescreen")}
         eligible_counts[position_id] = pos_eligible
@@ -418,6 +474,7 @@ def cmd_sample(args):
                 picked_rows.append({
                     "position_id": position_id,
                     "linkedin_url": u,
+                    "profile_url": r.get("profile_url") or u,
                     "group": group,
                     "kalamata_verdict": "yes" if group == "yes" else "no",
                     "kalamata_score": r.get("screening_score"),
@@ -436,9 +493,12 @@ def cmd_sample(args):
     }, indent=2), encoding="utf-8")
     print(f"\nWrote {sample_path} ({len(picked_rows)} row(s))")
 
+    # Upload CSVs carry profile_url, not the pipeline linkedin_url: that's the
+    # profiles.linkedin_url the row matched to, and it's what the dashboard
+    # will load, screen, and save results under.
     by_position = defaultdict(set)
     for r in picked_rows:
-        by_position[r["position_id"]].add(r["linkedin_url"])
+        by_position[r["position_id"]].add(r["profile_url"])
     for position_id, urls in by_position.items():
         csv_path = out_dir / f"upload_{position_id}.csv"
         with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -479,14 +539,15 @@ def cmd_jev(args):
     todo = [r for r in rows if (r["position_id"], r["linkedin_url"]) not in done]
 
     client = _load_supabase_client()
-    profiles_by_url = fetch_profiles_by_urls(client, {r["linkedin_url"] for r in todo})
+    needed_urls = {r["linkedin_url"] for r in todo} | {r["profile_url"] for r in todo if r.get("profile_url")}
+    profiles_by_url = fetch_profiles_by_urls(client, needed_urls)
 
     if not args.yes:
         total_chars = 0
         for r in todo:
             brief = briefs.get(r["position_id"]) or {}
             jd = brief_to_job_description(brief)
-            profile = profiles_by_url.get(normalize_linkedin_url(r["linkedin_url"]) or r["linkedin_url"])
+            profile = profiles_by_url.get(preferred_match_url(r))
             if profile:
                 total_chars += estimate_jev_prompt_chars(profile, jd, brief)
         print(f"DRY RUN -- would make {len(todo)} Jev call(s), 0 made.")
@@ -509,7 +570,7 @@ def cmd_jev(args):
     def process(row):
         brief = briefs.get(row["position_id"]) or {}
         jd = brief_to_job_description(brief)
-        profile = profiles_by_url.get(normalize_linkedin_url(row["linkedin_url"]) or row["linkedin_url"])
+        profile = profiles_by_url.get(preferred_match_url(row))
         base = {"position_id": row["position_id"], "linkedin_url": row["linkedin_url"]}
         if not profile:
             return {**base, "jev_verdict": "", "jev_score": "", "jev_fit_level": "",
@@ -563,7 +624,9 @@ def cmd_report(args):
     jev_rows = _read_jev_csv(args.jev)
 
     client = _load_supabase_client()
-    all_urls = {r["linkedin_url"] for r in sample["rows"]}
+    all_urls = {r["linkedin_url"] for r in sample["rows"]} | {
+        r["profile_url"] for r in sample["rows"] if r.get("profile_url")
+    }
     profiles_by_url = fetch_profiles_by_urls(client, all_urls)
 
     luna_by_key = {}
@@ -571,7 +634,12 @@ def cmd_report(args):
         brief = briefs.get(position_id) or {}
         jd = brief_to_job_description(brief)
         jd_hash = compute_jd_hash(jd)
-        pos_urls = {r["linkedin_url"] for r in sample["rows"] if r["position_id"] == position_id}
+        pos_rows = [r for r in sample["rows"] if r["position_id"] == position_id]
+        # Luna may have saved verdicts under either the matched profile_url or
+        # the raw pipeline linkedin_url -- query for both variants.
+        pos_urls = {r["linkedin_url"] for r in pos_rows} | {
+            r["profile_url"] for r in pos_rows if r.get("profile_url")
+        }
         results = _fetch_screening_results(client, jd_hash, pos_urls)
 
         latest = {}
@@ -585,7 +653,7 @@ def cmd_report(args):
 
     bakeoff_rows = []
     for r in sample["rows"]:
-        norm_url = normalize_linkedin_url(r["linkedin_url"]) or r["linkedin_url"]
+        norm_url = preferred_match_url(r)
         profile = profiles_by_url.get(norm_url) or {}
         luna_row = luna_by_key.get((r["position_id"], norm_url))
         jev_row = jev_rows.get((r["position_id"], r["linkedin_url"]))

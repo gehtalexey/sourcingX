@@ -832,3 +832,193 @@ class TestBakeoffKalamata:
         assert len(result) == 1
         _, kwargs = fake_client.select.call_args
         assert kwargs.get("order_by") == "linkedin_url.asc"
+
+    # -- quote_url_list: every in.(...) / ov.{...} filter must be quoted --
+
+    def test_quote_url_list_wraps_each_value_in_double_quotes(self):
+        import bakeoff_kalamata as bk
+        assert bk.quote_url_list(["a", "b"]) == '"a","b"'
+        assert bk.quote_url_list(["https://www.linkedin.com/in/alice"]) == '"https://www.linkedin.com/in/alice"'
+        assert bk.quote_url_list([]) == ""
+
+    # -- preferred_match_url: profile_url wins, linkedin_url is the fallback --
+
+    def test_preferred_match_url_prefers_profile_url(self):
+        import bakeoff_kalamata as bk
+        row = {
+            "linkedin_url": "https://www.linkedin.com/in/pipeline-alias",
+            "profile_url": "https://www.linkedin.com/in/canonical-123",
+        }
+        assert bk.preferred_match_url(row) == "https://www.linkedin.com/in/canonical-123"
+
+    def test_preferred_match_url_falls_back_to_linkedin_url_when_missing(self):
+        import bakeoff_kalamata as bk
+        row = {"linkedin_url": "https://www.linkedin.com/in/pipeline-alias"}
+        assert bk.preferred_match_url(row) == "https://www.linkedin.com/in/pipeline-alias"
+        row_empty = {"linkedin_url": "https://www.linkedin.com/in/pipeline-alias", "profile_url": ""}
+        assert bk.preferred_match_url(row_empty) == "https://www.linkedin.com/in/pipeline-alias"
+
+    # -- fetch_profiles_by_urls: quoted OR filter across linkedin_url / --
+    # -- original_url / original_urls, indexed by every normalized alias --
+
+    def test_fetch_profiles_by_urls_uses_quoted_or_filter_across_url_columns(self):
+        import bakeoff_kalamata as bk
+        fake_client = MagicMock()
+        fake_client.select.return_value = []
+
+        bk.fetch_profiles_by_urls(fake_client, ["https://www.linkedin.com/in/alice"])
+
+        _, kwargs = fake_client.select.call_args
+        or_filter = kwargs["filters"]["or"]
+        assert '"https://www.linkedin.com/in/alice"' in or_filter
+        assert "linkedin_url.in.(" in or_filter
+        assert "original_url.in.(" in or_filter
+        assert "original_urls.ov.{" in or_filter
+
+    def test_fetch_profiles_by_urls_indexes_result_under_every_alias(self):
+        import bakeoff_kalamata as bk
+        fake_client = MagicMock()
+        fake_client.select.return_value = [
+            {
+                "linkedin_url": "https://www.linkedin.com/in/canonical-123",
+                "original_url": "https://www.linkedin.com/in/alt-name",
+                "original_urls": ["https://www.linkedin.com/in/third-alias"],
+                "name": "Alice",
+            }
+        ]
+
+        # A pipeline URL that only matches the profile's original_urls[] entry
+        # must still find the row -- that's the whole point of the OR filter.
+        by_url = bk.fetch_profiles_by_urls(fake_client, ["https://www.linkedin.com/in/third-alias"])
+
+        assert by_url["https://www.linkedin.com/in/canonical-123"]["name"] == "Alice"
+        assert by_url["https://www.linkedin.com/in/alt-name"]["name"] == "Alice"
+        assert by_url["https://www.linkedin.com/in/third-alias"]["name"] == "Alice"
+
+    def test_fetch_profiles_by_urls_falls_back_to_plain_linkedin_url_filter_on_error(self):
+        import bakeoff_kalamata as bk
+        fake_client = MagicMock()
+        fake_client.select.side_effect = [
+            Exception("original_urls column missing"),
+            [{"linkedin_url": "https://www.linkedin.com/in/alice"}],
+        ]
+
+        by_url = bk.fetch_profiles_by_urls(fake_client, ["https://www.linkedin.com/in/alice"])
+
+        assert "https://www.linkedin.com/in/alice" in by_url
+        assert fake_client.select.call_count == 2
+        _, fallback_kwargs = fake_client.select.call_args
+        assert "or" not in fallback_kwargs["filters"]
+        assert fallback_kwargs["filters"]["linkedin_url"] == 'in.("https://www.linkedin.com/in/alice")'
+
+    # -- _fetch_screening_results: normalize before chunking, quote the filter --
+
+    def test_fetch_screening_results_normalizes_and_quotes_urls(self):
+        import bakeoff_kalamata as bk
+        fake_client = MagicMock()
+        fake_client.select.return_value = []
+
+        bk._fetch_screening_results(fake_client, "somehash", ["linkedin.com/in/alice/"])
+
+        _, kwargs = fake_client.select.call_args
+        url_filter = kwargs["filters"]["linkedin_url"]
+        assert url_filter == 'in.("https://www.linkedin.com/in/alice")'
+
+    # -- sample: profile_url is captured and written into the upload CSV --
+
+    def test_cmd_sample_writes_profile_url_into_upload_csv(self, tmp_path, monkeypatch):
+        import bakeoff_kalamata as bk
+
+        fake_client = MagicMock()
+        fake_client.select.return_value = [
+            {
+                "position_id": "pos-a",
+                "linkedin_url": "https://www.linkedin.com/in/pipeline-alias",
+                "screening_result": "qualified",
+                "screening_score": 8,
+                "screening_notes": "",
+                "screening_detail": None,
+                "screened_at": "2026-01-01T00:00:00Z",
+            },
+        ]
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: fake_client)
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {
+            "https://www.linkedin.com/in/pipeline-alias": {
+                "linkedin_url": "https://www.linkedin.com/in/canonical-123",
+                "raw_data": {"skills": ["Python"]},
+            },
+        })
+
+        out_dir = tmp_path / "out"
+        args = argparse.Namespace(
+            positions=["pos-a"], per_group=5, seed=1, out_dir=str(out_dir),
+        )
+        bk.cmd_sample(args)
+
+        sample = json.loads((out_dir / "sample.json").read_text(encoding="utf-8"))
+        assert sample["rows"][0]["linkedin_url"] == "https://www.linkedin.com/in/pipeline-alias"
+        assert sample["rows"][0]["profile_url"] == "https://www.linkedin.com/in/canonical-123"
+
+        with open(out_dir / "upload_pos-a.csv", encoding="utf-8-sig", newline="") as f:
+            uploaded = [row["linkedin_url"] for row in csv.DictReader(f)]
+        assert uploaded == ["https://www.linkedin.com/in/canonical-123"]
+
+    # -- report: Luna rows are looked up by profile_url, not the pipeline URL --
+
+    def test_cmd_report_matches_luna_row_by_profile_url(self, tmp_path, monkeypatch):
+        import bakeoff_kalamata as bk
+
+        sample = {
+            "seed": 1,
+            "positions": ["pos-a"],
+            "rows": [
+                {
+                    "position_id": "pos-a",
+                    "linkedin_url": "https://www.linkedin.com/in/pipeline-alias",
+                    "profile_url": "https://www.linkedin.com/in/canonical-123",
+                    "group": "yes", "kalamata_verdict": "yes",
+                    "kalamata_score": 8, "kalamata_reason": "ok",
+                },
+            ],
+        }
+        sample_path = tmp_path / "sample.json"
+        sample_path.write_text(json.dumps(sample), encoding="utf-8")
+        briefs_path = tmp_path / "briefs.json"
+        briefs_path.write_text(json.dumps({"pos-a": {"role_context": "Backend Engineer"}}), encoding="utf-8")
+        jev_path = tmp_path / "jev.csv"
+        jev_path.write_text("", encoding="utf-8-sig")
+
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: object())
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {
+            "https://www.linkedin.com/in/canonical-123": {
+                "name": "Alice", "current_title": "Engineer", "current_company": "Acme",
+            },
+        })
+
+        captured_urls = {}
+
+        def _fake_fetch_screening_results(client, jd_hash, urls):
+            captured_urls["urls"] = set(urls)
+            return [{
+                "linkedin_url": "https://www.linkedin.com/in/canonical-123",
+                "screening_score": 7, "screening_fit_level": "Good Fit",
+                "screening_summary": "Strong fit", "screened_at": "2026-01-01T00:00:00Z",
+            }]
+
+        monkeypatch.setattr(bk, "_fetch_screening_results", _fake_fetch_screening_results)
+
+        out_dir = tmp_path / "out"
+        args = argparse.Namespace(
+            sample=str(sample_path), jev=str(jev_path), briefs=str(briefs_path),
+            out_dir=str(out_dir), seed=1,
+        )
+        bk.cmd_report(args)
+
+        # Queried for both the profile_url and pipeline linkedin_url variants.
+        assert "https://www.linkedin.com/in/canonical-123" in captured_urls["urls"]
+        assert "https://www.linkedin.com/in/pipeline-alias" in captured_urls["urls"]
+
+        report = json.loads((out_dir / "bakeoff.json").read_text(encoding="utf-8"))
+        row = report["rows"][0]
+        assert row["luna_verdict"] == "yes"
+        assert row["name"] == "Alice"

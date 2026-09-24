@@ -118,6 +118,7 @@ except ImportError:
 # Usage tracking module
 try:
     from usage_tracker import UsageTracker, calculate_openai_cost, OPENAI_PRICING
+    from usage_tracker import estimate_screening_cost, recent_screening_cost_per_candidate
     HAS_USAGE_TRACKER = True
 except ImportError:
     HAS_USAGE_TRACKER = False
@@ -1255,25 +1256,78 @@ def get_profile_count() -> int:
     return 0
 
 
+def _is_real_email(value) -> bool:
+    """True only for a string that looks like an actual address (has an '@').
+
+    The old check was "not NaN and not ''", which counts placeholders as a
+    found email: whitespace, the string 'nan'/'None' left by a str() cast,
+    or a CSV/export marker such as 'not found' / 'N/A'. Any of those made a
+    looked-up-and-missed profile count as "has email", which is how the UI
+    could say "All profiles already have emails!" after a lookup that found
+    nothing."""
+    return isinstance(value, str) and '@' in value.strip()
+
+
+def has_email_mask(df) -> 'pd.Series':
+    """Row mask: profile has a real email in `email` or `salesql_email`.
+    Single source of truth for every SalesQL count and for the skip logic in
+    enrich_profiles_with_salesql(), so the number on the button always equals
+    the number of lookups that actually run."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.Series([], dtype=bool)
+    mask = pd.Series([False] * len(df), index=df.index)
+    for col in ('salesql_email', 'email'):
+        if col in df.columns:
+            mask |= df[col].map(_is_real_email).astype(bool)
+    return mask
+
+
+_SALESQL_URL_COLS = ('linkedin_url', 'public_url', 'defaultProfileUrl', 'LinkedIn URL')
+
+
+def count_salesql_lookups(df, limit: int = None) -> int:
+    """How many SalesQL lookups enrich_profiles_with_salesql() will actually
+    run on `df`: rows with a LinkedIn URL and no real email, capped at
+    `limit`. This is the number the button shows before the click."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return 0
+    url_col = next((c for c in _SALESQL_URL_COLS if c in df.columns), None)
+    if not url_col:
+        return 0
+    has_url = df[url_col].map(lambda u: isinstance(u, str) and bool(u.strip()))
+    n = int((has_url & ~has_email_mask(df)).sum())
+    return min(n, limit) if limit else n
+
+
+def _show_salesql_last_result(key: str):
+    """Show (once) the 'found N of M' line saved by the last run. The run
+    ends with st.rerun(), which wipes any st.success() drawn before it, so
+    the message is carried across the rerun in session_state."""
+    msg = st.session_state.pop(key, None)
+    if msg:
+        st.success(msg)
+
+
+def salesql_run_message(found: int, looked_up: int) -> str:
+    """Result line shown after a SalesQL run: always 'found N of M'."""
+    if looked_up <= 0:
+        return "No lookups ran — nothing needed an email."
+    return f"SalesQL found {found} of {looked_up} emails ({looked_up} lookups, {found} credits)."
+
+
 def count_passed_email_split(df) -> tuple:
     """Return (have_email, need_email) counts for the passed-only enrichment UI.
 
-    'Has email' = either the `email` column or the `salesql_email` column is
-    populated (non-null, non-empty). Mirrors the skip logic in
-    `enrich_profiles_with_salesql` (dashboard.py:1763-1768) so the count shown
-    next to the SalesQL passed-only button never drifts from the count of
-    profiles that function actually processes.
+    'Has email' = has_email_mask(): a real address in `email` or
+    `salesql_email`. Same rule as the skip logic in
+    `enrich_profiles_with_salesql`, so the count shown next to the SalesQL
+    passed-only button never drifts from the profiles that function processes.
 
     Returns (0, 0) on empty/None input.
     """
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return (0, 0)
-    mask = pd.Series([False] * len(df), index=df.index)
-    if 'salesql_email' in df.columns:
-        mask |= (df['salesql_email'].notna() & (df['salesql_email'] != ''))
-    if 'email' in df.columns:
-        mask |= (df['email'].notna() & (df['email'] != ''))
-    have = int(mask.sum())
+    have = int(has_email_mask(df).sum())
     return (have, len(df) - have)
 
 
@@ -1799,13 +1853,16 @@ def enrich_with_salesql(linkedin_url: str, api_key: str, personal_only: bool = T
             if personal_only:
                 emails = [e for e in emails if e.get('type') == 'Direct']
 
-            # Log successful usage
+            # Log usage. SalesQL bills only a lookup that returns an email or
+            # phone (with match_if_direct_email: only a Direct email), so a
+            # miss is logged with 0 credits and status 'not_found'.
             if tracker:
+                _billed = bool(emails) or (not personal_only and bool(data.get('phones')))
                 tracker.log_salesql(
                     lookups=1,
                     emails_found=len(emails),
-                    status='success',
-                    response_time_ms=elapsed_ms
+                    response_time_ms=elapsed_ms,
+                    billed=_billed,
                 )
 
             return {
@@ -1817,7 +1874,7 @@ def enrich_with_salesql(linkedin_url: str, api_key: str, personal_only: bool = T
             }
         elif response.status_code == 404:
             if tracker:
-                tracker.log_salesql(lookups=1, status='success', response_time_ms=elapsed_ms)
+                tracker.log_salesql(lookups=1, status='not_found', response_time_ms=elapsed_ms, billed=False)
             return {'emails': [], 'error': 'Profile not found'}
         elif response.status_code == 429:
             if tracker:
@@ -1825,7 +1882,7 @@ def enrich_with_salesql(linkedin_url: str, api_key: str, personal_only: bool = T
             return {'emails': [], 'error': 'Rate limit exceeded'}
         else:
             if tracker:
-                tracker.log_salesql(lookups=1, status='error', error_message=f'API error {response.status_code}', response_time_ms=elapsed_ms)
+                tracker.log_salesql(lookups=1, status='error', error_message=f'API error {response.status_code}', response_time_ms=elapsed_ms, billed=False)
             return {'emails': [], 'error': f'API error {response.status_code}'}
     except Exception as e:
         elapsed_ms = int((time.time() - start_time) * 1000)
@@ -1871,17 +1928,15 @@ def enrich_profiles_with_salesql(profiles_df: pd.DataFrame, api_key: str, progre
     if 'salesql_email_type' not in df.columns:
         df['salesql_email_type'] = ''
 
-    # Count profiles that need enrichment (skip those with any email)
+    # Count profiles that need enrichment (skip those with a real email --
+    # same has_email_mask() rule the UI counts with)
+    _has_email = has_email_mask(df)
     needs_enrichment = []
     for idx, row in df.iterrows():
         linkedin_url = row.get(url_col)
         if not linkedin_url or pd.isna(linkedin_url):
             continue
-        # Skip if has SalesQL email
-        if row.get('salesql_email') and not pd.isna(row.get('salesql_email')) and row.get('salesql_email') != '':
-            continue
-        # Skip if has DB email
-        if row.get('email') and not pd.isna(row.get('email')) and row.get('email') != '':
+        if _has_email.get(idx, False):
             continue
         needs_enrichment.append((idx, linkedin_url))
 
@@ -1890,6 +1945,8 @@ def enrich_profiles_with_salesql(profiles_df: pd.DataFrame, api_key: str, progre
         needs_enrichment = needs_enrichment[:limit]
 
     total = len(needs_enrichment)
+    # Run stats for the "found N of M" message (read right after the call).
+    df.attrs['salesql_stats'] = {'looked_up': total, 'found': 0}
     if total == 0:
         return df
 
@@ -1945,6 +2002,7 @@ def enrich_profiles_with_salesql(profiles_df: pd.DataFrame, api_key: str, progre
         df.at[idx, 'salesql_email'] = email
         df.at[idx, 'salesql_email_type'] = email_type
 
+    df.attrs['salesql_stats'] = {'looked_up': total, 'found': len(results_map)}
     return df
 
 
@@ -5302,6 +5360,104 @@ def _thin_profile_on_cooldown(raw: dict) -> bool:
     return datetime.utcnow() - attempted_at < timedelta(hours=THIN_PROFILE_REENRICH_COOLDOWN_HOURS)
 
 
+def split_thin_profiles(profiles: list) -> tuple:
+    """Which profiles AI Screen will top up with a 1-credit Crustdata enrich.
+
+    Returns (thin_profiles, on_cooldown_urls): thin = missing BOTH skills and
+    summary and not on the re-enrich cooldown. Shared by
+    enrich_thin_profiles_for_batch (the charge) and the AI Screen cost line
+    (the estimate), so the number shown before the click is the number
+    charged."""
+    thin_profiles = []
+    cooldown_urls = []
+    for p in profiles or []:
+        if not isinstance(p, dict):
+            continue
+        url = p.get('linkedin_url')
+        if not url:
+            continue
+        # Fall back to the profile's own top-level flat skills/summary (e.g. a
+        # CSV-imported row with no nested raw blob at all) before deciding a
+        # profile is thin — mirrors screen_profile()'s own fallback ("Try to
+        # construct minimal profile from flat fields") a few lines below.
+        # Without this, a profile with no raw blob but perfectly usable flat
+        # fields gets misclassified as thin and enriched needlessly (Codex
+        # review, 2026-07-20).
+        # clean_value() coerces pandas/CSV NaN to None — a DataFrame-derived
+        # profile's missing skills/summary column is often literal
+        # float('nan'), and bool(float('nan')) is True in Python, so a raw
+        # truthiness check would treat a genuinely-missing value as present
+        # and skip enrichment for a profile that actually needs it (Codex
+        # review, 2026-07-20).
+        raw = _ensure_raw_dict(p.get('raw_crustdata') or p.get('raw_data'))
+        skills = clean_value(raw.get('skills')) or clean_value(p.get('skills'))
+        summary = clean_value(raw.get('summary')) or clean_value(p.get('summary'))
+        if not skills and not summary:
+            if _thin_profile_on_cooldown(raw):
+                # Already tried recently, already saved, still came back
+                # empty — don't re-buy the same answer every run.
+                cooldown_urls.append(url)
+                continue
+            thin_profiles.append(p)
+    return thin_profiles, cooldown_urls
+
+
+@st.cache_data(ttl=300, max_entries=20, show_spinner=False)
+def _fetch_thin_fields_from_db(_db_client, urls: tuple) -> dict:
+    """{url: {skills, summary, cooldown marker}} from each profile's DB
+    raw_data -- the same source fetch_raw_data_for_batch() fills in right
+    before screening. Keeps only the three keys thin-detection reads, so the
+    cached result stays small. Free (Supabase read, no paid API)."""
+    out = {}
+    for i in range(0, len(urls), 100):
+        chunk = [u for u in urls[i:i + 100] if u]
+        if not chunk:
+            continue
+        try:
+            url_filter = ','.join(f'"{u}"' for u in chunk)
+            rows = _db_client.select('profiles', 'linkedin_url,raw_data',
+                                     {'linkedin_url': f'in.({url_filter})'},
+                                     limit=len(chunk))
+        except Exception as e:
+            print(f"[Estimate] thin-profile lookup failed ({e})")
+            continue
+        for r in rows or []:
+            raw = _ensure_raw_dict(r.get('raw_data'))
+            out[r.get('linkedin_url')] = {
+                k: raw.get(k) for k in ('skills', 'summary', _THIN_LAST_ENRICH_ATTEMPT_KEY)
+            }
+    return out
+
+
+def count_thin_for_estimate(profiles: list, db_client=None) -> int:
+    """How many of `profiles` AI Screen will top up (1 Crustdata credit
+    each). Profiles with no raw data in memory get it from the DB first,
+    exactly as the screening run does, then split_thin_profiles() decides --
+    the same check and cooldown marker enrich_thin_profiles_for_batch
+    charges by."""
+    missing = tuple(
+        p.get('linkedin_url') for p in profiles or []
+        if isinstance(p, dict) and p.get('linkedin_url')
+        and not p.get('raw_crustdata') and not p.get('raw_data')
+    )
+    db_raw = _fetch_thin_fields_from_db(db_client, missing) if (missing and db_client) else {}
+    view = []
+    for p in profiles or []:
+        if (isinstance(p, dict) and not p.get('raw_crustdata') and not p.get('raw_data')
+                and p.get('linkedin_url') in db_raw):
+            p = {**p, 'raw_crustdata': db_raw[p['linkedin_url']]}
+        view.append(p)
+    thin, _cooldown = split_thin_profiles(view)
+    return len(thin)
+
+
+@st.cache_data(ttl=300, max_entries=10, show_spinner=False)
+def _cached_screen_cost_per_candidate(_db_client, model: str):
+    """Last screening run's real AI $/candidate for `model` (standard rate),
+    or None with no history. Cached 5 min so it isn't re-read every rerun."""
+    return recent_screening_cost_per_candidate(_db_client, model)
+
+
 def enrich_thin_profiles_for_batch(profiles: list, api_key: str, db_client=None,
                                     tracker: 'UsageTracker' = None) -> dict:
     """Top up any profile in this batch that's missing BOTH skills and a
@@ -5356,37 +5512,9 @@ def enrich_thin_profiles_for_batch(profiles: list, api_key: str, db_client=None,
         'on_cooldown': 0, 'on_cooldown_urls': [], 'credits_used': 0,
     }
 
-    thin_profiles = []
-    for p in profiles:
-        if not isinstance(p, dict):
-            continue
-        url = p.get('linkedin_url')
-        if not url:
-            continue
-        # Fall back to the profile's own top-level flat skills/summary (e.g. a
-        # CSV-imported row with no nested raw blob at all) before deciding a
-        # profile is thin — mirrors screen_profile()'s own fallback ("Try to
-        # construct minimal profile from flat fields") a few lines below.
-        # Without this, a profile with no raw blob but perfectly usable flat
-        # fields gets misclassified as thin and enriched needlessly (Codex
-        # review, 2026-07-20).
-        # clean_value() coerces pandas/CSV NaN to None — a DataFrame-derived
-        # profile's missing skills/summary column is often literal
-        # float('nan'), and bool(float('nan')) is True in Python, so a raw
-        # truthiness check would treat a genuinely-missing value as present
-        # and skip enrichment for a profile that actually needs it (Codex
-        # review, 2026-07-20).
-        raw = _ensure_raw_dict(p.get('raw_crustdata') or p.get('raw_data'))
-        skills = clean_value(raw.get('skills')) or clean_value(p.get('skills'))
-        summary = clean_value(raw.get('summary')) or clean_value(p.get('summary'))
-        if not skills and not summary:
-            if _thin_profile_on_cooldown(raw):
-                # Already tried recently, already saved, still came back
-                # empty — don't re-buy the same answer every run.
-                stats['on_cooldown'] += 1
-                stats['on_cooldown_urls'].append(url)
-                continue
-            thin_profiles.append(p)
+    thin_profiles, cooldown_urls = split_thin_profiles(profiles)
+    stats['on_cooldown'] = len(cooldown_urls)
+    stats['on_cooldown_urls'] = cooldown_urls
 
     stats['thin_found'] = len(thin_profiles)
     if not thin_profiles:
@@ -6321,6 +6449,7 @@ with tab_search:
                             limit=int(semantic_limit),
                             api_key=api_key,
                             filters=_sem_form_filters or None,
+                            tracker=get_usage_tracker(),
                         )
                         sem_shimmed = [
                             semantic_profile_to_legacy_shape(p)
@@ -6851,7 +6980,7 @@ with tab_search:
                     progress_placeholder.info("Searching Crustdata database...")
 
                     _exclude_urls = st.session_state.get('past_candidates_urls_for_search') or None
-                    results = _active_search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key, exclude_profiles=_exclude_urls)
+                    results = _active_search_people_db(filters, limit=min(search_limit, 1000), sorts=search_sorts, api_key=api_key, exclude_profiles=_exclude_urls, tracker=get_usage_tracker())
 
                     if results.get("profiles"):
                         # Name filter applied inline during pagination so we keep
@@ -6922,6 +7051,7 @@ with tab_search:
                                 sorts=search_sorts,
                                 api_key=api_key,
                                 exclude_profiles=_exclude_urls,
+                                tracker=get_usage_tracker(),
                             )
                             if page_results.get("profiles"):
                                 all_profiles.extend(_clean_page(page_results['profiles']))
@@ -7283,6 +7413,7 @@ with tab_search:
                                             cursor=cursor_val,
                                             api_key=api_key,
                                             filters=_lm_sem_p.get('filters') or None,
+                                            tracker=get_usage_tracker(),
                                         )
                                         raw['profiles'] = [
                                             semantic_profile_to_legacy_shape(p)
@@ -7343,6 +7474,7 @@ with tab_search:
                                             sorts=_lm_p.get('sorts'),
                                             api_key=api_key,
                                             exclude_profiles=_lm_p.get('past_candidates_urls_for_search') or None,
+                                            tracker=get_usage_tracker(),
                                         )
 
                                     _lm_names_set = set(_lm_p.get('past_candidates_names_for_search') or [])
@@ -7898,7 +8030,7 @@ with tab_upload:
                                 f"your database (no credits needed)."
                                 + _nf_line +
                                 f" **{len(_new_urls)}** need fresh enrichment "
-                                f"(~{len(_new_urls) * 3} credits)."
+                                f"(~{len(_new_urls)} credits, 1 per profile)."
                             )
                             _force_reenrich = st.checkbox(
                                 "Force re-enrich profiles already in DB (overwrites stored data)",
@@ -7910,7 +8042,7 @@ with tab_upload:
                             st.info(
                                 f"**0 of {len(_enrich_urls)}** profiles found in your database — "
                                 f"all **{len(_enrich_urls)}** need enrichment "
-                                f"(~{len(_enrich_urls) * 3} credits)."
+                                f"(~{len(_enrich_urls)} credits, 1 per profile)."
                             )
                             _force_reenrich = False
 
@@ -7933,7 +8065,7 @@ with tab_upload:
                                 st.caption("Nothing new to enrich — all profiles already in DB.")
                         with col_enrich2:
                             if _enrich_pool_size > 0:
-                                st.caption(f"**{_enrich_pool_size}** pending · 3 Crustdata credits each")
+                                st.caption(f"**{_enrich_pool_size}** pending · 1 Crustdata credit each (charged only on a match)")
                             else:
                                 st.caption("Tip: click *Load existing* to pull them into the Filter tab.")
 
@@ -8085,7 +8217,7 @@ with tab_upload:
                                     st.error(f"Failed to load existing: {_le}")
 
                         if _enrich_pool_size > 0 and st.button(
-                            f"Enrich {_max_enrich} profiles", type="primary", key="load_enrich_btn"
+                            f"Enrich {_max_enrich} profiles (up to {_max_enrich} credits)", type="primary", key="load_enrich_btn"
                         ):
                             _urls_to_enrich = _enrich_pool[:_max_enrich]
                             _enrich_results = []
@@ -9616,8 +9748,10 @@ with tab_filter:
                 _passed_salesql_key = load_salesql_key()
                 if _passed_salesql_key:
                     _passed_df_full = st.session_state.get('passed_candidates_df')
+                    _show_salesql_last_result('_salesql_result_filter_passed')
                     if _passed_df_full is not None and not _passed_df_full.empty:
                         _have_email, _need_email = count_passed_email_split(_passed_df_full)
+                        _n_lookups = count_salesql_lookups(_passed_df_full)
                         # Show the split so the user always knows the full picture:
                         # how many already have an email vs. how many would be enriched.
                         st.caption(
@@ -9625,9 +9759,13 @@ with tab_filter:
                             f"**{_have_email}** already have an email · "
                             f"**{_need_email}** need personal email"
                         )
-                        if _need_email > 0:
+                        if _n_lookups > 0:
+                            st.caption(
+                                f"Cost: {_n_lookups} SalesQL lookups — a credit is charged "
+                                f"only for each email found (up to {_n_lookups} credits)."
+                            )
                             if st.button(
-                                f"Enrich {_need_email} passed with personal email",
+                                f"Enrich {_need_email} passed with personal email ({_n_lookups} lookups)",
                                 key="filter_passed_salesql_personal",
                                 help="SalesQL personal-email enrichment on profiles that survived filtering. Skips profiles that already have an email.",
                             ):
@@ -9641,8 +9779,9 @@ with tab_filter:
                                     _passed_salesql_key,
                                     progress_callback=_passed_progress,
                                     personal_only=True,
-                                    limit=_need_email,
+                                    limit=_n_lookups,
                                 )
+                                _stats = _enriched_passed.attrs.get('salesql_stats', {})
                                 # Persist new emails to DB for cross-session reuse
                                 if HAS_DATABASE:
                                     _dbc = _get_db_client()
@@ -9661,14 +9800,14 @@ with tab_filter:
                                 st.session_state['passed_candidates_df'] = _enriched_passed
                                 st.session_state['results_df'] = _enriched_passed
                                 save_session_state()
-                                _new_emails = (
-                                    int(_enriched_passed['salesql_email'].notna().sum())
-                                    if 'salesql_email' in _enriched_passed.columns else 0
+                                st.session_state['_salesql_result_filter_passed'] = salesql_run_message(
+                                    _stats.get('found', 0), _stats.get('looked_up', 0)
                                 )
-                                st.success(f"Done. {_new_emails} passed profiles now have a personal email.")
                                 st.rerun()
-                        else:
+                        elif _need_email == 0:
                             st.caption("All passed profiles already have an email.")
+                        else:
+                            st.caption(f"{_need_email} passed profiles have no email but no LinkedIn URL to look up.")
                 else:
                     st.caption("SalesQL not configured.")
 
@@ -9936,17 +10075,17 @@ with tab_filter:
     st.markdown("### Email Enrichment (SalesQL)")
     salesql_key = load_salesql_key()
     if salesql_key:
-        current_df = get_profiles_df()
+        _show_salesql_last_result('_salesql_result_tab2')
+        # Count on the SAME DataFrame the button enriches (results_df). This
+        # used to count get_profiles_df() (enriched_df first) while enriching
+        # results_df, so the numbers could describe a different list.
+        current_df = st.session_state.get('results_df')
+        if not isinstance(current_df, pd.DataFrame):
+            current_df = pd.DataFrame()
         if not current_df.empty:
             current_count = len(current_df)
-            # Check both email fields (DB email and SalesQL email)
-            email_mask = pd.Series([False] * len(current_df), index=current_df.index)
-            if 'salesql_email' in current_df.columns:
-                email_mask |= (current_df['salesql_email'].notna() & (current_df['salesql_email'] != ''))
-            if 'email' in current_df.columns:
-                email_mask |= (current_df['email'].notna() & (current_df['email'] != ''))
-            already_enriched = email_mask.sum()
-            not_enriched = current_count - already_enriched
+            already_enriched = int(has_email_mask(current_df).sum())
+            not_enriched = count_salesql_lookups(current_df)
             st.caption(f"{current_count} profiles | {already_enriched} already have emails | {not_enriched} remaining")
 
             # Ask how many to enrich
@@ -9960,7 +10099,11 @@ with tab_filter:
                     else:
                         enrich_count = not_enriched
 
-                if st.button(f"Enrich {enrich_count} profiles with Emails", key="salesql_tab2", type="primary"):
+                st.caption(
+                    f"Cost: {enrich_count} SalesQL lookups — a credit is charged only for "
+                    f"each email found (up to {enrich_count} credits)."
+                )
+                if st.button(f"Enrich {enrich_count} profiles with Emails ({enrich_count} lookups)", key="salesql_tab2", type="primary"):
                     progress_bar = st.progress(0)
                     status_text = st.empty()
 
@@ -9991,11 +10134,15 @@ with tab_filter:
                                     st.caption(f"💾 Saved {result['saved']} emails to database")
                     st.session_state['results_df'] = enriched_df
                     save_session_state()  # Persist emails to session file
-                    new_emails = enriched_df['salesql_email'].notna().sum() if 'salesql_email' in enriched_df.columns else 0
-                    st.success(f"Done! {new_emails} profiles now have emails.")
+                    _stats = enriched_df.attrs.get('salesql_stats', {})
+                    st.session_state['_salesql_result_tab2'] = salesql_run_message(
+                        _stats.get('found', 0), _stats.get('looked_up', 0)
+                    )
                     st.rerun()
-            else:
+            elif already_enriched == current_count:
                 st.success("All profiles already have emails!")
+            else:
+                st.caption(f"{current_count - already_enriched} profiles have no email but no LinkedIn URL to look up.")
         else:
             st.info("Load profiles first to enrich with emails")
     else:
@@ -10122,9 +10269,39 @@ with tab_screening:
             model_input_cost /= 2
             model_output_cost /= 2
 
-        est_cost = (screen_count * 2500 * model_input_cost / 1_000_000) + (screen_count * output_tokens * model_output_cost / 1_000_000)
+        # Cost before the click: Crustdata top-ups for thin profiles (same
+        # detection + cooldown enrich_thin_profiles_for_batch charges by) plus
+        # AI cost from the last run's REAL $/candidate in api_usage_logs
+        # (2 model calls per candidate). The old token formula
+        # (2500 in / 150 out, one call) ignored the top-up and read ~4x low.
+        _est_existing = st.session_state.get('screening_results') or []
+        _est_screened = {r.get('linkedin_url') for r in _est_existing if r.get('linkedin_url')}
+        _est_df = profiles_df
+        if _est_screened and 'linkedin_url' in profiles_df.columns:
+            _unscreened_df = profiles_df[~profiles_df['linkedin_url'].isin(_est_screened)]
+            if not _unscreened_df.empty:
+                _est_df = _unscreened_df  # "Continue" screens the unscreened ones next
+        _est_profiles = _est_df.head(int(screen_count)).to_dict('records')
+        _est_db = _get_db_client() if HAS_DATABASE else None
+        try:
+            _n_thin = count_thin_for_estimate(_est_profiles, _est_db)
+        except Exception as e:
+            print(f"[Estimate] thin count failed ({e})")
+            _n_thin = 0
+        _recent_cpc = _cached_screen_cost_per_candidate(_est_db, ai_model) if _est_db else None
+        _est = estimate_screening_cost(len(_est_profiles), _n_thin, _recent_cpc)
+        _ai_usd = _est['ai_usd'] / 2 if use_flex_tier else _est['ai_usd']
         tier_label = " (flex)" if use_flex_tier else ""
-        st.info(f"Rubric: **Unified policy** | Model: **{ai_model}{tier_label}** | Est. cost: **${est_cost:.3f}**")
+        _ai_basis = (
+            f"last run: ${_est['ai_cost_per_candidate']:.4f}/candidate"
+            if _est['from_history'] else
+            f"no run logged yet, assuming ${_est['ai_cost_per_candidate']:.3f}/candidate"
+        )
+        st.info(
+            f"Rubric: **Unified policy** | Model: **{ai_model}{tier_label}**\n\n"
+            f"**{_n_thin} profiles need a top-up = {_est['crustdata_credits']} Crustdata credits** · "
+            f"**AI ≈ ${_ai_usd:.2f}** for {len(_est_profiles)} candidates ({_ai_basis})"
+        )
 
         # Debug: Show available fields and test single profile (admin-only)
         if is_admin_user():
@@ -10941,18 +11118,11 @@ with tab_screening:
                     enrich_df = screening_df.copy()
                     st.caption(f"All candidates: {len(enrich_df)}")
 
+                _show_salesql_last_result('_salesql_result_tab5')
                 current_count = len(enrich_df)
-                # Check both email fields (DB email and SalesQL email)
-                has_salesql = (enrich_df['salesql_email'].notna() & (enrich_df['salesql_email'] != '')).sum() if 'salesql_email' in enrich_df.columns else 0
-                has_db_email = (enrich_df['email'].notna() & (enrich_df['email'] != '')).sum() if 'email' in enrich_df.columns else 0
-                # Count profiles with ANY email (union, not sum)
-                email_mask = pd.Series([False] * len(enrich_df), index=enrich_df.index)
-                if 'salesql_email' in enrich_df.columns:
-                    email_mask |= (enrich_df['salesql_email'].notna() & (enrich_df['salesql_email'] != ''))
-                if 'email' in enrich_df.columns:
-                    email_mask |= (enrich_df['email'].notna() & (enrich_df['email'] != ''))
-                already_enriched = email_mask.sum()
-                not_enriched = current_count - already_enriched
+                # Count profiles with a REAL email in either field (see has_email_mask)
+                already_enriched = int(has_email_mask(enrich_df).sum())
+                not_enriched = count_salesql_lookups(enrich_df)
                 st.caption(f"{current_count} profiles | {already_enriched} already have emails | {not_enriched} remaining")
 
                 # Ask how many to enrich
@@ -10966,7 +11136,11 @@ with tab_screening:
                         else:
                             enrich_count = not_enriched
 
-                    if st.button(f"Enrich {enrich_count} profiles with Emails", key="salesql_tab5", type="primary"):
+                    st.caption(
+                        f"Cost: {enrich_count} SalesQL lookups — a credit is charged only for "
+                        f"each email found (up to {enrich_count} credits)."
+                    )
+                    if st.button(f"Enrich {enrich_count} profiles with Emails ({enrich_count} lookups)", key="salesql_tab5", type="primary"):
                         progress_bar = st.progress(0)
                         status_text = st.empty()
 
@@ -10992,8 +11166,11 @@ with tab_screening:
                                     if result['saved'] > 0:
                                         st.caption(f"💾 Saved {result['saved']} emails to database")
 
-                        # Merge enriched emails back into full screening results
-                        screening_df_updated = screening_df.copy()
+                        # Merge enriched emails back into the FULL screening results.
+                        # screening_df is only the rows the fit-level filter shows,
+                        # so writing it back used to drop every hidden row
+                        # (e.g. all NO GO results) from session state.
+                        screening_df_updated = pd.DataFrame(st.session_state.get('screening_results') or [])
                         if 'salesql_email' not in screening_df_updated.columns:
                             screening_df_updated['salesql_email'] = ''
                             screening_df_updated['salesql_email_type'] = ''
@@ -11008,11 +11185,20 @@ with tab_screening:
 
                         st.session_state['screening_results'] = screening_df_updated.to_dict('records')
                         save_session_state()  # Persist emails to session file
-                        new_emails = (enriched_df['salesql_email'].notna() & (enriched_df['salesql_email'] != '')).sum() if 'salesql_email' in enriched_df.columns else 0
-                        st.success(f"Done! Found {new_emails} emails.")
+                        _stats = enriched_df.attrs.get('salesql_stats', {})
+                        st.session_state['_salesql_result_tab5'] = salesql_run_message(
+                            _stats.get('found', 0), _stats.get('looked_up', 0)
+                        )
                         st.rerun()
-                else:
+                elif current_count == 0:
+                    # Empty group (e.g. "GO only" with no GO candidates, or the
+                    # fit filter above hides them). This used to fall through to
+                    # "All profiles already have emails!" -- 0 remaining of 0.
+                    st.info("No candidates in this group — nothing to look up.")
+                elif already_enriched == current_count:
                     st.success("All profiles already have emails!")
+                else:
+                    st.caption(f"{current_count - already_enriched} profiles have no email but no LinkedIn URL to look up.")
 
                 # Preview enriched profiles with emails
                 if 'salesql_email' in screening_df.columns:
@@ -12515,7 +12701,7 @@ with tab_database:
                 # Re-enrich profile section
                 st.divider()
                 st.markdown("#### Re-Enrich Profile")
-                st.caption("Refresh profile data from Crustdata API (useful for stale/incomplete profiles)")
+                st.caption("Refresh profile data from Crustdata API (useful for stale/incomplete profiles). Cost: 1 Crustdata credit.")
 
                 reenrich_url = st.text_input(
                     "LinkedIn URL",
@@ -12523,7 +12709,7 @@ with tab_database:
                     placeholder="https://www.linkedin.com/in/username"
                 )
 
-                if st.button("Re-Enrich Profile", key="reenrich_btn", type="primary"):
+                if st.button("Re-Enrich Profile (1 credit)", key="reenrich_btn", type="primary"):
                     if not reenrich_url:
                         st.warning("Please enter a LinkedIn URL")
                     elif not api_key or api_key == "YOUR_CRUSTDATA_API_KEY_HERE":
@@ -12867,7 +13053,7 @@ with tab_usage:
                         st.metric(
                             "Crustdata",
                             f"${crust_cost:.2f}",
-                            help="$1,500 for 150K credits (3 credits/profile, $0.03/profile)"
+                            help="$1,500 for 150K credits ($0.01/credit). Enrich: 1 credit/profile. Search: 3 credits per 100 results."
                         )
                         st.caption(f"{int(crustdata.get('credits', 0)):,} credits | {crustdata.get('requests', 0)} requests")
 
@@ -12878,7 +13064,10 @@ with tab_usage:
                             f"{int(salesql.get('lookups', 0)):,} lookups",
                             help="5,000/day limit"
                         )
-                        st.caption(f"{salesql.get('requests', 0)} requests")
+                        st.caption(
+                            f"{int(salesql.get('credits', 0)):,} credits (emails found) | "
+                            f"{salesql.get('requests', 0)} requests"
+                        )
 
                     with metric_cols[2]:
                         openai = summary.get('openai', {})

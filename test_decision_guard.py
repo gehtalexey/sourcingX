@@ -430,6 +430,25 @@ class TestResolveThreeStateDecision:
         assert decision == "NO GO"
         assert "STABILITY VERDICT" in note
 
+    def test_model_go_with_stability_fail_forced_to_no_go(self):
+        # Codex review (PR #144, round 1): a real hard filter must override
+        # a model GO too, not just a wrongly-lenient NEEDS VERIFICATION.
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], stability_failed=True,
+        )
+        assert decision == "NO GO"
+        assert "STABILITY VERDICT" in note
+
+    def test_model_go_with_hard_filter_named_forced_to_no_go(self):
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [],
+            hard_filter_failed="Telecom/outsourcing background, no exception requested",
+        )
+        assert decision == "NO GO"
+        assert "Telecom/outsourcing" in note
+
     def test_not_met_still_forces_no_go_even_with_hard_filter_set(self):
         must_haves = [
             {"text": "5+ years Python", "met": "not_met"},

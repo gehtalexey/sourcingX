@@ -4722,10 +4722,10 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
       1. Any not_met must-have or matched exclusion -> NO GO (existing
          guard, unchanged).
       2. Otherwise, if a generic hard filter / stability / experience-limit
-         failure applies: never flip to NEEDS VERIFICATION for it; if the
-         model itself said NEEDS VERIFICATION despite one of these
-         applying, correct it to NO GO. Otherwise leave the model's own
-         decision (typically already NO GO) untouched.
+         failure applies -> NO GO, for ANY decision that isn't already
+         NO GO (GO included, not just NEEDS VERIFICATION) -- a real hard
+         filter overrides a model GO just as much as it overrides a
+         wrongly-lenient NEEDS VERIFICATION.
       3. Otherwise, if >=1 must-have is needs_verification -> NEEDS
          VERIFICATION (unless the model already said so).
       4. Otherwise, the model's own decision, unchanged.
@@ -4739,7 +4739,7 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
     hard_filter_named = bool(str(hard_filter_failed or "").strip())
     other_hard_fail = hard_filter_named or stability_failed or experience_limit_failed
     if other_hard_fail:
-        if decision == "NEEDS VERIFICATION":
+        if decision != "NO GO":
             bits = []
             if hard_filter_named:
                 bits.append(str(hard_filter_failed).strip())
@@ -4748,7 +4748,7 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
             if experience_limit_failed:
                 bits.append("experience-limit check failed")
             reason = "; ".join(bits)
-            return ("NO GO", f"Auto-NO GO (hard filter applies, not a needs-verification case): {reason}.")
+            return ("NO GO", f"Auto-NO GO (hard filter applies): {reason}.")
         return (decision, "")
 
     needs_verif, needs_verif_items = _verdicts_needs_verification(must_have_verdicts)

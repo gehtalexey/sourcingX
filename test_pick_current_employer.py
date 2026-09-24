@@ -182,3 +182,133 @@ def test_normalize_crustdata_profile_uses_most_recent():
     assert result is not None
     assert result['current_company'] == 'Cytactic'
     assert result['current_title'] == 'Senior Software Engineer'
+
+
+# ---------------------------------------------------------------------------
+# email_generator.trim_profile_for_email — new Crustdata profile shape
+# ---------------------------------------------------------------------------
+#
+# Stored Crustdata profiles come in two job-entry shapes. OLD (legacy
+# /screener/* endpoints): employee_title, employer_name, employee_description,
+# employer_linkedin_description. NEW (~88% of stored profiles and ALL results
+# of the app's new search): title, name (company), description; location at
+# top level in `region` (not `location`).
+#
+# email_generator.py's trim_profile_for_email() used to read only the old
+# keys, so every new-format job was silently dropped, and
+# `trimmed.get('current_employers', [{}])[0]` raised IndexError once
+# current_employers existed but ended up empty after filtering. These tests
+# pin the fix.
+
+from email_generator import trim_profile_for_email
+
+
+def test_trim_profile_for_email_reads_new_format_jobs_and_location():
+    """A new-shape profile keeps its current and past jobs plus location,
+    and does not raise."""
+    raw = {
+        'name': 'Dana Cohen',
+        'region': 'Tel Aviv, Israel',
+        'current_employers': [
+            {
+                'title': 'Senior Backend Engineer',
+                'name': 'Wiz',
+                'description': 'Building cloud security infrastructure.',
+                'start_date': '2022-01-01T00:00:00',
+            }
+        ],
+        'past_employers': [
+            {
+                'title': 'Backend Engineer',
+                'name': 'Monday.com',
+                'description': 'Worked on the automations platform.',
+                'start_date': '2020-01-01T00:00:00',
+                'end_date': '2021-12-01T00:00:00',
+            }
+        ],
+    }
+
+    trimmed = trim_profile_for_email(raw)
+
+    assert trimmed['location'] == 'Tel Aviv, Israel'
+
+    assert len(trimmed['current_employers']) == 1
+    current = trimmed['current_employers'][0]
+    assert current['title'] == 'Senior Backend Engineer'
+    assert current['company'] == 'Wiz'
+    assert current['role_description'] == 'Building cloud security infrastructure.'
+
+    assert len(trimmed['past_employers']) == 1
+    past = trimmed['past_employers'][0]
+    assert past['title'] == 'Backend Engineer'
+    assert past['company'] == 'Monday'  # normalize_company_name strips ".com"
+
+
+def test_trim_profile_for_email_old_format_location_still_wins():
+    """Old-shape location field takes priority over region if both exist
+    (region should never override an explicit location)."""
+    raw = {
+        'name': 'Old Format',
+        'location': 'Haifa, Israel',
+        'region': 'Should not be used',
+    }
+    trimmed = trim_profile_for_email(raw)
+    assert trimmed['location'] == 'Haifa, Israel'
+
+
+def test_trim_profile_for_email_title_less_current_employers_does_not_raise():
+    """A profile whose current_employers entries are all title-less (neither
+    old nor new title key present) must not raise IndexError when the
+    career-pattern detection reads trimmed['current_employers'][0]."""
+    raw = {
+        'name': 'No Title',
+        'current_employers': [
+            {'name': 'Ghost Co', 'start_date': '2023-01-01'},
+        ],
+        'past_employers': [
+            {'title': 'Engineer', 'name': 'Real Co', 'start_date': '2019-01-01', 'end_date': '2022-01-01'},
+        ],
+    }
+
+    # Must not raise.
+    trimmed = trim_profile_for_email(raw)
+
+    assert trimmed['current_employers'] == []
+
+
+def test_trim_profile_for_email_old_format_unchanged():
+    """Old-shape output is unchanged by the new-shape fallback logic."""
+    raw = {
+        'name': 'Old Format Person',
+        'location': 'Herzliya, Israel',
+        'current_employers': [
+            {
+                'employee_title': 'VP Engineering',
+                'employer_name': 'Check Point Software Technologies',
+                'employee_description': 'Leads the platform org.',
+                'employer_linkedin_description': 'Cyber security vendor. Founded 1993.',
+                'start_date': '2019-01-01T00:00:00',
+            }
+        ],
+        'past_employers': [
+            {
+                'employee_title': 'Director',
+                'employer_name': 'CyberArk',
+                'start_date': '2015-01-01T00:00:00',
+                'end_date': '2021-12-01T00:00:00',
+            }
+        ],
+    }
+
+    trimmed = trim_profile_for_email(raw)
+
+    assert trimmed['location'] == 'Herzliya, Israel'
+    current = trimmed['current_employers'][0]
+    assert current['title'] == 'VP Engineering'
+    assert current['company'] == 'Check Point'
+    assert current['role_description'] == 'Leads the platform org.'
+    assert current['company_description'] == 'Cyber security vendor.'
+
+    past = trimmed['past_employers'][0]
+    assert past['title'] == 'Director'
+    assert past['company'] == 'CyberArk'

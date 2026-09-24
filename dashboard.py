@@ -6190,9 +6190,9 @@ with tab_search:
                             'query': semantic_query.strip(),
                             'limit': int(semantic_limit),
                         }
-                        # Deliberately NOT setting _pending_initial_save here (unlike the
-                        # filter search below). That flag background-saves results via
-                        # save_enriched_profiles_bulk(), which unconditionally stamps
+                        # Deliberately NOT saving these results to the DB (the filter
+                        # search below skips the save too). save_enriched_profiles_bulk()
+                        # unconditionally stamps
                         # enrichment_status='enriched' + enriched_at — but these profiles
                         # are known-incomplete (_semantic_incomplete, see
                         # semantic_profile_to_legacy_shape docstring). Marking them
@@ -6777,8 +6777,14 @@ with tab_search:
                             'past_candidates_urls_for_search': st.session_state.get('past_candidates_urls_for_search'),
                             'past_candidates_names_for_search': st.session_state.get('past_candidates_names_for_search'),
                         }
-                        # Defer DB save to after rerun so results render immediately
-                        st.session_state['_pending_initial_save'] = True
+                        # Deliberately NOT saving these results to the `profiles` table.
+                        # The new /person/search returns thin rows (no skills, no
+                        # summary), and save_enriched_profiles_bulk() would stamp them
+                        # enrichment_status='enriched', so every project sharing the DB
+                        # would skip the real enrichment they still need. Same rule as
+                        # the description search above. Profiles are saved only after
+                        # the 1-credit enrichment AI Screen runs
+                        # (enrich_thin_profiles_for_batch).
                         _removed_total = sum(_removed_counts.values())
                         if _removed_total > 0:
                             _parts = []
@@ -6852,22 +6858,6 @@ with tab_search:
             # Show search success message (deferred from search rerun)
             if '_search_loaded_msg' in st.session_state:
                 st.success(st.session_state.pop('_search_loaded_msg'))
-
-            # Show deferred Load More save result (stored before st.rerun())
-            if '_load_more_save_msg' in st.session_state:
-                st.caption(st.session_state.pop('_load_more_save_msg'))
-
-            # Background DB save — fires in a daemon thread so results render immediately
-            if st.session_state.get('_pending_initial_save'):
-                del st.session_state['_pending_initial_save']
-                db_client = _get_db_client()
-                if db_client:
-                    def _bg_save(client, profiles):
-                        try:
-                            save_enriched_profiles_bulk(client, profiles)
-                        except Exception:
-                            pass
-                    threading.Thread(target=_bg_save, args=(db_client, list(results)), daemon=True).start()
 
             # Results header
             res_col1, res_col2 = st.columns([2, 1])
@@ -7227,16 +7217,10 @@ with tab_search:
                                     new_indices = list(range(len(current_results), len(current_results) + len(new_profiles)))
                                     st.session_state['crustdata_search_selected'] = current_selected + new_indices
 
-                                    # Auto-save new page to Supabase (store result for display after rerun)
-                                    try:
-                                        db_client = _get_db_client()
-                                        if not db_client:
-                                            st.session_state['_load_more_save_msg'] = "DB save skipped: no database connection"
-                                        else:
-                                            bulk_result = save_enriched_profiles_bulk(db_client, new_profiles)
-                                            st.session_state['_load_more_save_msg'] = f"Saved {bulk_result['saved']}/{len(new_profiles)} to database"
-                                    except Exception as db_err:
-                                        st.session_state['_load_more_save_msg'] = f"DB save skipped: {db_err}"
+                                    # Deliberately NOT saving this page to the `profiles`
+                                    # table: search rows are thin (see the initial
+                                    # filter-search comment). They are saved only after
+                                    # AI Screen's 1-credit enrichment.
 
                                     # Refresh the saved-search row's result_urls so
                                     # "Load saved (free)" restores the full set including

@@ -402,3 +402,100 @@ class TestCheckCreditsNewHeaders:
             info = check_credits(api_key="test-key")
 
         assert info["remaining"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Thin filter-search rows must never be saved to the shared `profiles` table
+# ---------------------------------------------------------------------------
+#
+# /person/search returns thin rows (no skills, no summary).
+# save_enriched_profiles_bulk() stamps every row enrichment_status='enriched',
+# which would make every project sharing the database skip the real
+# enrichment those people still need. Rows are saved only after the 1-credit
+# enrichment (enrich_thin_profiles_for_batch, and the Enrich tab).
+
+
+class TestFilterSearchDoesNotSaveThinRows:
+    def _dashboard_save_calls(self):
+        import ast
+        import os
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.py")
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        calls = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+                if name == "save_enriched_profiles_bulk":
+                    calls.append(node)
+        return tree, calls
+
+    def test_dashboard_saves_only_enriched_profiles(self):
+        """The only save_enriched_profiles_bulk() calls left in dashboard.py
+        pass enriched profiles, never search results / Load More pages."""
+        import ast
+
+        _, calls = self._dashboard_save_calls()
+        saved_args = set()
+        for call in calls:
+            assert len(call.args) >= 2, ast.dump(call)
+            arg = call.args[1]
+            saved_args.add(arg.id if isinstance(arg, ast.Name) else ast.dump(arg))
+        assert saved_args == {"newly_enriched", "_enrich_successful"}
+        for forbidden in ("results", "new_profiles", "current_results", "profiles"):
+            assert forbidden not in saved_args
+
+    def test_dashboard_has_no_background_search_save(self):
+        """The old deferred background save of filter-search results is gone."""
+        import ast
+
+        tree, _ = self._dashboard_save_calls()
+        names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        assert "_bg_save" not in names
+        strings = {n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        assert "_pending_initial_save" not in strings
+        assert "_load_more_save_msg" not in strings
+
+    def _load_populate_script(self):
+        import importlib.util
+        import os
+
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "scripts", "populate_cyber_talent_map.py"
+        )
+        spec = importlib.util.spec_from_file_location("populate_cyber_talent_map", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_populate_script_does_not_save_and_survives_empty_skills(self, monkeypatch):
+        import db
+
+        mod = self._load_populate_script()
+        assert not hasattr(mod, "save_enriched_profiles_bulk")
+
+        thin_rows = [
+            {
+                "name": "A",
+                "linkedin_profile_url": "https://www.linkedin.com/in/a",
+                "current_employers": [{"name": "Acme", "title": "Security Engineer"}],
+            },
+            {"name": "B", "linkedin_profile_url": "https://www.linkedin.com/in/b"},
+        ]
+        monkeypatch.setattr(mod, "pull_all_profiles", lambda filters: (thin_rows, 2, 1))
+        monkeypatch.setattr(mod, "run_count_query", lambda filters: (0, 0))
+        spy = MagicMock()
+        monkeypatch.setattr(db, "save_enriched_profiles_bulk", spy)
+        logs = []
+        monkeypatch.setattr(mod, "log", logs.append)
+
+        result = mod.process_market("security-engineer", "Norway", client=MagicMock())
+
+        spy.assert_not_called()
+        assert result["saved"] == 0
+        assert result["analytics"]["topSkills"] == []
+        assert result["analytics"]["topEmployers"] == [{"name": "Acme", "count": 1}]
+        assert any("topSkills is empty" in line for line in logs)
+        assert any("not saving 2 search rows" in line for line in logs)

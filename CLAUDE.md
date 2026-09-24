@@ -45,7 +45,7 @@ sourcingX/
 ├── normalizers.py            # Data normalization (PhantomBuster/Crustdata formats)
 ├── helpers.py                # Display helpers, field extraction
 ├── usage_tracker.py          # API cost tracking across all providers
-├── enrich.py                 # Standalone Crustdata enrichment CLI
+├── (enrich.py removed 2026-09-24 — use the 1-credit batch enrichment)
 ├── error_handling.py         # Exception hierarchy, retry logic, circuit breaker
 ├── api_helpers.py            # Rate limiting (token bucket), safe API call wrappers
 ├── security.py               # Input validation, secrets protection
@@ -87,7 +87,7 @@ sourcingX/
 | `helpers.py` | Display helpers, field extraction from Crustdata responses | ~270 |
 | `db_migrations.py` | Migration management with checksum verification | ~250 |
 | `pb_dedup.py` | PhantomBuster post-scrape deduplication against database | ~190 |
-| `enrich.py` | Standalone Crustdata enrichment CLI utility | ~180 |
+| ~~`enrich.py`~~ | Removed 2026-09-24 (legacy 3-credit endpoint) in favour of the 1-credit batch enrichment (`batch_enrich_profiles()`) | |
 | `config.json` | API keys and Google Sheets URLs (DO NOT commit) | |
 
 ## Architecture Decisions

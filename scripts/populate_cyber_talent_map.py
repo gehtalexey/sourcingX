@@ -1,9 +1,16 @@
 """
 Populate the cyber-talent-map market data by pulling cyber-security
-professionals from Crustdata for a grid of roles x countries, saving them
-to the shared Supabase database via SourcingX's canonical save path, and
-computing per-market analytics into market-map.json for the
-cyber-talent-map website to read.
+professionals from Crustdata for a grid of roles x countries and computing
+per-market analytics into market-map.json for the cyber-talent-map website
+to read.
+
+Pulled profiles are NOT saved to the shared Supabase `profiles` table. The
+new Crustdata /person/search returns thin rows (no skills, no summary), and
+save_enriched_profiles_bulk() would stamp them enrichment_status='enriched',
+which makes every project sharing the database skip their real enrichment.
+Profiles reach `profiles` only through the 1-credit enrichment path. Because
+search rows carry no skills, topSkills is usually empty; the run logs that
+instead of failing.
 
 Usage (run from the SourcingX repo root so config.json loads):
     python scripts/populate_cyber_talent_map.py --only "security-researcher::Norway"
@@ -29,8 +36,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from crustdata_search import search_people_db  # noqa: E402
-from db import get_supabase_client, save_enriched_profiles_bulk  # noqa: E402
+from crustdata_search import search_people_db_v2  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +160,7 @@ def build_mobility_filters(base_filters: dict) -> dict:
 
 def run_count_query(filters: dict) -> tuple:
     """Run a limit:1 search just to read total_count. Returns (total_count, credits_used)."""
-    result = search_people_db(filters, limit=1)
+    result = search_people_db_v2(filters, limit=1)
     return result.get("total_count", 0), result.get("credits_used", 0)
 
 
@@ -163,7 +169,7 @@ def run_count_query(filters: dict) -> tuple:
 # ---------------------------------------------------------------------------
 
 def pull_all_profiles(filters: dict) -> tuple:
-    """Page through search_people_db until exhausted. Returns (profiles, total_count, credits_used)."""
+    """Page through search_people_db_v2 until exhausted. Returns (profiles, total_count, credits_used)."""
     profiles = []
     total_count = None
     cursor = None
@@ -172,7 +178,7 @@ def pull_all_profiles(filters: dict) -> tuple:
 
     while page_num < MAX_PAGES:
         page_num += 1
-        result = search_people_db(filters, limit=PAGE_LIMIT, cursor=cursor)
+        result = search_people_db_v2(filters, limit=PAGE_LIMIT, cursor=cursor)
         page_profiles = result.get("profiles", [])
         if total_count is None:
             total_count = result.get("total_count", len(page_profiles))
@@ -465,8 +471,8 @@ def is_valid_analytics(entry) -> bool:
 # Per-market processing
 # ---------------------------------------------------------------------------
 
-def process_market(role_key: str, country: str, client) -> dict:
-    """Pull, save, and compute analytics for one role x country market.
+def process_market(role_key: str, country: str) -> dict:
+    """Pull and compute analytics for one role x country market (no DB save).
 
     Returns a dict with keys: analytics, profiles_pulled, saved, errors,
     error_messages, total_count.
@@ -482,16 +488,13 @@ def process_market(role_key: str, country: str, client) -> dict:
     profiles, total_count, pull_credits = pull_all_profiles(filters)
     log(f"[{role_key}::{country}] pulled {len(profiles)} profiles (total_count={total_count})")
 
+    # Thin /person/search rows are never written to the shared `profiles`
+    # table (see module docstring). The saved/errors keys stay at zero so the
+    # run summary keeps its shape.
     save_stats = {"saved": 0, "errors": 0, "error_messages": []}
     if profiles:
-        log(f"[{role_key}::{country}] saving {len(profiles)} profiles to Supabase...")
-        save_stats = save_enriched_profiles_bulk(client, profiles)
-        log(f"[{role_key}::{country}] saved={save_stats['saved']} errors={save_stats['errors']}")
-        if save_stats["error_messages"]:
-            for msg in save_stats["error_messages"]:
-                log(f"    ERROR: {msg}")
-    else:
-        log(f"[{role_key}::{country}] no profiles returned, nothing to save")
+        log(f"[{role_key}::{country}] not saving {len(profiles)} search rows to Supabase "
+            f"(thin search results; profiles are saved only after enrichment)")
 
     log(f"[{role_key}::{country}] running seniorPlus/atStartups/mobility count queries...")
     senior_plus, senior_credits = run_count_query(build_senior_filters(filters))
@@ -503,6 +506,9 @@ def process_market(role_key: str, country: str, client) -> dict:
 
     analytics = compute_analytics(role_key, country, profiles, total_count,
                                    senior_plus, at_startups, mobility)
+    if not analytics["topSkills"]:
+        log(f"[{role_key}::{country}] topSkills is empty: the new Crustdata search "
+            f"does not return skills, so skills need enriched profiles")
 
     total_credits_used = pull_credits + count_credits_used
 
@@ -534,11 +540,6 @@ def main():
                         help="Process all 168 role x country markets. Big credit-consuming run.")
     args = parser.parse_args()
 
-    client = get_supabase_client()
-    if client is None:
-        log("ERROR: could not get Supabase client (check config.json)")
-        sys.exit(1)
-
     existing = load_existing_output()
 
     if args.only:
@@ -546,7 +547,7 @@ def main():
             log(f"ERROR: --only value must be 'role_key::country', got {args.only!r}")
             sys.exit(1)
         role_key, country = args.only.split("::", 1)
-        result = process_market(role_key, country, client)
+        result = process_market(role_key, country)
         market_id = f"{role_key}::{country}"
         existing[market_id] = result["analytics"]
         write_output(existing)
@@ -583,7 +584,7 @@ def main():
                     continue
 
                 try:
-                    result = process_market(role["key"], country, client)
+                    result = process_market(role["key"], country)
                 except Exception as e:
                     log(f"[{idx}/{total_markets}] {role['label']} × {country} -> FAILED: {e}")
                     failed.append({"market_id": market_id, "error": str(e)})

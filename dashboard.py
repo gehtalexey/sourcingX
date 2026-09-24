@@ -125,7 +125,6 @@ except ImportError:
 # Crustdata people search module
 try:
     from crustdata_search import (
-        search_people_db,
         search_people_db_v2,
         build_filters as build_search_filters,
         normalize_search_results_to_df,
@@ -142,25 +141,17 @@ try:
     )
     HAS_CRUSTDATA_SEARCH = True
 
-    # Crustdata's legacy /screener/persondb/search endpoint (compact=false)
-    # returns full profiles — skills/summary included — in one call, and is
-    # cheaper/richer than the new v2025-11-01 /person/search endpoint, which
-    # never returns skills/summary regardless of what's requested. Crustdata
-    # has confirmed the legacy endpoint stays live until end of September
-    # 2026, so this branch's search-endpoint migration ships DISABLED by
-    # default — search_people_db() (legacy) stays the default search
-    # function everywhere in this file. The auto-fill-before-screening step
-    # (enrich_thin_profiles_for_batch, already live since 2026-07-20) already
-    # covers thin profiles regardless of which search sourced them, so
-    # flipping this one flag is the only change needed when the legacy
-    # endpoint is retired — nothing else in this file changes. Flip via
-    # CRUSTDATA_USE_SEARCH_V2=true in the environment (not config.json —
-    # this is a deploy-time switch, not a per-user setting).
-    CRUSTDATA_USE_SEARCH_V2 = os.environ.get('CRUSTDATA_USE_SEARCH_V2', 'false').strip().lower() == 'true'
-    _active_search_people_db = search_people_db_v2 if CRUSTDATA_USE_SEARCH_V2 else search_people_db
+    # Filter search always uses the new v2025-11-01 POST /person/search
+    # endpoint. Crustdata stops serving every legacy /screener/* endpoint on
+    # 2026-09-30, so the old CRUSTDATA_USE_SEARCH_V2 switch (which kept the
+    # legacy search_people_db() as the default) is gone. The new endpoint
+    # never returns skills/summary; enrich_thin_profiles_for_batch tops
+    # those profiles up via the 1-credit new batch enrich right before AI
+    # Screen, so screening quality does not depend on which search sourced
+    # a profile.
+    _active_search_people_db = search_people_db_v2
 except ImportError:
     HAS_CRUSTDATA_SEARCH = False
-    CRUSTDATA_USE_SEARCH_V2 = False
 
 # Plotly for charts
 try:
@@ -5138,7 +5129,8 @@ def enrich_thin_profiles_for_batch(profiles: list, api_key: str, db_client=None,
 
     Why this exists: the description-search beta (search_people_semantic,
     via semantic_profile_to_legacy_shape) doesn't return skills/summary —
-    only the regular filter search (search_people_db, compact=false) does.
+    neither does the regular filter search (search_people_db_v2, the new
+    /person/search endpoint).
     This is the auto-fill step that keeps AI Screen quality unchanged
     regardless of which search sourced a profile — it's endpoint-agnostic,
     so it also covers any future search path (e.g. a filter-search
@@ -6198,9 +6190,9 @@ with tab_search:
                             'query': semantic_query.strip(),
                             'limit': int(semantic_limit),
                         }
-                        # Deliberately NOT setting _pending_initial_save here (unlike the
-                        # filter search below). That flag background-saves results via
-                        # save_enriched_profiles_bulk(), which unconditionally stamps
+                        # Deliberately NOT saving these results to the DB (the filter
+                        # search below skips the save too). save_enriched_profiles_bulk()
+                        # unconditionally stamps
                         # enrichment_status='enriched' + enriched_at — but these profiles
                         # are known-incomplete (_semantic_incomplete, see
                         # semantic_profile_to_legacy_shape docstring). Marking them
@@ -6785,8 +6777,14 @@ with tab_search:
                             'past_candidates_urls_for_search': st.session_state.get('past_candidates_urls_for_search'),
                             'past_candidates_names_for_search': st.session_state.get('past_candidates_names_for_search'),
                         }
-                        # Defer DB save to after rerun so results render immediately
-                        st.session_state['_pending_initial_save'] = True
+                        # Deliberately NOT saving these results to the `profiles` table.
+                        # The new /person/search returns thin rows (no skills, no
+                        # summary), and save_enriched_profiles_bulk() would stamp them
+                        # enrichment_status='enriched', so every project sharing the DB
+                        # would skip the real enrichment they still need. Same rule as
+                        # the description search above. Profiles are saved only after
+                        # the 1-credit enrichment AI Screen runs
+                        # (enrich_thin_profiles_for_batch).
                         _removed_total = sum(_removed_counts.values())
                         if _removed_total > 0:
                             _parts = []
@@ -6860,22 +6858,6 @@ with tab_search:
             # Show search success message (deferred from search rerun)
             if '_search_loaded_msg' in st.session_state:
                 st.success(st.session_state.pop('_search_loaded_msg'))
-
-            # Show deferred Load More save result (stored before st.rerun())
-            if '_load_more_save_msg' in st.session_state:
-                st.caption(st.session_state.pop('_load_more_save_msg'))
-
-            # Background DB save — fires in a daemon thread so results render immediately
-            if st.session_state.get('_pending_initial_save'):
-                del st.session_state['_pending_initial_save']
-                db_client = _get_db_client()
-                if db_client:
-                    def _bg_save(client, profiles):
-                        try:
-                            save_enriched_profiles_bulk(client, profiles)
-                        except Exception:
-                            pass
-                    threading.Thread(target=_bg_save, args=(db_client, list(results)), daemon=True).start()
 
             # Results header
             res_col1, res_col2 = st.columns([2, 1])
@@ -7235,16 +7217,10 @@ with tab_search:
                                     new_indices = list(range(len(current_results), len(current_results) + len(new_profiles)))
                                     st.session_state['crustdata_search_selected'] = current_selected + new_indices
 
-                                    # Auto-save new page to Supabase (store result for display after rerun)
-                                    try:
-                                        db_client = _get_db_client()
-                                        if not db_client:
-                                            st.session_state['_load_more_save_msg'] = "DB save skipped: no database connection"
-                                        else:
-                                            bulk_result = save_enriched_profiles_bulk(db_client, new_profiles)
-                                            st.session_state['_load_more_save_msg'] = f"Saved {bulk_result['saved']}/{len(new_profiles)} to database"
-                                    except Exception as db_err:
-                                        st.session_state['_load_more_save_msg'] = f"DB save skipped: {db_err}"
+                                    # Deliberately NOT saving this page to the `profiles`
+                                    # table: search rows are thin (see the initial
+                                    # filter-search comment). They are saved only after
+                                    # AI Screen's 1-credit enrichment.
 
                                     # Refresh the saved-search row's result_urls so
                                     # "Load saved (free)" restores the full set including

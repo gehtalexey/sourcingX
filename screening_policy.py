@@ -163,11 +163,13 @@ Return ONLY this JSON object, no prose, no markdown:
 {
   "must_haves": [{"text": "<must-have, verbatim>", "met": "met" or "not_met" or "needs_verification", "evidence": "<one sentence>"}],
   "exclusions": [{"text": "<exclusion, verbatim>", "matched": true or false, "why": "<if matched: the specific evidence from the profile that triggered it — title/company/dates for employment exclusions, or the relevant field (location, language, etc.) for others — if you can't cite one, it did not match>"}],
+  "hard_filter_failed": "<name the generic Hard Filter / STABILITY VERDICT / EXPERIENCE LIMIT CHECK rule this profile fails, citing the evidence, if your NO GO is NOT caused by a not_met must-have or a matched exclusion above -- otherwise empty string>",
   "decision": "GO" or "NO GO" or "NEEDS VERIFICATION",
   "score": integer 1-10,
   "reasoning": "2-3 sentences: strongest signal, biggest concern, why GO/NO GO/NEEDS VERIFICATION."
 }
 Give an explicit verdict on every must-have and every exclusion before deciding. GO only when every must-have is met and no exclusion matched. See the Must-Have Verdict rule above: "met" requires positive evidence, "not_met" requires a contradiction, and unproven/absent evidence is "needs_verification" — never "not_met". Decision: any not_met or matched exclusion -> NO GO (name the contradiction). No not_met and no matched exclusion, but at least one needs_verification -> NEEDS VERIFICATION (never NO GO for this). All met and no exclusion matched -> GO. A legacy boolean for "met" is also accepted for backward compatibility: true = met, false = not_met.
+A NO GO can also come from something outside the must-haves/exclusions lists entirely — the generic Hard Filters (job hopper, career arc predominantly non-tech, telecom/banking/outsourcing, 8+ years stagnation), the pre-computed STABILITY VERDICT FAIL, or a recruiter-stated experience-years ceiling the candidate's INDUSTRY EXPERIENCE exceeds. Whenever THAT is your reason for NO GO (not a not_met must-have or matched exclusion), name it in "hard_filter_failed" -- this keeps a real hard-filter rejection from ever being mistaken for a merely-unproven must-have.
 
 Today's date: {today}
 """

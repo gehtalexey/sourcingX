@@ -35,6 +35,8 @@ from dashboard import (
     _must_have_verdict_state,
     _verdicts_needs_verification,
     _decision_to_fit_label,
+    _stability_verdict_failed,
+    _resolve_three_state_decision,
 )
 
 
@@ -358,3 +360,89 @@ class TestPolicyNoLongerTreatsMissingEvidenceAsFail:
         assert "needs_verification" in SCREENING_POLICY
         assert "absence of evidence is never" in SCREENING_POLICY.lower() or \
                "absence of evidence is NEVER" in SCREENING_POLICY
+
+
+class TestStabilityVerdictFailed:
+    """_stability_verdict_failed(durations_text) -> bool. Parses the exact
+    STABILITY VERDICT marker compute_role_durations() emits."""
+
+    def test_fail_marker_detected(self):
+        text = "some lines\n>>> STABILITY VERDICT: FAIL — 3 short-stint companies >= 3 → MAX SCORE 4 <<<\nmore"
+        assert _stability_verdict_failed(text) is True
+
+    def test_pass_marker_not_a_failure(self):
+        text = "some lines\n>>> STABILITY VERDICT: PASS <<<\nmore"
+        assert _stability_verdict_failed(text) is False
+
+    def test_empty_or_none_text_not_a_failure(self):
+        assert _stability_verdict_failed("") is False
+        assert _stability_verdict_failed(None) is False
+
+
+class TestResolveThreeStateDecision:
+    """_resolve_three_state_decision(...) -> (decision, note). The
+    combined guard used by screen_profile(): must-have/exclusion
+    contradictions still force NO GO; a generic hard filter / STABILITY
+    VERDICT FAIL is never mistaken for a merely-unproven must-have and
+    flipped into NEEDS VERIFICATION; only a genuinely unproven-but-not-
+    contradicted must-have (with no hard filter involved) becomes NEEDS
+    VERIFICATION."""
+
+    def test_model_no_go_with_hard_filter_named_stays_no_go(self):
+        must_haves = [{"text": "EU-based", "met": "needs_verification"}]
+        decision, note = _resolve_three_state_decision(
+            "NO GO", must_haves, [],
+            hard_filter_failed="Job hopper: 4 roles under 1 year",
+        )
+        assert decision == "NO GO"
+        assert note == ""  # model's own NO GO + reasoning is preserved as-is
+
+    def test_model_no_go_with_stability_fail_stays_no_go(self):
+        must_haves = [{"text": "EU-based", "met": "needs_verification"}]
+        decision, note = _resolve_three_state_decision(
+            "NO GO", must_haves, [], stability_failed=True,
+        )
+        assert decision == "NO GO"
+        assert note == ""
+
+    def test_model_no_go_with_nothing_failed_becomes_needs_verification(self):
+        must_haves = [{"text": "EU-based", "met": "needs_verification"}]
+        decision, note = _resolve_three_state_decision("NO GO", must_haves, [])
+        assert decision == "NEEDS VERIFICATION"
+        assert "EU-based" in note
+
+    def test_model_needs_verification_with_hard_filter_forced_to_no_go(self):
+        # The model itself said NEEDS VERIFICATION, but a real hard filter
+        # applies -- that must win, never stay as a soft "check this".
+        must_haves = [{"text": "EU-based", "met": "needs_verification"}]
+        decision, note = _resolve_three_state_decision(
+            "NEEDS VERIFICATION", must_haves, [],
+            hard_filter_failed="Career arc predominantly non-tech",
+        )
+        assert decision == "NO GO"
+        assert "Career arc predominantly non-tech" in note
+
+    def test_model_needs_verification_with_stability_fail_forced_to_no_go(self):
+        must_haves = [{"text": "EU-based", "met": "needs_verification"}]
+        decision, note = _resolve_three_state_decision(
+            "NEEDS VERIFICATION", must_haves, [], stability_failed=True,
+        )
+        assert decision == "NO GO"
+        assert "STABILITY VERDICT" in note
+
+    def test_not_met_still_forces_no_go_even_with_hard_filter_set(self):
+        must_haves = [
+            {"text": "5+ years Python", "met": "not_met"},
+            {"text": "EU-based", "met": "needs_verification"},
+        ]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], hard_filter_failed="irrelevant",
+        )
+        assert decision == "NO GO"
+        assert "5+ years Python" in note
+
+    def test_all_met_no_hard_filter_stays_go(self):
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        decision, note = _resolve_three_state_decision("GO", must_haves, [])
+        assert decision == "GO"
+        assert note == ""

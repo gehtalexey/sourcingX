@@ -4681,6 +4681,83 @@ def _verdicts_needs_verification(must_have_verdicts):
     return (bool(items), items)
 
 
+def _stability_verdict_failed(durations_text: str) -> bool:
+    """True when compute_role_durations()'s pre-computed STABILITY VERDICT
+    for this profile is FAIL (3+ short-stint companies) -- the ONE hard
+    filter that has a real Python-computed pass/fail signal today. Parses
+    the exact marker text the model is instructed to treat as a hard cap;
+    never recomputed differently. (The EXPERIENCE LIMIT CHECK block, by
+    contrast, only gives the model interpretation guidance for a
+    recruiter-stated years limit -- it never computes a pass/fail itself,
+    so there is no equivalent deterministic signal to check here.)"""
+    return bool(durations_text) and "STABILITY VERDICT: FAIL" in durations_text
+
+
+def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdicts,
+                                   hard_filter_failed=None, stability_failed=False,
+                                   experience_limit_failed=False):
+    """Deterministically resolve the final GO / NO GO / NEEDS VERIFICATION
+    decision. Combines the existing must-have/exclusion guard with two
+    Python-side signals that live OUTSIDE the must-have/exclusion lists, so
+    a real hard-filter rejection (job hopper, non-tech career arc,
+    telecom/outsourcing, 8+yr stagnation, STABILITY VERDICT FAIL, an
+    experience-years ceiling) is never mistaken for a merely-unproven
+    must-have and flipped into NEEDS VERIFICATION.
+
+    Args:
+        decision: the model's own top-level decision string.
+        must_have_verdicts / exclusion_verdicts: per-criterion verdict lists.
+        hard_filter_failed: the model's own free-text name of a generic
+            Hard Filter it applied (empty/None means it didn't cite one).
+        stability_failed: Python-computed STABILITY VERDICT is FAIL (see
+            _stability_verdict_failed).
+        experience_limit_failed: reserved for a future Python-computed
+            experience-ceiling check; always False today because no such
+            deterministic check exists in this codebase yet.
+
+    Returns (decision: str, note: str) -- note is '' when nothing was
+    overridden.
+
+    Resolution order:
+      1. Any not_met must-have or matched exclusion -> NO GO (existing
+         guard, unchanged).
+      2. Otherwise, if a generic hard filter / stability / experience-limit
+         failure applies: never flip to NEEDS VERIFICATION for it; if the
+         model itself said NEEDS VERIFICATION despite one of these
+         applying, correct it to NO GO. Otherwise leave the model's own
+         decision (typically already NO GO) untouched.
+      3. Otherwise, if >=1 must-have is needs_verification -> NEEDS
+         VERIFICATION (unless the model already said so).
+      4. Otherwise, the model's own decision, unchanged.
+    """
+    force_no_go, guard_reason = _verdicts_force_no_go(must_have_verdicts, exclusion_verdicts)
+    if force_no_go:
+        if decision != "NO GO":
+            return ("NO GO", f"Auto-NO GO (model verdicts contradicted its GO): {guard_reason}.")
+        return (decision, "")
+
+    hard_filter_named = bool(str(hard_filter_failed or "").strip())
+    other_hard_fail = hard_filter_named or stability_failed or experience_limit_failed
+    if other_hard_fail:
+        if decision == "NEEDS VERIFICATION":
+            bits = []
+            if hard_filter_named:
+                bits.append(str(hard_filter_failed).strip())
+            if stability_failed:
+                bits.append("STABILITY VERDICT: FAIL (3+ short-stint companies)")
+            if experience_limit_failed:
+                bits.append("experience-limit check failed")
+            reason = "; ".join(bits)
+            return ("NO GO", f"Auto-NO GO (hard filter applies, not a needs-verification case): {reason}.")
+        return (decision, "")
+
+    needs_verif, needs_verif_items = _verdicts_needs_verification(must_have_verdicts)
+    if needs_verif and decision != "NEEDS VERIFICATION":
+        return ("NEEDS VERIFICATION", "Needs verification: " + "; ".join(needs_verif_items))
+
+    return (decision, "")
+
+
 _DEFAULT_USER_REQUEST = "Senior software engineering candidate. Apply the standard policy."
 
 
@@ -4923,47 +5000,36 @@ def screen_profile(profile: dict, job_description: str, client,
                 "reasoning": reasoning,
                 "must_have_verdicts": scr.get("must_haves", []),
                 "exclusion_verdicts": scr.get("exclusions", []),
+                "hard_filter_failed": scr.get("hard_filter_failed") or "",
                 "bonus_tags": bonus_tags,
             }
+            _, result["needs_verification"] = _verdicts_needs_verification(
+                result["must_have_verdicts"]
+            )
 
             # Deterministic safety catch: the model returns a per-criterion
             # verdict on every must-have/exclusion AND a top-level decision,
             # but nothing previously checked the two against each other — a
             # model could mark a must-have "met": false yet still say
-            # "decision": "GO". Enforce the rule the prompt already states:
-            # GO only when every must-have is met and no exclusion matched.
-            # Never flips a NO GO into a GO — only tightens.
-            force_no_go, guard_reason = _verdicts_force_no_go(
-                result["must_have_verdicts"], result["exclusion_verdicts"]
+            # "decision": "GO". _resolve_three_state_decision enforces the
+            # rule the prompt already states (GO only when every must-have
+            # is met and no exclusion matched), AND makes sure a real hard
+            # filter / STABILITY VERDICT FAIL is never mistaken for a
+            # merely-unproven must-have and flipped into NEEDS
+            # VERIFICATION — it only ever tightens a GO, or corrects a
+            # wrongly-lenient NEEDS VERIFICATION back to NO GO.
+            final_decision, override_note = _resolve_three_state_decision(
+                decision, result["must_have_verdicts"], result["exclusion_verdicts"],
+                hard_filter_failed=result["hard_filter_failed"],
+                stability_failed=_stability_verdict_failed(durations_text),
             )
-            needs_verif, needs_verif_items = _verdicts_needs_verification(
-                result["must_have_verdicts"]
-            )
-            result["needs_verification"] = needs_verif_items
-            if force_no_go and decision != "NO GO":
-                decision = "NO GO"
-                result["decision"] = "NO GO"
-                result["fit"] = _decision_to_fit_label("NO GO", score)
-                override_note = (
-                    f"Auto-NO GO (model verdicts contradicted its GO): "
-                    f"{guard_reason}. {reasoning}"
-                )
-                result["reasoning"] = override_note
-                result["summary"] = override_note
-                result["decision_guard_override"] = True
-            elif not force_no_go and needs_verif and decision != "NEEDS VERIFICATION":
-                # No must-have was contradicted and no exclusion matched, but
-                # at least one must-have is unproven. Per policy that is
-                # NEEDS VERIFICATION, never NO GO -- this corrects exactly
-                # the over-rejection bug (model saying NO GO because a
-                # must-have "does not verify") that this guard exists for.
-                decision = "NEEDS VERIFICATION"
-                result["decision"] = "NEEDS VERIFICATION"
-                result["fit"] = _decision_to_fit_label("NEEDS VERIFICATION", score)
-                verif_note = "Needs verification: " + "; ".join(needs_verif_items)
-                override_note = f"{verif_note}. {reasoning}".strip()
-                result["reasoning"] = override_note
-                result["summary"] = override_note
+            if final_decision != decision:
+                decision = final_decision
+                result["decision"] = final_decision
+                result["fit"] = _decision_to_fit_label(final_decision, score)
+                full_note = f"{override_note} {reasoning}".strip()
+                result["reasoning"] = full_note
+                result["summary"] = full_note
                 result["decision_guard_override"] = True
 
             constraint_text = "\n".join(

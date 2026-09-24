@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import pytest
 
+import db
+
 from dashboard import (
     _tri,
     _verdicts_force_no_go,
@@ -448,6 +450,65 @@ class TestResolveThreeStateDecision:
         )
         assert decision == "NO GO"
         assert "Telecom/outsourcing" in note
+
+
+class _FakeUpsertBatchClient:
+    """Minimal fake SupabaseClient — captures upsert_batch calls only."""
+
+    def __init__(self):
+        self.upsert_batch_calls = []
+
+    def upsert_batch(self, table, rows, on_conflict=None):
+        self.upsert_batch_calls.append({"table": table, "rows": rows, "on_conflict": on_conflict})
+        return rows
+
+
+class TestScreeningNotesClearedOnRescreen:
+    """Codex review (PR #144, round 2, issue 2): a profile first screened as
+    NEEDS VERIFICATION writes a screening_notes row. If it's later
+    re-screened as GO/NO GO (no needs_verification items -> notes=None),
+    the stale note must be CLEARED, not left in place. upsert_batch's
+    merge-duplicates resolution only touches columns present in the JSON
+    payload, so the fix must send screening_notes explicitly (as JSON
+    null) rather than stripping the key like the other None-valued
+    columns."""
+
+    def test_notes_key_present_and_null_when_notes_is_none(self):
+        client = _FakeUpsertBatchClient()
+        db.update_profile_screening_batch(
+            client,
+            [{"linkedin_url": "https://www.linkedin.com/in/a", "score": 8,
+              "fit_level": "Good Fit", "summary": "x", "reasoning": "y",
+              "notes": None}],
+        )
+        row = client.upsert_batch_calls[0]["rows"][0]
+        assert "screening_notes" in row
+        assert row["screening_notes"] is None
+
+    def test_notes_key_carries_the_needs_verification_text(self):
+        client = _FakeUpsertBatchClient()
+        db.update_profile_screening_batch(
+            client,
+            [{"linkedin_url": "https://www.linkedin.com/in/a", "score": 6,
+              "fit_level": "Maybe", "summary": "x", "reasoning": "y",
+              "notes": "Needs verification: EU-based"}],
+        )
+        row = client.upsert_batch_calls[0]["rows"][0]
+        assert row["screening_notes"] == "Needs verification: EU-based"
+
+    def test_other_none_columns_still_stripped(self):
+        # jd_title/ai_model are None here and must NOT appear in the
+        # payload -- only screening_notes gets the explicit-null treatment.
+        client = _FakeUpsertBatchClient()
+        db.update_profile_screening_batch(
+            client,
+            [{"linkedin_url": "https://www.linkedin.com/in/a", "score": 8,
+              "fit_level": "Good Fit", "summary": "x", "reasoning": "y"}],
+        )
+        row = client.upsert_batch_calls[0]["rows"][0]
+        assert "jd_title" not in row
+        assert "ai_model" not in row
+        assert "screening_notes" in row and row["screening_notes"] is None
 
     def test_not_met_still_forces_no_go_even_with_hard_filter_set(self):
         must_haves = [

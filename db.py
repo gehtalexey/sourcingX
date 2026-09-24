@@ -1167,11 +1167,21 @@ def insert_screening_results_batch(client: SupabaseClient, results: list,
             'screening_fit_level': r.get('fit_level'),
             'screening_summary': r.get('summary'),
             'screening_reasoning': r.get('reasoning'),
-            'screening_notes': r.get('notes'),
             'ai_model': ai_model,
             'screened_at': now,
         }
         row = {k: v for k, v in row.items() if v is not None}
+        # screening_notes is deliberately NOT stripped when None like the
+        # other columns above: a profile first screened as NEEDS
+        # VERIFICATION writes a note, then re-screened later as GO/NO GO
+        # (no needs_verification items) must CLEAR that stale note, not
+        # keep it. Codex review, PR #144 round 2 -- upsert_batch's
+        # merge-duplicates resolution only touches columns present in the
+        # payload, so omitting the key entirely (as the strip above would)
+        # leaves the old value untouched; sending it as explicit JSON null
+        # overwrites it. json.dumps in SupabaseClient.upsert_batch serializes
+        # None as null natively, no separate stripping happens there.
+        row['screening_notes'] = r.get('notes')
         rows.append(row)
 
     if not rows:

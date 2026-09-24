@@ -370,7 +370,9 @@ def _company_intervals(raw: Optional[dict]) -> dict:
         for emp in (raw.get(emp_key) or []):
             if not isinstance(emp, dict):
                 continue
-            company = (emp.get("employer_name") or "").strip()
+            # Old shape: employer_name. New shape (Crustdata's current
+            # enrichment endpoints, ~88% of stored profiles): name.
+            company = (emp.get("employer_name") or emp.get("name") or "").strip()
             if not company:
                 continue
             start = _parse_iso_date(emp.get("start_date"))
@@ -436,13 +438,13 @@ def current_company_tenure_months(raw: Optional[dict]) -> Optional[int]:
     # same employer_name as the first/primary entry. Internal promotions
     # at the same company should not reset tenure.
     primary = current_employers[0] if isinstance(current_employers[0], dict) else {}
-    primary_company = (primary.get("employer_name") or "").strip().lower()
+    primary_company = (primary.get("employer_name") or primary.get("name") or "").strip().lower()
 
     earliest = None
     for emp in current_employers:
         if not isinstance(emp, dict):
             continue
-        emp_company = (emp.get("employer_name") or "").strip().lower()
+        emp_company = (emp.get("employer_name") or emp.get("name") or "").strip().lower()
         # If we have a primary company name, only count entries at that company.
         # If we don't, accept any current employer.
         if primary_company and emp_company and emp_company != primary_company:

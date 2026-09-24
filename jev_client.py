@@ -218,7 +218,12 @@ def _format_employer(entry: dict) -> Optional[str]:
     if not isinstance(entry, dict):
         return None
     title = entry.get("employee_title") or entry.get("title")
-    company = entry.get("employer_name") or entry.get("company_name") or entry.get("company")
+    # Old shape: employer_name. New shape (current Crustdata enrichment
+    # endpoints, ~88% of stored profiles): name.
+    company = (
+        entry.get("employer_name") or entry.get("name")
+        or entry.get("company_name") or entry.get("company")
+    )
     start = entry.get("start_date") or ""
     end = entry.get("end_date") or "present"
     if not title and not company:

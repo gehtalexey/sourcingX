@@ -203,3 +203,184 @@ class TestScreeningResultStructure:
 
         for field in expected_fields:
             assert field in result, f"Result should contain '{field}'"
+
+
+class TestNewCrustdataProfileFormat:
+    """Regression tests for reading the new Crustdata profile shape.
+
+    Two shapes of job entries show up in current_employers/past_employers:
+      - OLD: employee_title, employer_name, employee_description,
+        employer_linkedin_description, location (top-level).
+      - NEW (current enrichment endpoints, ~88% of stored profiles as of
+        2026-09): title, name (company), description (role description),
+        region (top-level, instead of location).
+
+    compute_role_durations() and trim_raw_profile() must read both shapes
+    identically so screening isn't blind on new-format profiles.
+    """
+
+    NEW_FORMAT_PROFILE = {
+        'name': 'Test Candidate',
+        'headline': 'Backend Engineer',
+        'region': 'Tel Aviv, Israel',
+        'skills': ['Python', 'Django'],
+        'current_employers': [{
+            'title': 'Senior Backend Engineer',
+            'name': 'Acme Corp',
+            'description': 'Leading the payments team.',
+            'start_date': '2022-01-01T00:00:00',
+            'end_date': None,
+            'seniority_level': 'Senior',
+        }],
+        'past_employers': [{
+            'title': 'Backend Engineer',
+            'name': 'Widgets Inc',
+            'description': 'Built the billing service.',
+            'start_date': '2019-01-01T00:00:00',
+            'end_date': '2021-12-01T00:00:00',
+        }],
+    }
+
+    OLD_FORMAT_PROFILE = {
+        'name': 'Legacy Candidate',
+        'headline': 'Backend Engineer',
+        'location': 'Herzliya, Israel',
+        'skills': ['Python'],
+        'current_employers': [{
+            'employee_title': 'Backend Engineer',
+            'employer_name': 'Old Corp',
+            'employee_description': 'Owns the API.',
+            'employer_linkedin_description': 'Old Corp builds things. It does other things too.',
+            'start_date': '2020-01',
+            'end_date': None,
+        }],
+        'past_employers': [],
+    }
+
+    def test_trim_raw_profile_reads_new_format_jobs_under_old_keys(self):
+        import dashboard
+        trimmed = dashboard.trim_raw_profile(self.NEW_FORMAT_PROFILE)
+
+        assert len(trimmed['current_employers']) == 1
+        current = trimmed['current_employers'][0]
+        assert current['employee_title'] == 'Senior Backend Engineer'
+        assert current['employer_name'] == 'Acme Corp'
+        assert current['employee_description'] == 'Leading the payments team.'
+
+        assert len(trimmed['past_employers']) == 1
+        past = trimmed['past_employers'][0]
+        assert past['employee_title'] == 'Backend Engineer'
+        assert past['employer_name'] == 'Widgets Inc'
+
+    def test_trim_raw_profile_takes_location_from_region(self):
+        import dashboard
+        trimmed = dashboard.trim_raw_profile(self.NEW_FORMAT_PROFILE)
+        assert trimmed['location'] == 'Tel Aviv, Israel'
+
+    def test_compute_role_durations_reads_new_format(self):
+        import dashboard
+        text = dashboard.compute_role_durations(self.NEW_FORMAT_PROFILE)
+
+        assert text != ""
+        assert 'Senior Backend Engineer' in text
+        assert 'Acme Corp' in text
+        assert 'Backend Engineer' in text
+        assert 'Widgets Inc' in text
+        # Duration for the past role (2019-01 -> 2021-12 = 2y 11m)
+        assert '2y 11m' in text
+
+    def test_compute_role_durations_mixed_shapes(self):
+        """One old-shape job and one new-shape job on the same profile."""
+        import dashboard
+        mixed_profile = {
+            'name': 'Mixed Candidate',
+            'skills': [],
+            'current_employers': [{
+                'title': 'Staff Engineer',
+                'name': 'New Shape Co',
+                'start_date': '2023-01',
+                'end_date': None,
+            }],
+            'past_employers': [{
+                'employee_title': 'Engineer',
+                'employer_name': 'Old Shape Co',
+                'start_date': '2018-01',
+                'end_date': '2022-12',
+            }],
+        }
+        text = dashboard.compute_role_durations(mixed_profile)
+        assert 'Staff Engineer' in text
+        assert 'New Shape Co' in text
+        assert 'Engineer' in text
+        assert 'Old Shape Co' in text
+
+    def test_old_format_profile_output_unchanged(self):
+        """Regression: old-shape profiles must produce identical output to
+        before this fix (both trim_raw_profile and compute_role_durations
+        already worked for the old shape)."""
+        import dashboard
+        trimmed = dashboard.trim_raw_profile(self.OLD_FORMAT_PROFILE)
+
+        assert trimmed['location'] == 'Herzliya, Israel'
+        current = trimmed['current_employers'][0]
+        assert current['employee_title'] == 'Backend Engineer'
+        assert current['employer_name'] == 'Old Corp'
+        assert current['employee_description'] == 'Owns the API.'
+        assert current['employer_description'] == 'Old Corp builds things.'
+
+        text = dashboard.compute_role_durations(self.OLD_FORMAT_PROFILE)
+        assert 'Backend Engineer' in text
+        assert 'Old Corp' in text
+
+    def test_jev_build_candidate_text_reads_new_format_company(self):
+        """jev_client._format_employer() was missing the 'name' fallback for
+        company on the new profile shape — verify it now reads it."""
+        import jev_client
+        text = jev_client.build_candidate_text({'raw_data': self.NEW_FORMAT_PROFILE})
+        assert 'Acme Corp' in text
+        assert 'Senior Backend Engineer' in text
+        assert 'Tel Aviv, Israel' in text
+
+    def test_duration_cache_does_not_collide_across_profiles_without_url(self):
+        """Regression: _hash_profile_for_cache() used to key only on
+        linkedin_url/linkedin_flagship_url plus job counts. New-format
+        profiles mostly carry linkedin_profile_url/flagship_profile_url
+        instead, so two different candidates with the same number of past/
+        current jobs but no linkedin_url/linkedin_flagship_url hashed to the
+        same cache key and silently shared cached durations."""
+        import dashboard
+
+        profile_a = {
+            'name': 'Candidate A',
+            'skills': ['Python'],
+            'current_employers': [{
+                'title': 'Engineer A',
+                'name': 'Company A',
+                'start_date': '2022-01-01T00:00:00',
+                'end_date': None,
+            }],
+            'past_employers': [],
+        }
+        profile_b = {
+            'name': 'Candidate B',
+            'skills': ['Go'],
+            'current_employers': [{
+                'title': 'Engineer B',
+                'name': 'Company B',
+                'start_date': '2021-01-01T00:00:00',
+                'end_date': None,
+            }],
+            'past_employers': [],
+        }
+
+        assert not profile_a.get('linkedin_url') and not profile_a.get('linkedin_flagship_url')
+        assert not profile_b.get('linkedin_url') and not profile_b.get('linkedin_flagship_url')
+
+        text_a = dashboard.compute_role_durations_cached(profile_a)
+        text_b = dashboard.compute_role_durations_cached(profile_b)
+
+        assert text_a != text_b
+        assert 'Engineer A' in text_a and 'Company A' in text_a
+        assert 'Engineer B' in text_b and 'Company B' in text_b
+        assert 'Engineer B' not in text_a
+        assert 'Engineer A' not in text_b

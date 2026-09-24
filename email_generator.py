@@ -177,29 +177,63 @@ LENGTH_DESCRIPTIONS = {
     'long': '2-3 sentences',
 }
 
-# Words banned from the opener, checked case-insensitively.
-OPENER_BANNED_WORDS = ('aligns', 'aligns well', 'mission', 'passionate', 'impressive', 'i came across')
+# ===== Opener hard rules: ONE shared source of truth =====
+# These constants are used to both RENDER the prompt's "NEVER" lines
+# (build_email_prompt) and CHECK a generated opener against the same rules
+# (_opener_violations), so the two can't silently drift apart.
+#
+# Note: "the opener must cite a concrete detail" is a quality/content rule,
+# not a mechanically checkable one (we can't tell whether a phrase is a
+# real concrete detail vs. filler by regex) - that rule is left entirely to
+# the prompt and is NOT part of _opener_violations.
+
+# Words the opener must never start with.
+OPENER_FORBIDDEN_STARTS = ('Your', 'Leading', 'Handling')
+
+# Phrases/words banned anywhere in the opener, grouped the way they read in
+# the prompt's "NEVER use:" bullet lines.
+OPENER_NEVER_USE_GROUPS = (
+    ('impressive', 'exciting', 'dynamic', 'thrilling', 'fascinating', 'cutting edge', 'at the forefront'),
+    ('I noticed', 'I came across', 'caught my eye', 'I hope this finds you well', 'Reaching out because'),
+    ('aligns', 'mission', 'passionate'),
+)
+OPENER_NEVER_USE_PHRASES = tuple(phrase for group in OPENER_NEVER_USE_GROUPS for phrase in group)
+
+
+def _quoted_list(words: tuple, last_sep: str = 'or') -> str:
+    """Render ('a', 'b', 'c') as '"a", "b", or "c"' for the prompt text."""
+    quoted = [f'"{w}"' for w in words]
+    if len(quoted) == 1:
+        return quoted[0]
+    return ', '.join(quoted[:-1]) + f', {last_sep} ' + quoted[-1]
 
 
 def _opener_violations(text: str) -> list:
-    """Check an opener for hard-rule violations.
+    """Check an opener for the mechanically-checkable hard-rule violations.
 
     Returns a list of short violation descriptions (empty if clean).
-    - Starts with "Your" (case-insensitive, after stripping quotes/whitespace)
-    - Contains any of OPENER_BANNED_WORDS (case-insensitive)
+    - Starts with one of OPENER_FORBIDDEN_STARTS (case-insensitive, after
+      stripping quotes/whitespace)
+    - Contains any of OPENER_NEVER_USE_PHRASES, matched on word boundaries
+      (case-insensitive) so e.g. "dynamically" or "submission"/"permission"
+      do not falsely trigger on "dynamic"/"mission"
+    - Contains an exclamation mark
     """
     violations = []
     if not text:
         return violations
 
     stripped = text.strip().strip('"\'').strip()
-    if re.match(r'^your\b', stripped, re.IGNORECASE):
-        violations.append('starts with "Your"')
+    for start_word in OPENER_FORBIDDEN_STARTS:
+        if re.match(rf'^{re.escape(start_word)}\b', stripped, re.IGNORECASE):
+            violations.append(f'starts with "{start_word}"')
 
-    lowered = text.lower()
-    for word in OPENER_BANNED_WORDS:
-        if word in lowered:
-            violations.append(f'contains banned word "{word}"')
+    for phrase in OPENER_NEVER_USE_PHRASES:
+        if re.search(rf'\b{re.escape(phrase)}\b', text, re.IGNORECASE):
+            violations.append(f'contains banned phrase "{phrase}"')
+
+    if '!' in text:
+        violations.append('contains an exclamation mark')
 
     return violations
 
@@ -273,6 +307,11 @@ def build_email_prompt(sender: str, tone: str, length: str, custom_instruction: 
 }"""
         generate_desc = "a personalized subject line and email opener"
 
+    never_use_lines = "\n".join(
+        "- NEVER use: " + ", ".join(f'"{w}"' for w in group)
+        for group in OPENER_NEVER_USE_GROUPS
+    )
+
     return f"""You are {sender_desc} {company_desc} writing {generate_desc} for candidates{position_section}.
 
 Return ONLY valid JSON:
@@ -280,10 +319,8 @@ Return ONLY valid JSON:
 
 ## HARD RULES (violation = reject)
 - NEVER use em dash character (—). Use comma or regular dash (-) instead.
-- NEVER start opener with "Your", "Leading", or "Handling".
-- NEVER use: "impressive", "exciting", "dynamic", "thrilling", "fascinating", "cutting edge", "at the forefront"
-- NEVER use: "I noticed", "I came across", "caught my eye", "I hope this finds you well", "Reaching out because"
-- NEVER use: "aligns", "aligns well", "mission", "passionate"
+- NEVER start opener with {_quoted_list(OPENER_FORBIDDEN_STARTS)}.
+{never_use_lines}
 - NEVER use exclamation marks (!) or ask generic questions about feelings/motivation.
 - NEVER mention companies from before 2021 or mention the same company twice.
 - Subject and opener MUST use DIFFERENT angles.
@@ -294,6 +331,12 @@ they built, a migration they ran, a launch they shipped, or a named project ment
 their experience descriptions or summary. Their title, years of experience, or company name
 alone is NOT a concrete detail - go find something they actually did. End the opener with a
 short observation about why that specific thing is interesting.
+
+**Cite that detail ONLY if it actually appears in the provided profile data. If the profile
+has no experience descriptions or summary text to draw a concrete detail from, do NOT invent
+one - instead use the most specific REAL fact that is present (e.g. a named technology paired
+with a named company, or a specific career move between named companies/titles). NEVER invent
+a product, project, metric, or achievement that is not in the profile.**
 
 ## SUBJECT LINE
 Under 10 words, under 60 chars. Must mention something specific from their profile. Rotate formats:
@@ -487,6 +530,24 @@ def trim_profile_for_email(raw: dict) -> dict:
     return trimmed
 
 
+def _has_descriptive_text(trimmed: dict) -> bool:
+    """Whether the trimmed profile has any real descriptive text to draw a
+    concrete detail from (a summary, or a role/company description).
+
+    Used to decide whether to warn the model against inventing a concrete
+    detail when the profile is too thin to supply a real one.
+    """
+    if trimmed.get('summary'):
+        return True
+    for emp in (trimmed.get('current_employers') or []):
+        if emp.get('role_description') or emp.get('company_description'):
+            return True
+    for emp in (trimmed.get('past_employers') or []):
+        if emp.get('company_description'):
+            return True
+    return False
+
+
 # ===== Single Profile Generation =====
 
 def generate_email_for_profile(
@@ -570,6 +631,16 @@ Generate ONLY a personalized email opener ({length_desc}). Return JSON with: ema
 ```
 
 Generate a personalized subject line and email opener. Remember: subject and opener MUST use DIFFERENT angles."""
+
+    # Fabrication guard: if there's no descriptive text to pull a concrete
+    # detail from (no role/company descriptions, no summary), tell the model
+    # explicitly not to invent one and to fall back to a plain fact instead
+    # (title/company/skills only).
+    if generate_type in ('both', 'opener_only') and not _has_descriptive_text(trimmed):
+        base_user_prompt += (
+            "\n\nThis profile has no descriptions: do not claim anything they built; "
+            "use a specific fact from titles/companies/skills only."
+        )
 
     def _call_model(user_prompt: str) -> dict:
         """Make one model call and return the parsed JSON result. May raise."""

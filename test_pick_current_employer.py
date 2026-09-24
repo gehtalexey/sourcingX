@@ -488,3 +488,134 @@ def test_clean_opener_first_try_makes_only_one_call():
     )
     assert client.call_count == 1
     assert result['email_opener'] == json.loads(CLEAN_OPENER)['email_opener']
+
+
+# ===== Codex round 1 fixes: fuller violation coverage + fabrication guard =====
+
+from email_generator import _has_descriptive_text
+
+
+def test_opener_violations_flags_leading_start():
+    violations = _opener_violations('Leading the platform rewrite at CyberArk stands out.')
+    assert any('Leading' in v for v in violations)
+
+
+def test_opener_violations_flags_handling_start():
+    violations = _opener_violations('Handling the migration to Kubernetes at CyberArk is notable.')
+    assert any('Handling' in v for v in violations)
+
+
+def test_opener_violations_flags_exciting():
+    violations = _opener_violations('The exciting work at CyberArk stands out.')
+    assert any('exciting' in v for v in violations)
+
+
+def test_opener_violations_flags_exclamation_mark():
+    violations = _opener_violations('The migration work at CyberArk is great!')
+    assert any('exclamation' in v for v in violations)
+
+
+def test_opener_violations_no_false_hit_on_submission_or_permission():
+    # "mission" is banned, but must not match inside "submission"/"permission".
+    violations = _opener_violations(
+        'The pull request submission process and permission model they built at CyberArk stand out.'
+    )
+    assert violations == []
+
+
+def test_opener_violations_no_false_hit_on_dynamically():
+    # "dynamic" is banned, but must not match inside "dynamically".
+    violations = _opener_violations('They configured the pipeline dynamically at CyberArk.')
+    assert violations == []
+
+
+def test_prompt_never_use_lines_render_from_shared_constant():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium')
+    from email_generator import OPENER_NEVER_USE_PHRASES, OPENER_FORBIDDEN_STARTS
+    for phrase in OPENER_NEVER_USE_PHRASES:
+        assert phrase in prompt
+    for start_word in OPENER_FORBIDDEN_STARTS:
+        assert start_word in prompt
+
+
+def test_prompt_contains_no_invention_rule():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium')
+    assert 'do NOT invent' in prompt or 'NEVER invent' in prompt
+
+
+def test_has_descriptive_text_true_with_summary():
+    assert _has_descriptive_text({'summary': 'Built the payments platform.'}) is True
+
+
+def test_has_descriptive_text_true_with_role_description():
+    assert _has_descriptive_text({
+        'current_employers': [{'title': 'Engineer', 'role_description': 'Led the migration.'}]
+    }) is True
+
+
+def test_has_descriptive_text_false_when_only_titles_and_skills():
+    assert _has_descriptive_text({
+        'current_employers': [{'title': 'Backend Engineer', 'company': 'CyberArk'}],
+        'skills': ['Python'],
+    }) is False
+
+
+THIN_PROFILE = {
+    'raw_data': {
+        'name': 'Thin Candidate',
+        'current_employers': [
+            {'title': 'Backend Engineer', 'employer_name': 'CyberArk', 'start_date': '2020-01-01'}
+        ],
+        'skills': ['Python'],
+    }
+}
+
+
+class _CapturingOpenAIClient:
+    """Stub client that records the user prompt it was called with."""
+
+    def __init__(self, contents):
+        self._queue = list(contents)
+        self.call_count = 0
+        self.last_user_prompt = None
+        chat = type('Chat', (), {})()
+        completions = type('Completions', (), {})()
+        completions.create = self._create
+        chat.completions = completions
+        self.chat = chat
+
+    def _create(self, **kwargs):
+        self.call_count += 1
+        for msg in kwargs.get('messages', []):
+            if msg.get('role') == 'user':
+                self.last_user_prompt = msg.get('content')
+        content = self._queue.pop(0)
+        return _StubOpenAIResponse(content)
+
+
+def test_thin_profile_gets_no_invention_note_in_user_prompt():
+    client = _CapturingOpenAIClient([CLEAN_OPENER])
+    generate_email_for_profile(
+        THIN_PROFILE, client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert 'do not claim anything they built' in client.last_user_prompt
+
+
+def test_profile_with_descriptions_gets_no_thin_profile_note():
+    client = _CapturingOpenAIClient([CLEAN_OPENER])
+    profile = {
+        'raw_data': {
+            'name': 'Rich Candidate',
+            'current_employers': [
+                {'title': 'Backend Engineer', 'employer_name': 'CyberArk', 'start_date': '2020-01-01',
+                 'description': 'Led the migration of the payments pipeline to Kubernetes.'}
+            ],
+            'skills': ['Python'],
+        }
+    }
+    generate_email_for_profile(
+        profile, client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert 'do not claim anything they built' not in client.last_user_prompt

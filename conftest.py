@@ -28,6 +28,11 @@ from unittest.mock import MagicMock, patch
 # @pytest.mark.live_db.
 # ---------------------------------------------------------------------------
 
+# Manual scripts that hit the live DB at import time, not pytest tests.
+# Run them by hand (python test_structured_real.py); the guard below would
+# otherwise abort collection whenever config.json is present.
+collect_ignore = ["test_structured_real.py"]
+
 _LIVE_DB_ALLOWED = False
 _ORIGINAL_ADAPTER_SEND = requests.adapters.HTTPAdapter.send
 

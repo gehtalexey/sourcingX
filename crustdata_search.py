@@ -5,9 +5,9 @@ This module provides functions to search Crustdata's 100M+ professional database
 Used by the Search tab in dashboard.py to find candidates before enrichment.
 
 API Endpoint: POST https://api.crustdata.com/person/search (v2025-11-01,
-search_people_db_v2). The legacy search_people_db() is kept only until its
-deletion is approved; nothing in the app calls it (legacy /screener/* stops
-2026-09-30).
+search_people_db_v2). The legacy /screener/persondb/search client
+(search_people_db) was removed 2026-09-24; Crustdata stops serving every
+/screener/* endpoint on 2026-09-30.
 
 Usage:
     from crustdata_search import search_people_db_v2, build_filters, normalize_search_results_to_df
@@ -22,7 +22,7 @@ Usage:
     )
 
     # Search
-    results = search_people_db(filters, limit=100)
+    results = search_people_db_v2(filters, limit=100)
 
     # Convert to DataFrame for pipeline
     df = normalize_search_results_to_df(results['profiles'])
@@ -55,7 +55,6 @@ from normalizers import normalize_linkedin_url, clean_value, is_nan_or_none, pic
 # CONSTANTS
 # =============================================================================
 
-CRUSTDATA_SEARCH_ENDPOINT = "https://api.crustdata.com/screener/persondb/search"
 # Credits balance (free). Called with the v2025-11-01 headers (Bearer +
 # x-api-version). Verified live 2026-09-24: returns
 # {"account": {"credits": N, "recurring_credits": N, ...}}. GET /user/credits
@@ -70,13 +69,13 @@ CRUSTDATA_CREDITS_ENDPOINT = "https://api.crustdata.com/account/credits"
 # docs (docs.crustdata.com/person-docs/search/introduction) on 2026-07-20 —
 # request body is {"search": {"query", "mode"}, "mode": "exact"|"managed",
 # "limit"}, auth is "Authorization: Bearer <key>" + "x-api-version" header
-# (both different from the legacy endpoint above, which still uses "Token").
+# (the removed legacy /screener/persondb/search used "Token" auth).
 CRUSTDATA_SEMANTIC_SEARCH_ENDPOINT = "https://api.crustdata.com/person/search"
 CRUSTDATA_API_VERSION = "2025-11-01"
 CREDITS_PER_RESULT_SEMANTIC = 0.03
 
-# Filter-based v2025-11-01 search (replaces CRUSTDATA_SEARCH_ENDPOINT above once
-# the migration cuts over — see search_people_db_v2()). Same dataset/endpoint
+# Filter-based v2025-11-01 search (replaced the legacy /screener/persondb/search,
+# removed 2026-09-24 — see search_people_db_v2()). Same dataset/endpoint
 # as the semantic search above, different request shape (filters, not a
 # free-text query).
 CRUSTDATA_SEARCH_V2_ENDPOINT = "https://api.crustdata.com/person/search"
@@ -87,11 +86,9 @@ CREDITS_PER_RESULT_V2 = 0.03  # unchanged from legacy persondb/search (3 per 100
 # them for. Verified live against docs.crustdata.com 2026-07-20: up to
 # 10,000 LinkedIn URLs per job, base profile = 1 credit (additive pricing,
 # same as the sync /person/enrich — see CREDITS_PER_ENRICH_PROFILE_BASE
-# below). Note: the filter-based search (search_people_db, compact=false)
-# already returns full profiles and stays the default search until
-# Crustdata retires the legacy endpoint — this enrichment step only ever
-# fires for profiles that come back thin, i.e. today, description-search
-# results.
+# below). Both the filter search (search_people_db_v2) and the description
+# search return thin profiles (no skills/summary), so this enrichment step
+# fires for their results before AI Screen.
 CRUSTDATA_BATCH_ENRICH_ENDPOINT = "https://api.crustdata.com/batch/person/enrich"
 CRUSTDATA_BATCH_STATUS_ENDPOINT = "https://api.crustdata.com/batch"  # + f"/{batch_id}"
 
@@ -189,9 +186,6 @@ COMPANY_INDUSTRIES = [
     "Design Services",
     "Consumer Services",
 ]
-
-# Credits per 100 results
-CREDITS_PER_100_RESULTS = 3
 
 
 # =============================================================================
@@ -781,158 +775,6 @@ def _remap_filters(node):
 # API FUNCTIONS
 # =============================================================================
 
-@retry_with_backoff(
-    max_retries=3,
-    base_delay=2.0,
-    retryable_exceptions=(RateLimitError, ServiceUnavailableError, ConnectionError, TimeoutError),
-)
-def search_people_db(
-    filters: Dict[str, Any],
-    limit: int = 100,
-    cursor: str = None,
-    sorts: List[Dict[str, str]] = None,
-    api_key: str = None,
-    exclude_profiles: List[str] = None,
-) -> Dict[str, Any]:
-    """
-    Search Crustdata's people database.
-
-    Args:
-        filters: Filter dict from build_filters() or raw filter object
-        limit: Results per page (max 1000, default 100)
-        cursor: Pagination cursor from previous response
-        sorts: Optional sorting list, e.g., [{"column": "years_of_experience_raw", "order": "desc"}]
-        api_key: Optional API key (if not provided, loads from config.json or env var)
-
-    Returns:
-        {
-            "profiles": [...],       # List of profile dicts
-            "cursor": "...",         # Next page cursor (None if no more results)
-            "total_count": N,        # Total matching profiles
-            "credits_used": N        # Credits consumed
-        }
-
-    Raises:
-        AuthenticationError: Invalid API key
-        RateLimitError: Rate limit exceeded
-        ExternalServiceError: API error
-    """
-    if not api_key:
-        api_key = _load_api_key()
-    limiter = get_rate_limiter('crustdata')
-
-    # Build request body.
-    # compact=false is the load-bearing parameter that makes search return the
-    # FULL profile (past_employers with descriptions, certifications, summary,
-    # flagship_profile_url, etc.). Crustdata's default is compact=true which
-    # silently strips nested data — that's what created the original (incorrect)
-    # assumption that enrichment was needed after every search.
-    # Verified via Crustdata founder call + live test against Ami Blonder
-    # on 2026-05-15. See .planning equivalent docs / GitHub issue #68.
-    body = {
-        "limit": min(limit, 1000),  # Cap at 1000
-        "compact": False,
-    }
-
-    # Add filters if provided
-    if filters:
-        if "filters" in filters:
-            body["filters"] = filters["filters"]
-        elif "op" in filters or "column" in filters:
-            body["filters"] = filters
-
-    # Add pagination cursor
-    if cursor:
-        body["cursor"] = cursor
-
-    # Exclude specific LinkedIn profiles (past candidates).
-    # Crustdata nests this under post_processing, not at the top level.
-    # Normalize URLs to canonical form so scheme/www/trailing-slash variants match.
-    if exclude_profiles:
-        clean_urls = [normalize_linkedin_url(u) for u in exclude_profiles if u and str(u).strip()]
-        clean_urls = [u for u in clean_urls if u]
-        if clean_urls:
-            body["post_processing"] = {"exclude_profiles": clean_urls}
-
-    # Add sorting
-    if sorts:
-        body["sorts"] = sorts
-
-    # Rate limiting
-    try:
-        limiter.wait_if_needed()
-    except RateLimitExceeded as e:
-        raise RateLimitError("Crustdata", message=str(e))
-
-    start_time = time.time()
-
-    try:
-        response = requests.post(
-            CRUSTDATA_SEARCH_ENDPOINT,
-            json=body,
-            headers={
-                "Authorization": f"Token {api_key}",
-                "Content-Type": "application/json",
-            },
-            timeout=60,
-        )
-
-        limiter.record_request()
-
-        # Handle HTTP errors
-        if response.status_code == 401:
-            raise AuthenticationError("Crustdata")
-        elif response.status_code == 429:
-            retry_after = response.headers.get('Retry-After')
-            raise RateLimitError(
-                "Crustdata",
-                retry_after=float(retry_after) if retry_after else None
-            )
-        elif response.status_code >= 500:
-            raise ServiceUnavailableError(
-                "Crustdata",
-                status_code=response.status_code,
-                response_body=response.text[:500]
-            )
-        elif response.status_code >= 400:
-            raise ExternalServiceError(
-                "Crustdata",
-                message=f"Search failed: {response.text[:500]}",
-                status_code=response.status_code,
-                response_body=response.text
-            )
-
-        data = response.json()
-
-        # Extract results - API returns "profiles" not "data", "next_cursor" not "cursor"
-        profiles = data.get("profiles", [])
-        next_cursor = data.get("next_cursor")
-        total_count = data.get("total_count", len(profiles))
-
-        # Calculate credits used (3 credits per 100 results)
-        credits_used = (len(profiles) // 100 + (1 if len(profiles) % 100 > 0 else 0)) * CREDITS_PER_100_RESULTS
-
-        return {
-            "profiles": profiles,
-            "cursor": next_cursor,
-            "total_count": total_count,
-            "credits_used": credits_used,
-            "response_time_ms": int((time.time() - start_time) * 1000),
-        }
-
-    except requests.exceptions.Timeout:
-        raise ExternalServiceError(
-            "Crustdata",
-            message="Search request timed out",
-            status_code=504
-        )
-    except requests.exceptions.ConnectionError as e:
-        raise ServiceUnavailableError(
-            "Crustdata",
-            message=f"Connection error: {str(e)[:200]}"
-        )
-
-
 def _parse_credits_response(data: Any) -> Dict[str, Any]:
     """Read the balance out of either credits response shape:
     nested {"account": {"credits": N, "recurring_credits": N}} (GET
@@ -1167,8 +1009,9 @@ def search_people_db_v2(
 ) -> Dict[str, Any]:
     """
     Filter-based people search via the new v2025-11-01 POST /person/search
-    endpoint — the eventual replacement for search_people_db(). Takes the
-    SAME filters dict shape as search_people_db() (build_filters() output);
+    endpoint — the replacement for the legacy /screener/persondb/search
+    client (search_people_db, removed 2026-09-24). Takes the legacy filters
+    dict shape (build_filters() output);
     remaps the legacy column/AND-OR grammar to the new field-based grammar
     internally via _remap_filters(), so callers don't change.
 
@@ -1186,7 +1029,7 @@ def search_people_db_v2(
     so this flag is a visibility signal, not the only path to getting them
     filled in.
 
-    Returns the same shape as search_people_db(): {"profiles", "cursor",
+    Returns {"profiles", "cursor",
     "total_count", "credits_used", "response_time_ms"}.
     """
     if not api_key:
@@ -2383,13 +2226,12 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
     """
     Normalize a Crustdata search result to pipeline DataFrame format.
 
-    With ``compact=false`` (now the default in ``search_people_db``), Crustdata
-    search returns the FULL profile: flagship_profile_url, past_employers with
-    full descriptions and dates, education, certifications, summary, skills,
-    languages, etc. The only field NOT returned by search is ``emails`` (SourcingX
-    uses SalesQL for emails separately). A follow-up enrichment call is no
-    longer needed in the default pipeline — see GitHub issue #68 / the
-    Crustdata-founder call notes.
+    Results from search_people_db_v2() and search_people_semantic() arrive
+    already flattened by semantic_profile_to_legacy_shape() and carry no
+    skills/summary (the new /person/search never returns them); those
+    profiles are flagged ``_needs_enrichment`` and filled in by the 1-credit
+    enrichment before AI Screen. Emails are never returned by search
+    (SourcingX uses SalesQL for emails separately).
 
     Args:
         profile: Raw profile dict from search results
@@ -2403,11 +2245,10 @@ def normalize_search_result(profile: Dict[str, Any]) -> Dict[str, Any]:
             - skills (comma-separated string)
             - years_experience
             - _source = 'crustdata_search'
-            - _needs_enrichment = False for a normal filter search (compact=false
-              returns the full profile). True when the input carries the
+            - _needs_enrichment = True when the input carries the
               ``_semantic_incomplete`` marker — set by
               semantic_profile_to_legacy_shape() because Crustdata's
-              description-search endpoint doesn't return skills, summary, or
+              /person/search (filter and description search) doesn't return skills, summary, or
               years of experience, so those rows still need a real enrichment
               pass before screening.
     """
@@ -2785,7 +2626,7 @@ def normalize_search_results_to_df(profiles: List[Dict[str, Any]]) -> pd.DataFra
     Batch normalize search results and return DataFrame ready for pipeline.
 
     Args:
-        profiles: List of raw profile dicts from search_people_db()
+        profiles: List of raw profile dicts from search_people_db_v2()
 
     Returns:
         pandas DataFrame with normalized columns matching pipeline format
@@ -3045,13 +2886,11 @@ __all__ = [
     # Constants
     'SENIORITY_LEVELS',
     'HEADCOUNT_RANGES',
-    'CREDITS_PER_100_RESULTS',
     'CREDITS_PER_RESULT_SEMANTIC',
     'CREDITS_PER_RESULT_V2',
     'CREDITS_PER_ENRICH_PROFILE_BASE',
     'BATCH_ENRICH_FIELDS',
     # Main functions
-    'search_people_db',
     'search_people_db_v2',
     'build_filters',
     'check_credits',

@@ -386,7 +386,7 @@ Crustdata may return a different `linkedin_flagship_url` than the input URL:
 | `crustdata_search.py` | People database search API client |
 | `normalizers.py` | `normalize_crustdata_profile()` - main normalizer |
 | `dashboard.py` | `enrich_batch()` - enrichment API call logic |
-| `enrich.py` | Standalone CLI enrichment tool |
+| ~~`enrich.py`~~ | Removed 2026-09-24 (legacy 3-credit endpoint) in favour of the 1-credit batch enrichment (`batch_enrich_profiles()`) |
 | `db.py` | Profile storage in Supabase |
 
 ### Storage (normalizers.py)

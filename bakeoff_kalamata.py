@@ -210,6 +210,15 @@ def jev_verdict_from_result(screening_result: Optional[str]) -> Optional[str]:
     return None
 
 
+def _score_value(value):
+    """Keep a real score of 0 as 0 -- only None or "" (missing) become "".
+    A plain `value or ""` treats 0 as falsy and would silently blank out a
+    genuine zero score."""
+    if value is None or value == "":
+        return ""
+    return value
+
+
 def compute_agreement(rows: list, key_a: str, key_b: str) -> dict:
     """Agreement rate for one pair of verdict columns, counting only rows
     where BOTH verdicts are present ('yes'/'no'; 'missing' rows are excluded
@@ -278,13 +287,31 @@ def _load_supabase_client() -> SupabaseClient:
 
 
 def _fetch_pipeline_candidates(client: SupabaseClient, position_id: str) -> list:
-    return client.select(
+    rows = client.select(
         "pipeline_candidates",
         "position_id,linkedin_url,screening_result,screening_score,"
         "screening_notes,screening_detail,screened_at",
         filters={"position_id": f"eq.{position_id}"},
         limit=200000,
+        order_by="linkedin_url.asc",
     )
+    return dedupe_candidates_by_url(rows)
+
+
+def dedupe_candidates_by_url(rows: list) -> list:
+    """Offset-paginated selects with no stable sort can hand back the same
+    linkedin_url more than once (or skip one) across pages. Keep exactly one
+    row per linkedin_url -- the one with the latest screened_at (missing/None
+    screened_at loses to any row that has one)."""
+    best = {}
+    for row in rows:
+        url = row.get("linkedin_url")
+        if not url:
+            continue
+        prev = best.get(url)
+        if prev is None or (row.get("screened_at") or "") >= (prev.get("screened_at") or ""):
+            best[url] = row
+    return list(best.values())
 
 
 def fetch_profiles_by_urls(client: SupabaseClient, urls, chunk_size: int = DEFAULT_PROFILE_CHUNK) -> dict:
@@ -439,8 +466,15 @@ def cmd_jev(args):
     if out_path.exists():
         with open(out_path, newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
+                key = (row.get("position_id"), row.get("linkedin_url"))
+                jev_verdict = (row.get("jev_verdict") or "").strip()
+                is_failed = bool((row.get("error") or "").strip()) or jev_verdict not in ("yes", "no")
+                if is_failed:
+                    # Retry this row -- drop it from existing_rows so it isn't
+                    # written twice, and leave it out of `done` so it lands in todo.
+                    continue
                 existing_rows.append(row)
-                done.add((row.get("position_id"), row.get("linkedin_url")))
+                done.add(key)
 
     todo = [r for r in rows if (r["position_id"], r["linkedin_url"]) not in done]
 
@@ -572,7 +606,7 @@ def cmd_report(args):
             "luna_score": luna_row.get("screening_score") if luna_row else "",
             "luna_reason": ((luna_row or {}).get("screening_summary") or "")[:200],
             "jev_verdict": jev_v or "missing",
-            "jev_score": (jev_row or {}).get("jev_score") or "",
+            "jev_score": _score_value((jev_row or {}).get("jev_score")),
             "jev_reason": (jev_row or {}).get("jev_reason") or "",
             "kalamata_verdict": kal_v,
             "kalamata_score": r["kalamata_score"],

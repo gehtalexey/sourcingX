@@ -671,3 +671,164 @@ class TestBakeoffKalamata:
         assert len(written) == 1
         assert written[0]["jev_verdict"] == "yes"
         assert written[0]["error"] == ""
+
+    def test_jev_resume_retries_error_rows_and_keeps_one_row_per_candidate(self, tmp_path, monkeypatch):
+        import bakeoff_kalamata as bk
+
+        sample = {
+            "seed": 1,
+            "positions": ["pos-a"],
+            "rows": [
+                {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                 "group": "yes", "kalamata_verdict": "yes", "kalamata_score": 8, "kalamata_reason": "ok"},
+                {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-2",
+                 "group": "no_fullscreen", "kalamata_verdict": "no", "kalamata_score": 3, "kalamata_reason": "meh"},
+            ],
+        }
+        sample_path = tmp_path / "sample.json"
+        sample_path.write_text(json.dumps(sample), encoding="utf-8")
+        briefs_path = tmp_path / "briefs.json"
+        briefs_path.write_text(json.dumps({"pos-a": {"role_context": "Backend Engineer"}}), encoding="utf-8")
+        out_path = tmp_path / "jev_results.csv"
+
+        fieldnames = [
+            "position_id", "linkedin_url", "jev_verdict", "jev_score", "jev_fit_level",
+            "jev_reason", "jev_model", "input_tokens", "output_tokens", "error",
+        ]
+        with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            # candidate-1 already succeeded -- must not be retried.
+            writer.writerow({
+                "position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                "jev_verdict": "yes", "jev_score": 9, "jev_fit_level": "qualified",
+                "jev_reason": "good fit", "jev_model": "jev-1.0",
+                "input_tokens": 100, "output_tokens": 10, "error": "",
+            })
+            # candidate-2 errored -- must be retried, and the old row dropped.
+            writer.writerow({
+                "position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-2",
+                "jev_verdict": "", "jev_score": "", "jev_fit_level": "",
+                "jev_reason": "", "jev_model": "", "input_tokens": "", "output_tokens": "",
+                "error": "RuntimeError: boom",
+            })
+
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: object())
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {
+            "https://www.linkedin.com/in/candidate-1": {"raw_data": {"skills": ["Python"]}},
+            "https://www.linkedin.com/in/candidate-2": {"raw_data": {"skills": ["Go"]}},
+        })
+        monkeypatch.setattr(bk.jev_client, "build_client", lambda: "fake-client")
+
+        calls = []
+
+        def _fake_screen(profile, job_description, client=None, screening_brief=None):
+            calls.append(profile)
+            return {
+                "screening_result": "not_qualified", "screening_score": 2,
+                "reason": "missing a must-have", "jev_model": "jev-1.0",
+                "input_tokens": 50, "output_tokens": 5,
+            }
+
+        monkeypatch.setattr(bk.jev_client, "screen_with_jev", _fake_screen)
+
+        args = argparse.Namespace(
+            sample=str(sample_path), briefs=str(briefs_path), out=str(out_path),
+            yes=True, limit=None, workers=2,
+        )
+        bk.cmd_jev(args)
+
+        # Only the error row should have been retried.
+        assert len(calls) == 1
+        assert calls[0] == {"raw_data": {"skills": ["Go"]}}
+
+        with open(out_path, encoding="utf-8-sig", newline="") as f:
+            written = list(csv.DictReader(f))
+        keys = [(row["position_id"], row["linkedin_url"]) for row in written]
+        assert keys.count(("pos-a", "https://www.linkedin.com/in/candidate-1")) == 1
+        assert keys.count(("pos-a", "https://www.linkedin.com/in/candidate-2")) == 1
+        by_url = {row["linkedin_url"]: row for row in written}
+        assert by_url["https://www.linkedin.com/in/candidate-1"]["jev_verdict"] == "yes"
+        assert by_url["https://www.linkedin.com/in/candidate-2"]["jev_verdict"] == "no"
+        assert by_url["https://www.linkedin.com/in/candidate-2"]["error"] == ""
+
+    # -- report: a real zero score must survive, not become blank --
+
+    def test_report_keeps_zero_jev_score(self, tmp_path, monkeypatch):
+        import bakeoff_kalamata as bk
+
+        sample = {
+            "seed": 1,
+            "positions": ["pos-a"],
+            "rows": [
+                {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                 "group": "no_fullscreen", "kalamata_verdict": "no", "kalamata_score": 1, "kalamata_reason": "meh"},
+            ],
+        }
+        sample_path = tmp_path / "sample.json"
+        sample_path.write_text(json.dumps(sample), encoding="utf-8")
+        briefs_path = tmp_path / "briefs.json"
+        briefs_path.write_text(json.dumps({"pos-a": {"role_context": "Backend Engineer"}}), encoding="utf-8")
+
+        jev_path = tmp_path / "jev.csv"
+        with open(jev_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                "position_id", "linkedin_url", "jev_verdict", "jev_score", "jev_fit_level",
+                "jev_reason", "jev_model", "input_tokens", "output_tokens", "error",
+            ])
+            writer.writeheader()
+            writer.writerow({
+                "position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                "jev_verdict": "no", "jev_score": "0", "jev_fit_level": "not_qualified",
+                "jev_reason": "no signal", "jev_model": "jev-1.0",
+                "input_tokens": 10, "output_tokens": 5, "error": "",
+            })
+
+        out_dir = tmp_path / "out"
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: object())
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {})
+        monkeypatch.setattr(bk, "_fetch_screening_results", lambda client, jd_hash, urls: [])
+
+        args = argparse.Namespace(
+            sample=str(sample_path), jev=str(jev_path), briefs=str(briefs_path),
+            out_dir=str(out_dir), seed=1,
+        )
+        bk.cmd_report(args)
+
+        report = json.loads((out_dir / "bakeoff.json").read_text(encoding="utf-8"))
+        row = report["rows"][0]
+        assert row["jev_score"] == "0"
+
+    def test_score_value_keeps_zero_blanks_missing(self):
+        import bakeoff_kalamata as bk
+        assert bk._score_value(0) == 0
+        assert bk._score_value("0") == "0"
+        assert bk._score_value(None) == ""
+        assert bk._score_value("") == ""
+
+    # -- pipeline candidate dedupe: same linkedin_url must appear once --
+
+    def test_dedupe_candidates_by_url_keeps_latest_screened_at(self):
+        import bakeoff_kalamata as bk
+        rows = [
+            {"linkedin_url": "https://www.linkedin.com/in/dup", "screening_score": 1, "screened_at": "2026-01-01T00:00:00Z"},
+            {"linkedin_url": "https://www.linkedin.com/in/dup", "screening_score": 9, "screened_at": "2026-06-01T00:00:00Z"},
+            {"linkedin_url": "https://www.linkedin.com/in/other", "screening_score": 5, "screened_at": "2026-02-01T00:00:00Z"},
+        ]
+        result = bk.dedupe_candidates_by_url(rows)
+        by_url = {r["linkedin_url"]: r for r in result}
+        assert len(result) == 2
+        assert by_url["https://www.linkedin.com/in/dup"]["screening_score"] == 9
+
+    def test_fetch_pipeline_candidates_passes_stable_order_and_dedupes(self, monkeypatch):
+        import bakeoff_kalamata as bk
+
+        fake_client = MagicMock()
+        fake_client.select.return_value = [
+            {"linkedin_url": "https://www.linkedin.com/in/dup", "screened_at": "2026-01-01T00:00:00Z"},
+            {"linkedin_url": "https://www.linkedin.com/in/dup", "screened_at": "2026-03-01T00:00:00Z"},
+        ]
+        result = bk._fetch_pipeline_candidates(fake_client, "pos-a")
+        assert len(result) == 1
+        _, kwargs = fake_client.select.call_args
+        assert kwargs.get("order_by") == "linkedin_url.asc"

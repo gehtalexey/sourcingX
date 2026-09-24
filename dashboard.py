@@ -13064,7 +13064,10 @@ with tab_usage:
                             f"{int(salesql.get('lookups', 0)):,} lookups",
                             help="5,000/day limit"
                         )
-                        st.caption(f"{salesql.get('requests', 0)} requests")
+                        st.caption(
+                            f"{int(salesql.get('credits', 0)):,} credits (emails found) | "
+                            f"{salesql.get('requests', 0)} requests"
+                        )
 
                     with metric_cols[2]:
                         openai = summary.get('openai', {})

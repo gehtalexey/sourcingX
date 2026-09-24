@@ -244,6 +244,39 @@ def test_salesql_miss_logs_zero_credits_but_keeps_the_row():
     assert row['request_count'] == 1
 
 
+def _salesql_rows():
+    hit = {'provider': 'salesql', 'status': 'success', 'request_count': 1, 'credits_used': 1,
+           'created_at': '2026-09-24T10:00:00'}
+    miss = {'provider': 'salesql', 'status': 'not_found', 'request_count': 1, 'credits_used': 0,
+            'created_at': '2026-09-24T10:00:01'}
+    err = {'provider': 'salesql', 'status': 'error', 'request_count': 0, 'credits_used': 0,
+           'created_at': '2026-09-24T10:00:02'}
+    return [hit, hit, miss, miss, miss, err]
+
+
+def test_usage_summary_counts_misses_as_lookups_not_credits():
+    """Usage tab: misses log 0 credits but still count against the
+    5,000/day lookup limit, so lookups and credits are separate figures."""
+    from unittest.mock import MagicMock
+    from db import get_usage_summary
+
+    client = MagicMock()
+    client.select.return_value = _salesql_rows()
+    s = get_usage_summary(client)['salesql']
+    assert s['lookups'] == 5
+    assert s['credits'] == 2
+    assert s['errors'] == 1
+
+
+def test_usage_by_date_charts_lookups():
+    from unittest.mock import MagicMock
+    from db import get_usage_by_date
+
+    client = MagicMock()
+    client.select.return_value = _salesql_rows()
+    assert get_usage_by_date(client)[0]['salesql'] == 5
+
+
 def test_salesql_error_is_not_billed():
     row = _logged(lookups=1, status='error', error_message='API error 500', billed=False)
     assert row['credits_used'] == 0

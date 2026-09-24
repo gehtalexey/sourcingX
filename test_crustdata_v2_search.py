@@ -194,6 +194,20 @@ class TestSearchV2Request:
             body = mock_post.call_args.kwargs["json"]
             assert body["post_processing"]["exclude_profiles"] == ["https://www.linkedin.com/in/foo"]
 
+    def test_fields_does_not_request_locked_fields(self):
+        """Regression test (2026-09-24): our Crustdata account is not
+        permitted to RETURN years_of_experience_raw or recently_changed_jobs
+        — requesting either in `fields` fails the whole call with
+        `permission_error: Access denied to fields: ...`. They still work as
+        FILTERS (see test_filters_remapped_before_sending-style tests); this
+        only guards the returned-fields list."""
+        with patch("crustdata_search.requests.post") as mock_post:
+            mock_post.return_value = _mock_response(json_data={"profiles": [], "total_count": 0})
+            search_people_db_v2({}, api_key="test-key")
+            body = mock_post.call_args.kwargs["json"]
+            assert "years_of_experience_raw" not in body["fields"]
+            assert "recently_changed_jobs" not in body["fields"]
+
 
 # ---------------------------------------------------------------------------
 # search_people_db_v2 — response parsing

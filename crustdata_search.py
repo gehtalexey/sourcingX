@@ -1227,10 +1227,16 @@ def search_people_db_v2(
     # Keep the response small — skills/summary are never returned by this
     # endpoint regardless of what's requested, so only ask for the sections
     # the results table + semantic_profile_to_legacy_shape() actually read.
+    # years_of_experience_raw and recently_changed_jobs are NOT requested here:
+    # our Crustdata account is not permitted to RETURN those two fields (they
+    # still work as FILTERS elsewhere in this file — verified live 2026-09-24).
+    # Requesting them in `fields` fails the whole call with
+    # "permission_error: Access denied to fields: recently_changed_jobs,
+    # years_of_experience_raw".
     body["fields"] = [
         "basic_profile", "experience.employment_details", "education.schools",
         "social_handles.professional_network_identifier", "professional_network",
-        "years_of_experience_raw", "recently_changed_jobs", "crustdata_person_id",
+        "crustdata_person_id",
     ]
 
     try:

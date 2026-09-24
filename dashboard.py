@@ -4708,6 +4708,38 @@ def _stability_verdict_failed(durations_text: str) -> bool:
     return bool(durations_text) and "STABILITY VERDICT: FAIL" in durations_text
 
 
+_NO_HARD_FILTER_PLACEHOLDERS = {
+    "none", "na", "n/a", "no", "null", "false", "not applicable",
+    "no hard filter", "no hard filters",
+    "no hard filter failed", "no hard filters failed", "-",
+}
+
+
+def _hard_filter_failure_named(hard_filter_failed) -> bool:
+    """True only when hard_filter_failed names a REAL hard-filter reason,
+    not a model placeholder for "nothing failed". Models return "none",
+    "N/A", "no hard filter", "null", "-", "no", "false", "not applicable",
+    "no hard filters failed", etc. instead of leaving the field empty as
+    instructed -- treating any of those as a failure would wrongly force
+    NO GO on a clean profile (Codex review, PR #144 round 2).
+
+    Case-insensitive; strips surrounding whitespace and light punctuation
+    before matching, and also catches anything that starts with "none",
+    "no hard filter", or "n/a" (covers phrasing like "None of the hard
+    filters apply")."""
+    s = str(hard_filter_failed or "").strip()
+    if not s:
+        return False
+    norm = s.lower().strip(" .,;:!-_")
+    if not norm:
+        return False
+    if norm in _NO_HARD_FILTER_PLACEHOLDERS:
+        return False
+    if norm.startswith("none") or norm.startswith("no hard filter") or norm.startswith("n/a"):
+        return False
+    return True
+
+
 def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdicts,
                                    hard_filter_failed=None, stability_failed=False,
                                    experience_limit_failed=False):
@@ -4751,7 +4783,7 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
             return ("NO GO", f"Auto-NO GO (model verdicts contradicted its GO): {guard_reason}.")
         return (decision, "")
 
-    hard_filter_named = bool(str(hard_filter_failed or "").strip())
+    hard_filter_named = _hard_filter_failure_named(hard_filter_failed)
     other_hard_fail = hard_filter_named or stability_failed or experience_limit_failed
     if other_hard_fail:
         if decision != "NO GO":

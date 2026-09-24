@@ -40,6 +40,7 @@ from dashboard import (
     _stability_verdict_failed,
     _resolve_three_state_decision,
     _result_bucket,
+    _hard_filter_failure_named,
 )
 
 
@@ -539,6 +540,36 @@ class TestResultBucket:
         # Legacy results without a `decision` field at all.
         r = {"fit": "Maybe"}
         assert _result_bucket(r) == "Maybe"
+
+
+class TestHardFilterFailureNamed:
+    """_hard_filter_failure_named(hard_filter_failed) -> bool. Codex review
+    (PR #144, round 2, issue 1): models sometimes fill the field with a
+    "nothing failed" placeholder instead of leaving it empty as instructed
+    -- those must NOT be treated as a real hard-filter failure, or a clean
+    profile gets wrongly forced to NO GO."""
+
+    @pytest.mark.parametrize("placeholder", [
+        "", "  ", "none", "None", "NONE", "none.", "None of the hard filters apply",
+        "na", "n/a", "N/A", "no", "No", "no.",
+        "no hard filter", "No hard filter", "no hard filters",
+        "no hard filter failed", "no hard filters failed", "No hard filters failed.",
+        "null", "NULL", "false", "False", "not applicable", "Not Applicable", "-",
+    ])
+    def test_placeholders_are_not_a_failure(self, placeholder):
+        assert _hard_filter_failure_named(placeholder) is False
+
+    def test_none_value_is_not_a_failure(self):
+        assert _hard_filter_failure_named(None) is False
+
+    @pytest.mark.parametrize("real_reason", [
+        "Job hopper: 4 roles under 1 year",
+        "Career arc predominantly non-tech (sales/retail background)",
+        "Telecom/outsourcing background, no exception requested",
+        "8+ years at one company with static scope",
+    ])
+    def test_real_hard_filter_reasons_are_a_failure(self, real_reason):
+        assert _hard_filter_failure_named(real_reason) is True
 
     def test_not_met_still_forces_no_go_even_with_hard_filter_set(self):
         must_haves = [

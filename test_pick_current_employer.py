@@ -244,6 +244,7 @@ def test_trim_profile_for_email_reads_new_format_jobs_and_location():
     past = trimmed['past_employers'][0]
     assert past['title'] == 'Backend Engineer'
     assert past['company'] == 'Monday'  # normalize_company_name strips ".com"
+    assert past['role_description'] == 'Worked on the automations platform.'
 
 
 def test_trim_profile_for_email_old_format_location_still_wins():
@@ -560,6 +561,91 @@ def test_has_descriptive_text_false_when_only_titles_and_skills():
     }) is False
 
 
+def test_has_descriptive_text_true_with_past_role_description_only():
+    assert _has_descriptive_text({
+        'current_employers': [{'title': 'Backend Engineer', 'company': 'CyberArk'}],
+        'past_employers': [{'title': 'Engineer', 'company': 'OldCo', 'role_description': 'Led the migration.'}],
+    }) is True
+
+
+def test_trim_profile_for_email_keeps_past_role_description_new_shape():
+    """Codex round 3: a profile whose ONLY description lives on a past role
+    (new shape: 'description' field) must not be flagged as thin, and the
+    description must survive trimming."""
+    raw = {
+        'name': 'New Shape Candidate',
+        'current_employers': [
+            {'title': 'Backend Engineer', 'name': 'CyberArk', 'start_date': '2023-01-01'}
+        ],
+        'past_employers': [
+            {
+                'title': 'Software Engineer',
+                'name': 'OldCo',
+                'description': 'Migrated the billing pipeline to Kubernetes.',
+                'start_date': '2021-01-01',
+                'end_date': '2022-12-01',
+            }
+        ],
+    }
+
+    trimmed = trim_profile_for_email(raw)
+
+    past = trimmed['past_employers'][0]
+    assert past['role_description'] == 'Migrated the billing pipeline to Kubernetes.'
+    assert _has_descriptive_text(trimmed) is True
+
+
+def test_trim_profile_for_email_keeps_past_role_description_old_shape():
+    """Same as above but for the old shape ('employee_description' field
+    on 'employer_name'-keyed entries)."""
+    raw = {
+        'name': 'Old Shape Candidate',
+        'current_employers': [
+            {'employee_title': 'Backend Engineer', 'employer_name': 'CyberArk', 'start_date': '2023-01-01'}
+        ],
+        'past_employers': [
+            {
+                'employee_title': 'Software Engineer',
+                'employer_name': 'OldCo',
+                'employee_description': 'Migrated the billing pipeline to Kubernetes.',
+                'start_date': '2021-01-01',
+                'end_date': '2022-12-01',
+            }
+        ],
+    }
+
+    trimmed = trim_profile_for_email(raw)
+
+    past = trimmed['past_employers'][0]
+    assert past['role_description'] == 'Migrated the billing pipeline to Kubernetes.'
+    assert _has_descriptive_text(trimmed) is True
+
+
+def test_trim_profile_for_email_past_role_before_2021_stays_excluded():
+    """The existing 'no companies before 2021' rule must still drop past
+    roles that ended before 2021, description or not."""
+    raw = {
+        'name': 'Old Job Candidate',
+        'current_employers': [
+            {'title': 'Backend Engineer', 'name': 'CyberArk', 'start_date': '2023-01-01'}
+        ],
+        'past_employers': [
+            {
+                'title': 'Junior Engineer',
+                'name': 'AncientCo',
+                'description': 'Built the original monolith.',
+                'start_date': '2015-01-01',
+                'end_date': '2018-01-01',
+            }
+        ],
+    }
+
+    trimmed = trim_profile_for_email(raw)
+
+    assert trimmed['past_employers'] == []
+    assert _has_descriptive_text(trimmed) is False
+
+
 THIN_PROFILE = {
     'raw_data': {
         'name': 'Thin Candidate',
@@ -629,6 +715,33 @@ def test_generate_emails_batch_passes_company_through_to_prompt(monkeypatch):
 
     assert len(results) == 1
     assert 'at Acme' in captured['system_prompt']
+
+
+def test_profile_with_only_past_role_description_gets_no_thin_profile_note():
+    client = _CapturingOpenAIClient([CLEAN_OPENER])
+    profile = {
+        'raw_data': {
+            'name': 'Past Description Candidate',
+            'current_employers': [
+                {'title': 'Backend Engineer', 'employer_name': 'CyberArk', 'start_date': '2023-01-01'}
+            ],
+            'past_employers': [
+                {
+                    'title': 'Software Engineer',
+                    'employer_name': 'OldCo',
+                    'employee_description': 'Migrated the billing pipeline to Kubernetes.',
+                    'start_date': '2021-01-01',
+                    'end_date': '2022-12-01',
+                }
+            ],
+            'skills': ['Python'],
+        }
+    }
+    generate_email_for_profile(
+        profile, client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert 'do not claim anything they built' not in client.last_user_prompt
 
 
 def test_profile_with_descriptions_gets_no_thin_profile_note():

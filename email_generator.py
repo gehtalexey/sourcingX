@@ -458,6 +458,15 @@ def trim_profile_for_email(raw: dict) -> dict:
             company_desc = emp.get('employer_linkedin_description')
             if company_desc:
                 entry['company_description'] = _first_sentence(company_desc)
+            # Include what they did in the role (old shape: employee_description,
+            # new shape: description - handled by _emp_field). Safe to add for
+            # every entry reaching this point: the "no companies before 2021"
+            # rule is already enforced above (entries ending before 2021 were
+            # `continue`d past), so any past role we keep here is one the
+            # opener prompt is allowed to cite from.
+            role_desc = _emp_field(emp, 'description')
+            if role_desc:
+                entry['role_description'] = _first_sentence(role_desc)
             trimmed['past_employers'].append(entry)
 
     # Education - include more details
@@ -543,7 +552,7 @@ def _has_descriptive_text(trimmed: dict) -> bool:
         if emp.get('role_description') or emp.get('company_description'):
             return True
     for emp in (trimmed.get('past_employers') or []):
-        if emp.get('company_description'):
+        if emp.get('role_description') or emp.get('company_description'):
             return True
     return False
 

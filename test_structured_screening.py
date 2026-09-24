@@ -1,141 +1,125 @@
 """
 Test the parse_requirements function from structured_screening.py
 
-This test verifies that parse_requirements correctly extracts structured
-requirements from a natural language job description using Claude Haiku.
+The default test uses a fake Anthropic client with a canned JSON reply, so it
+costs nothing and needs no config.json. The live variant calls the real
+Claude Haiku API and only runs with SOURCINGX_LIVE_API=1.
 """
 
 import json
+import os
 import sys
-import anthropic
+from types import SimpleNamespace
+
+import pytest
+
 from structured_screening import parse_requirements, RequirementType
 
 
-def load_config():
-    """Load API key from config.json"""
-    with open("config.json", "r") as f:
-        return json.load(f)
-
-
-def test_parse_requirements():
-    """Test that parse_requirements correctly extracts requirements from JD."""
-
-    config = load_config()
-    client = anthropic.Anthropic(api_key=config["anthropic_api_key"])
-
-    job_description = """Looking for a fullstack team lead with 5+ years experience,
+JOB_DESCRIPTION = """Looking for a fullstack team lead with 5+ years experience,
     must have React and Node.js, 2+ years leading a team,
     reject candidates from consultancies or banks,
     bonus if from Wiz or 8200"""
 
-    print("=" * 60)
-    print("Testing parse_requirements()")
-    print("=" * 60)
-    print(f"\nJob Description:\n{job_description}\n")
+# Shaped like PARSER_PROMPT's example output; wrapped in a code fence the way
+# Haiku often answers, so _parse_json_response's fence stripping is exercised.
+CANNED_RESPONSE = "```json\n" + json.dumps({
+    "must_have": [
+        {"type": "skill_frontend", "description": "Has React", "values": ["React"]},
+        {"type": "skill_backend", "description": "Has Node.js", "values": ["Node.js"]},
+        {"type": "experience_years", "description": "5+ years fullstack", "min_value": 5},
+        {"type": "leadership_years", "description": "2+ years team lead", "min_value": 2},
+    ],
+    "nice_to_have": [
+        {"type": "custom", "description": "Wiz or 8200 background", "values": ["Wiz", "8200"], "boost": 2},
+    ],
+    "reject_if": [
+        {"type": "company_type", "description": "Reject consultancies", "values": ["consulting", "outsourcing"]},
+        {"type": "company_type", "description": "Reject banks", "values": ["bank"]},
+    ],
+}, indent=2) + "\n```"
 
-    # Parse the requirements
-    requirements = parse_requirements(job_description, client)
 
-    print("=" * 60)
-    print("PARSED REQUIREMENTS")
-    print("=" * 60)
+class FakeAnthropicClient:
+    """Stands in for anthropic.Anthropic: records calls, returns canned text."""
 
-    # Print must_have requirements
-    print("\n--- MUST HAVE ---")
-    for req in requirements.get("must_have", []):
-        print(f"  Type: {req.type.value}")
-        print(f"  Description: {req.description}")
-        if req.values:
-            print(f"  Values: {req.values}")
-        if req.min_value is not None:
-            print(f"  Min Value: {req.min_value}")
-        if req.max_value is not None:
-            print(f"  Max Value: {req.max_value}")
-        print()
+    def __init__(self, text):
+        self.calls = []
+        self.messages = SimpleNamespace(create=self._create)
+        self._text = text
 
-    # Print reject_if requirements
-    print("\n--- REJECT IF ---")
-    for req in requirements.get("reject_if", []):
-        print(f"  Type: {req.type.value}")
-        print(f"  Description: {req.description}")
-        if req.values:
-            print(f"  Values: {req.values}")
-        print()
+    def _create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(content=[SimpleNamespace(text=self._text)])
 
-    # Print nice_to_have requirements
-    print("\n--- NICE TO HAVE ---")
-    for req in requirements.get("nice_to_have", []):
-        print(f"  Type: {req.type.value}")
-        print(f"  Description: {req.description}")
-        if req.values:
-            print(f"  Values: {req.values}")
-        print(f"  Boost Points: {req.boost_points}")
-        print()
 
-    # Verify expected extractions
-    print("=" * 60)
-    print("VERIFICATION")
-    print("=" * 60)
+def _check_requirements(requirements):
+    """Assert the JD's key requirements were extracted."""
+    must = requirements.get("must_have", [])
+    reject = requirements.get("reject_if", [])
+    nice = requirements.get("nice_to_have", [])
 
-    checks = []
+    def of_type(reqs, t):
+        return [r for r in reqs if r.type == t]
 
-    # Check for skill_frontend (React)
-    frontend_reqs = [r for r in requirements.get("must_have", []) if r.type == RequirementType.SKILL_FRONTEND]
-    has_react = any("react" in str(r.values).lower() for r in frontend_reqs)
-    checks.append(("must_have: skill_frontend (React)", has_react, frontend_reqs))
+    frontend = of_type(must, RequirementType.SKILL_FRONTEND)
+    assert any("react" in str(r.values).lower() for r in frontend), frontend
 
-    # Check for skill_backend (Node.js)
-    backend_reqs = [r for r in requirements.get("must_have", []) if r.type == RequirementType.SKILL_BACKEND]
-    has_node = any("node" in str(r.values).lower() for r in backend_reqs)
-    checks.append(("must_have: skill_backend (Node.js)", has_node, backend_reqs))
+    backend = of_type(must, RequirementType.SKILL_BACKEND)
+    assert any("node" in str(r.values).lower() for r in backend), backend
 
-    # Check for experience_years (5)
-    exp_reqs = [r for r in requirements.get("must_have", []) if r.type == RequirementType.EXPERIENCE_YEARS]
-    has_5_years = any(r.min_value == 5 for r in exp_reqs)
-    checks.append(("must_have: experience_years (5)", has_5_years, exp_reqs))
+    exp = of_type(must, RequirementType.EXPERIENCE_YEARS)
+    assert any(r.min_value == 5 for r in exp), exp
 
-    # Check for leadership_years (2)
-    lead_reqs = [r for r in requirements.get("must_have", []) if r.type == RequirementType.LEADERSHIP_YEARS]
-    has_2_years_lead = any(r.min_value == 2 for r in lead_reqs)
-    checks.append(("must_have: leadership_years (2)", has_2_years_lead, lead_reqs))
+    lead = of_type(must, RequirementType.LEADERSHIP_YEARS)
+    assert any(r.min_value == 2 for r in lead), lead
 
-    # Check reject_if for company_type (consultancies, banks)
-    reject_company_reqs = [r for r in requirements.get("reject_if", []) if r.type == RequirementType.COMPANY_TYPE]
-    has_consultancy = any("consult" in str(r.values).lower() for r in reject_company_reqs)
-    has_bank = any("bank" in str(r.values).lower() for r in reject_company_reqs)
-    checks.append(("reject_if: company_type (consultancies)", has_consultancy, reject_company_reqs))
-    checks.append(("reject_if: company_type (banks)", has_bank, reject_company_reqs))
+    reject_company = of_type(reject, RequirementType.COMPANY_TYPE)
+    assert any("consult" in str(r.values).lower() for r in reject_company), reject_company
+    assert any("bank" in str(r.values).lower() for r in reject_company), reject_company
 
-    # Check nice_to_have for custom (Wiz, 8200)
-    nice_custom_reqs = [r for r in requirements.get("nice_to_have", []) if r.type == RequirementType.CUSTOM]
-    has_wiz = any("wiz" in str(r.values).lower() for r in nice_custom_reqs)
-    has_8200 = any("8200" in str(r.values) for r in nice_custom_reqs)
-    checks.append(("nice_to_have: custom (Wiz)", has_wiz, nice_custom_reqs))
-    checks.append(("nice_to_have: custom (8200)", has_8200, nice_custom_reqs))
+    nice_custom = of_type(nice, RequirementType.CUSTOM)
+    assert any("wiz" in str(r.values).lower() for r in nice_custom), nice_custom
+    assert any("8200" in str(r.values) for r in nice_custom), nice_custom
 
-    # Print verification results
-    print("\nExpected Extractions:")
-    all_passed = True
-    for check_name, passed, reqs in checks:
-        status = "PASS" if passed else "FAIL"
-        if not passed:
-            all_passed = False
-        print(f"  [{status}] {check_name}")
-        if not passed and reqs:
-            print(f"         Found: {[(r.type.value, r.values, r.min_value) for r in reqs]}")
 
-    print("\n" + "=" * 60)
-    if all_passed:
-        print("ALL VERIFICATIONS PASSED!")
-    else:
-        print("SOME VERIFICATIONS FAILED - see details above")
-    print("=" * 60)
+def test_parse_requirements():
+    """parse_requirements turns the model's JSON into Requirement objects."""
+    client = FakeAnthropicClient(CANNED_RESPONSE)
 
-    return requirements, all_passed
+    requirements = parse_requirements(JOB_DESCRIPTION, client)
+
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call["model"] == "claude-haiku-4-5-20251001"
+    assert JOB_DESCRIPTION in call["messages"][0]["content"]
+
+    _check_requirements(requirements)
+
+    # Flags parse_requirements sets on top of the model's JSON.
+    assert all(r.is_must_have for r in requirements["must_have"])
+    assert all(r.is_must_have for r in requirements["reject_if"])
+    assert all(not r.is_must_have for r in requirements["nice_to_have"])
+    assert requirements["nice_to_have"][0].boost_points == 2
+
+
+@pytest.mark.live_api
+def test_parse_requirements_live():
+    """Same checks against the real Claude Haiku API (costs money)."""
+    import anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        with open("config.json", "r") as f:
+            api_key = json.load(f)["anthropic_api_key"]
+    client = anthropic.Anthropic(api_key=api_key)
+
+    _check_requirements(parse_requirements(JOB_DESCRIPTION, client))
 
 
 if __name__ == "__main__":
-    # Ensure output is not buffered
-    sys.stdout.flush()
-    requirements, passed = test_parse_requirements()
-    sys.exit(0 if passed else 1)
+    # Runs the free, mocked test. For the live one:
+    #   SOURCINGX_LIVE_API=1 pytest test_structured_screening.py -m live_api
+    test_parse_requirements()
+    print("test_parse_requirements: PASS")
+    sys.exit(0)

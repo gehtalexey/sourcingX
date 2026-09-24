@@ -31,7 +31,15 @@ from unittest.mock import MagicMock, patch
 # Manual scripts that hit the live DB at import time, not pytest tests.
 # Run them by hand (python test_structured_real.py); the guard below would
 # otherwise abort collection whenever config.json is present.
-collect_ignore = ["test_structured_real.py"]
+# test_e2e_fullstack_israel.py is a paid end-to-end script (Crustdata +
+# Anthropic) that also swaps sys.stdout at import, which crashes pytest.
+# test_screening.py is a paid OpenAI script that calls exit(1) at import when
+# config.json has no key, which aborts the whole run.
+collect_ignore = [
+    "test_structured_real.py",
+    "test_e2e_fullstack_israel.py",
+    "test_screening.py",
+]
 
 _LIVE_DB_ALLOWED = False
 _ORIGINAL_ADAPTER_SEND = requests.adapters.HTTPAdapter.send
@@ -53,7 +61,70 @@ def _configured_supabase_host():
 _SUPABASE_HOST = _configured_supabase_host()
 
 
+# ---------------------------------------------------------------------------
+# Keep the test suite away from paid APIs (Anthropic, OpenAI, Crustdata,
+# SalesQL). test_structured_screening.py used to build a real Anthropic
+# client from config.json and spend money on every pytest run. Tests that
+# truly need a paid API must be marked @pytest.mark.live_api AND run with
+# SOURCINGX_LIVE_API=1; otherwise they are skipped and this guard refuses
+# the request before any network I/O.
+# ---------------------------------------------------------------------------
+
+_LIVE_API_ENV = 'SOURCINGX_LIVE_API'
+# Blocked with every subdomain (api.crustdata.com, api-public.salesql.com, ...).
+_PAID_API_DOMAINS = ('anthropic.com', 'openai.com', 'crustdata.com', 'salesql.com')
+_PAID_API_ALLOWED = False
+
+
+def _live_api_opted_in():
+    return os.environ.get(_LIVE_API_ENV, '') == '1'
+
+
+def _is_paid_api_host(host):
+    host = (host or '').lower().rstrip('.')
+    return any(host == d or host.endswith('.' + d) for d in _PAID_API_DOMAINS)
+
+
+def _refuse_paid_api(method, url):
+    parsed = urlparse(str(url))
+    host = (parsed.hostname or '').lower()
+    if _is_paid_api_host(host) and not (_PAID_API_ALLOWED and _live_api_opted_in()):
+        raise RuntimeError(
+            "tests must not call paid APIs "
+            f"({method} {host}{parsed.path}, "
+            f"test: {os.environ.get('PYTEST_CURRENT_TEST', 'collection')}). "
+            "Use a fake client, or mark the test @pytest.mark.live_api and run "
+            f"with {_LIVE_API_ENV}=1."
+        )
+
+
+# The anthropic SDK sends through httpx; openai 3.x through its fork httpx2.
+_HTTPX_ORIGINALS = {}  # (Client class, original send)
+for _mod_name in ('httpx', 'httpx2'):
+    try:
+        _mod = __import__(_mod_name)
+    except ImportError:  # not installed: nothing to guard
+        continue
+    for _cls_name in ('Client', 'AsyncClient'):
+        _cls = getattr(_mod, _cls_name, None)
+        if _cls is not None:
+            _HTTPX_ORIGINALS[_cls] = _cls.send
+
+
+def _make_guarded_httpx_send(original, is_async):
+    if is_async:
+        async def send(self, request, *args, **kwargs):
+            _refuse_paid_api(request.method, request.url)
+            return await original(self, request, *args, **kwargs)
+    else:
+        def send(self, request, *args, **kwargs):
+            _refuse_paid_api(request.method, request.url)
+            return original(self, request, *args, **kwargs)
+    return send
+
+
 def _guarded_send(self, request, *args, **kwargs):
+    _refuse_paid_api(request.method, request.url)
     host = (urlparse(request.url).hostname or '').lower()
     if not _LIVE_DB_ALLOWED and (
         host.endswith('supabase.co') or (_SUPABASE_HOST and host == _SUPABASE_HOST)
@@ -71,12 +142,45 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "live_db: test deliberately uses the real Supabase database"
     )
+    config.addinivalue_line(
+        "markers",
+        f"live_api: test deliberately calls a real paid API (skipped unless {_LIVE_API_ENV}=1)",
+    )
     # Installed session-wide (not per test) so import-time code is covered too.
     requests.adapters.HTTPAdapter.send = _guarded_send
+    for cls, original in _HTTPX_ORIGINALS.items():
+        cls.send = _make_guarded_httpx_send(original, cls.__name__ == 'AsyncClient')
 
 
 def pytest_unconfigure(config):
     requests.adapters.HTTPAdapter.send = _ORIGINAL_ADAPTER_SEND
+    for cls, original in _HTTPX_ORIGINALS.items():
+        cls.send = original
+
+
+def pytest_collection_modifyitems(config, items):
+    if _live_api_opted_in():
+        return
+    skip_live = pytest.mark.skip(
+        reason=f"calls a real paid API; set {_LIVE_API_ENV}=1 to run it"
+    )
+    for item in items:
+        if item.get_closest_marker("live_api"):
+            item.add_marker(skip_live)
+
+
+@pytest.fixture(autouse=True)
+def _paid_api_opt_in(request):
+    """Let paid-API requests through only for live_api tests with the env opt-in."""
+    global _PAID_API_ALLOWED
+    if request.node.get_closest_marker("live_api") and _live_api_opted_in():
+        _PAID_API_ALLOWED = True
+        try:
+            yield
+        finally:
+            _PAID_API_ALLOWED = False
+        return
+    yield
 
 
 @pytest.fixture(autouse=True)

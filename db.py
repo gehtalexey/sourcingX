@@ -1167,6 +1167,7 @@ def insert_screening_results_batch(client: SupabaseClient, results: list,
             'screening_fit_level': r.get('fit_level'),
             'screening_summary': r.get('summary'),
             'screening_reasoning': r.get('reasoning'),
+            'screening_notes': r.get('notes'),
             'ai_model': ai_model,
             'screened_at': now,
         }

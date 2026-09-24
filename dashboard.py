@@ -4574,8 +4574,14 @@ def _decision_to_fit_label(decision: str, score: int) -> str:
     bucket is "Not a Fit" regardless of score. The internal label strings
     ("Good Fit"/"Maybe"/"Not a Fit") are unchanged so existing filters keep
     working; the recruiter-facing display maps them to GO/MAYBE/NO GO."""
-    is_go = str(decision).upper().strip() == "GO"
-    if not is_go:
+    d = str(decision).upper().strip()
+    if d == "NEEDS VERIFICATION":
+        # Unproven, not contradicted -- worth a human glance, same bucket as
+        # a low-confidence GO. Storage keeps this as the existing "Maybe"
+        # fit_level (agent-kalamata filters on that column); the UI tells
+        # the two apart via the separate `decision` field.
+        return "Maybe"
+    if d != "GO":
         return "Not a Fit"
     try:
         s = int(score or 0)
@@ -4610,16 +4616,18 @@ def _tri(v):
 
 def _verdicts_force_no_go(must_have_verdicts, exclusion_verdicts):
     """Return (force_no_go: bool, reason: str). True when the model's own
-    per-criterion verdicts EXPLICITLY contradict a GO: any must-have with an
-    explicit met=false, or any exclusion with an explicit matched=true. A
-    missing or ambiguous field (_tri(...) is None) is never treated as a
+    per-criterion verdicts EXPLICITLY contradict a GO: any must-have marked
+    not_met (explicit met=false, or the new "not_met" string — see
+    _must_have_verdict_state), or any exclusion with an explicit
+    matched=true. A missing or ambiguous field is never treated as a
     contradiction -- only an explicit signal from the model may force an
-    override, so a malformed/incomplete verdict can never wrongly flip a
-    legitimate GO into a NO GO. Conservative: if there are NO verdicts at all
-    (empty/None), return (False, '') so we never override a decision the
-    model made without emitting verdicts."""
+    override, so a malformed/incomplete verdict, or a must-have marked
+    "needs_verification" (unproven but not contradicted), can never wrongly
+    flip a legitimate GO into a NO GO. Conservative: if there are NO
+    verdicts at all (empty/None), return (False, '') so we never override a
+    decision the model made without emitting verdicts."""
     failed = [str(m.get('text', '')).strip() for m in (must_have_verdicts or [])
-              if isinstance(m, dict) and _tri(m.get('met')) is False]
+              if isinstance(m, dict) and _must_have_verdict_state(m.get('met')) == 'not_met']
     matched = [str(e.get('text', '')).strip() for e in (exclusion_verdicts or [])
                if isinstance(e, dict) and _tri(e.get('matched')) is True]
     if not (must_have_verdicts or exclusion_verdicts):
@@ -4632,6 +4640,45 @@ def _verdicts_force_no_go(must_have_verdicts, exclusion_verdicts):
             bits.append('exclusion(s) matched: ' + '; '.join(x for x in matched if x))
         return (True, ' | '.join(bits))
     return (False, '')
+
+
+def _must_have_verdict_state(v):
+    """Three-way parser for a must-have's 'met' field: 'met', 'not_met',
+    'needs_verification', or None (missing/unrecognized). Accepts the new
+    three-way string values plus a legacy boolean for backward compatibility
+    with older model responses (True=met, False=not_met)."""
+    if isinstance(v, bool):
+        return 'met' if v else 'not_met'
+    if isinstance(v, (int, float)):
+        if v == 1:
+            return 'met'
+        if v == 0:
+            return 'not_met'
+        return None
+    if isinstance(v, str):
+        s = v.strip().lower().replace('-', '_').replace(' ', '_')
+        if s in ('met', 'true', 'yes', 'y', '1'):
+            return 'met'
+        if s in ('not_met', 'false', 'no', 'n', '0'):
+            return 'not_met'
+        if s in ('needs_verification', 'needsverification', 'unverified', 'unproven'):
+            return 'needs_verification'
+        return None
+    return None
+
+
+def _verdicts_needs_verification(must_have_verdicts):
+    """Return (needs_verification: bool, items: list[str]) — must-haves the
+    model explicitly marked 'needs_verification' (unproven, not contradicted).
+    A must-have that is 'not_met' or unrecognized/missing is never included
+    here; those are handled by _verdicts_force_no_go instead. Conservative:
+    no verdicts at all -> (False, [])."""
+    items = [str(m.get('text', '')).strip()
+             for m in (must_have_verdicts or [])
+             if isinstance(m, dict)
+             and _must_have_verdict_state(m.get('met')) == 'needs_verification']
+    items = [i for i in items if i]
+    return (bool(items), items)
 
 
 _DEFAULT_USER_REQUEST = "Senior software engineering candidate. Apply the standard policy."
@@ -4889,7 +4936,11 @@ def screen_profile(profile: dict, job_description: str, client,
             force_no_go, guard_reason = _verdicts_force_no_go(
                 result["must_have_verdicts"], result["exclusion_verdicts"]
             )
-            if force_no_go and decision == "GO":
+            needs_verif, needs_verif_items = _verdicts_needs_verification(
+                result["must_have_verdicts"]
+            )
+            result["needs_verification"] = needs_verif_items
+            if force_no_go and decision != "NO GO":
                 decision = "NO GO"
                 result["decision"] = "NO GO"
                 result["fit"] = _decision_to_fit_label("NO GO", score)
@@ -4897,6 +4948,20 @@ def screen_profile(profile: dict, job_description: str, client,
                     f"Auto-NO GO (model verdicts contradicted its GO): "
                     f"{guard_reason}. {reasoning}"
                 )
+                result["reasoning"] = override_note
+                result["summary"] = override_note
+                result["decision_guard_override"] = True
+            elif not force_no_go and needs_verif and decision != "NEEDS VERIFICATION":
+                # No must-have was contradicted and no exclusion matched, but
+                # at least one must-have is unproven. Per policy that is
+                # NEEDS VERIFICATION, never NO GO -- this corrects exactly
+                # the over-rejection bug (model saying NO GO because a
+                # must-have "does not verify") that this guard exists for.
+                decision = "NEEDS VERIFICATION"
+                result["decision"] = "NEEDS VERIFICATION"
+                result["fit"] = _decision_to_fit_label("NEEDS VERIFICATION", score)
+                verif_note = "Needs verification: " + "; ".join(needs_verif_items)
+                override_note = f"{verif_note}. {reasoning}".strip()
                 result["reasoning"] = override_note
                 result["summary"] = override_note
                 result["decision_guard_override"] = True
@@ -10337,6 +10402,15 @@ with tab_screening:
                                     'fit_level': r.get('fit'),
                                     'summary': r.get('summary'),
                                     'reasoning': r.get('reasoning'),
+                                    # NEEDS VERIFICATION rows store fit_level
+                                    # "Maybe" (no new screening_fit_level
+                                    # value -- agent-kalamata filters on that
+                                    # column) with the detail here instead.
+                                    'notes': (
+                                        'Needs verification: ' + '; '.join(r.get('needs_verification'))
+                                        if r.get('decision') == 'NEEDS VERIFICATION' and r.get('needs_verification')
+                                        else None
+                                    ),
                                 }
                                 for r in newly_screened if r.get('linkedin_url')
                             ]
@@ -10523,15 +10597,22 @@ with tab_screening:
 
             screening_results = st.session_state['screening_results']
 
-            # Summary stats (unified policy: Good Fit = GO, Maybe = borderline NO GO, Not a Fit = NO GO)
-            stats_col1, stats_col2, stats_col3 = st.columns(3)
+            # Summary stats (unified policy: Good Fit = GO, Maybe = borderline
+            # NO GO, Not a Fit = NO GO). NEEDS VERIFICATION rows store
+            # fit_level "Maybe" (so downstream Maybe-based filters/exports
+            # keep working) but are broken out here via `decision` so
+            # recruiters can see them as their own bucket.
+            needs_verif_count = sum(1 for r in screening_results if r.get('decision') == 'NEEDS VERIFICATION')
+            stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
             good_fit = sum(1 for r in screening_results if r.get('fit') == 'Good Fit')
-            maybe_fit = sum(1 for r in screening_results if r.get('fit') == 'Maybe')
+            maybe_fit = sum(1 for r in screening_results
+                            if r.get('fit') == 'Maybe' and r.get('decision') != 'NEEDS VERIFICATION')
             not_fit = sum(1 for r in screening_results if r.get('fit') == 'Not a Fit')
 
             stats_col1.metric("GO", good_fit, delta=None)
             stats_col2.metric("MAYBE", maybe_fit, delta=None)
-            stats_col3.metric("NO GO", not_fit, delta=None)
+            stats_col3.metric("NEEDS VERIFICATION", needs_verif_count, delta=None)
+            stats_col4.metric("NO GO", not_fit, delta=None)
 
             # Filter by fit level
             fit_filter = st.multiselect(
@@ -10556,6 +10637,21 @@ with tab_screening:
                     bucket = 2
                 return (bucket, -int(r.get('score', 0) or 0))
             sorted_results = sorted(filtered_results, key=_sort_key)
+
+            # Needs-verification candidates: no must-have was contradicted and
+            # no exclusion matched, but at least one must-have is unproven.
+            # Shown as its own section, separate from GO and NO GO, so a
+            # recruiter can see exactly what to check before reaching out.
+            needs_verification_profiles = [r for r in screening_results if r.get('decision') == 'NEEDS VERIFICATION']
+            if needs_verification_profiles:
+                with st.expander(f"🟡 {len(needs_verification_profiles)} candidate(s) need verification", expanded=False):
+                    st.info("No must-have was contradicted, but at least one is unproven from the profile alone — worth a quick check before outreach.")
+                    for p in needs_verification_profiles[:20]:  # Show max 20
+                        name = p.get('name', 'Unknown')
+                        items = "; ".join(p.get('needs_verification') or [])
+                        st.markdown(f"- **{name}** — {items}" if items else f"- **{name}**")
+                    if len(needs_verification_profiles) > 20:
+                        st.caption(f"... and {len(needs_verification_profiles) - 20} more")
 
             # Check for profiles with missing data
             missing_data_profiles = [r for r in screening_results if r.get('fit') == 'Missing Data' or r.get('missing_data')]
@@ -10624,19 +10720,26 @@ with tab_screening:
                 def _format_criteria_summary(r):
                     """Compact per-criterion breakdown for the results table.
                     Structured-path results carry must_have_verdicts /
-                    exclusion_verdicts; legacy results don't (return '')."""
+                    exclusion_verdicts; legacy results don't (return '').
+                    Must-haves are three-way (met/not_met/needs_verification,
+                    or a legacy boolean) — use _must_have_verdict_state so a
+                    "met" string isn't miscounted as missing."""
                     mh = r.get('must_have_verdicts') or []
                     ex = r.get('exclusion_verdicts') or []
                     if not mh and not ex:
                         return ''
                     parts = []
                     if mh:
-                        met = sum(1 for m in mh if m.get('met') is True)
+                        met = sum(1 for m in mh if _must_have_verdict_state(m.get('met')) == 'met')
                         parts.append(f"Must-haves {met}/{len(mh)}")
-                        missing = [str(m.get('text', ''))[:32]
-                                   for m in mh if m.get('met') is not True]
-                        if missing:
-                            parts.append("missing: " + "; ".join(missing))
+                        not_met = [str(m.get('text', ''))[:32]
+                                   for m in mh if _must_have_verdict_state(m.get('met')) == 'not_met']
+                        if not_met:
+                            parts.append("not met: " + "; ".join(not_met))
+                        unverified = [str(m.get('text', ''))[:32]
+                                      for m in mh if _must_have_verdict_state(m.get('met')) == 'needs_verification']
+                        if unverified:
+                            parts.append("needs verification: " + "; ".join(unverified))
                     matched = [str(e.get('text', ''))[:32]
                                for e in ex if e.get('matched') is True]
                     if matched:
@@ -10645,14 +10748,17 @@ with tab_screening:
                         parts.append("exclusions clear")
                     return " · ".join(parts)
 
-                # One recruiter-facing verdict column (GO / MAYBE / NO GO),
-                # not the old redundant Decision + Fit pair.
+                # One recruiter-facing verdict column (GO / MAYBE /
+                # NEEDS VERIFICATION / NO GO), not the old redundant
+                # Decision + Fit pair.
                 _verdict_label = {"Good Fit": "GO", "Maybe": "MAYBE", "Not a Fit": "NO GO"}
                 display_data = []
                 for r in sorted_results:
                     fit_val = r.get('fit', '') or ''
+                    verdict = ("NEEDS VERIFICATION" if r.get('decision') == 'NEEDS VERIFICATION'
+                               else _verdict_label.get(fit_val, fit_val))  # Error/Skipped pass through
                     display_data.append({
-                        'Verdict': _verdict_label.get(fit_val, fit_val),  # Error/Skipped pass through
+                        'Verdict': verdict,
                         'Score': r.get('score', 0),
                         'Name': r.get('name', '') or '',
                         'LinkedIn': r.get('linkedin_url', ''),
@@ -10670,7 +10776,7 @@ with tab_screening:
                     width="stretch",
                     hide_index=True,
                     column_config={
-                        "Verdict": st.column_config.TextColumn("Verdict", width="small", help="GO = reach out · MAYBE = cleared every must-have but the AI scored it 5-6, worth a glance · NO GO = failed a must-have or hit an exclusion"),
+                        "Verdict": st.column_config.TextColumn("Verdict", width="small", help="GO = reach out · MAYBE = cleared every must-have but the AI scored it 5-6, worth a glance · NEEDS VERIFICATION = no must-have failed, but at least one is unproven from the profile · NO GO = failed a must-have or hit an exclusion"),
                         "Score": st.column_config.NumberColumn("Score", format="%d/10", width="small"),
                         "Name": st.column_config.TextColumn("Name", width="medium"),
                         "LinkedIn": st.column_config.LinkColumn("🔗", width="small", display_text="Open"),

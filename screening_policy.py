@@ -30,7 +30,7 @@ Rules:
 1. If the candidate clearly violates a stated constraint → NO GO with score 1-2. Name the violated constraint in the reasoning ("Fails 'minimum 1 year at current company' — current tenure is 4 months").
 2. Do NOT soft-score around a hard constraint: one violation = NO GO even for an otherwise strong candidate.
 3. Interpret each constraint exactly as the recruiter wrote it. A constraint that lists alternatives ("Node.js or Python", "Tel Aviv or Herzliya") is SATISFIED by ANY ONE of the alternatives — never treat the first option as the real requirement and the rest as fallback, and never require all of them at once. Do not add conditions the recruiter did not state (e.g. do not require experience to be "recent", or a stint to be longer than stated, unless the recruiter said so).
-4. Be strict and literal about whether a correctly-interpreted constraint is met — if the profile lacks evidence it is satisfied, treat it as a fail and say so.
+4. Be strict and literal about whether a correctly-interpreted constraint is met — if the profile CONTRADICTS it with specific evidence (e.g. based in the US when the role requires Europe, 1 year shown when 3+ is required), that is a fail (not_met). If the profile simply does not mention it either way, that is needs_verification, NOT a fail — absence of evidence is never evidence against a candidate. Say explicitly which one applies and why.
 5. A stated constraint OVERRIDES the generic Hard Filters below when stricter (e.g. user says "min 6 months" — use that, not the generic 1-year default).
 6. SCOPE — most exclusions describe the candidate's CURRENT state, not their whole career. Get this right or you will reject the best candidates:
    - Title/seniority exclusions ("no Directors/Heads of X", "no VPs/CTOs") mean: is the CURRENT role at that level? ONLY the current role decides this — a PAST title at that level never triggers the exclusion by itself if the current role clearly matches the level being hired for, no matter how recent that past title is, INCLUDING when it was the job immediately before the current one with no gap at all. Someone who was "Head of Product" at a smaller company right up until they started their current "Senior Product Manager" role today is a normal, common career path — not a match. Do not treat "recent" or "immediately preceding" as an exception to this — recency of a PAST title is not relevant, only what the CURRENT title is.
@@ -56,7 +56,7 @@ All tenure and stability is measured at the COMPANY level. Internal promotions o
 - 8+ years at one company with clear evidence of stagnation (static scope, no broadening responsibility). Do NOT trigger this merely because the profile lists a single collapsed title for the whole tenure — sparse title data is a gap in the source data, not proof the person never grew. Give the benefit of the doubt unless the role description itself shows genuinely static scope.
 - Career arc predominantly non-tech or irrelevant (sales, retail, ops, admin, manual labor) with no credible transferability — evaluate the FULL arc, not just the current role; a recent tech hire after years of non-tech work is a career changer, not a senior.
 - Primarily telecom, banking, or outsourcing/services — unless the user request targets them.
-- A must-have is missing with no credible adjacent or transferable match.
+- A must-have is CONTRADICTED by the profile (specific evidence against it) with no credible adjacent or transferable match. A must-have the profile simply doesn't mention is needs_verification, never this kind of fail — see the Must-Have Verdict rule below.
 
 Israeli mandatory military service (IDF, Unit 8200, Mamram, Talpiot, C4I, and Hebrew equivalents) is EXCLUDED from both arc filters above — judge "predominantly non-tech" and "primarily telecom/banking/outsourcing" on the CIVILIAN, post-service career only. Conscription is universal and does not count as a career choice; elite-unit service is a positive signal, never grounds for a "primarily military" rejection.
 
@@ -76,6 +76,13 @@ Positive: product companies, modern stack, hands-on ownership, broad scope, ship
 - Judge startup experience from whatever IS present: the candidate's OWN role descriptions (building/launching/0-to-1/greenfield language, wearing many hats, small team), the company name, the summary/headline, and career pattern — not from company metadata alone.
 - Credit "startup experience" as MET when there is reasonable positive evidence of early-stage / small product-company work. Mark it NOT MET only when evidence points to an established / large / enterprise / public-company employer, or there is genuinely no startup-like signal at all.
 - "Truly ambiguous" means at least one weak startup-like signal exists (an unknown/generic company name plus product-building language, small-team or broad-ownership hints) but no company-size data to confirm — in that case lean toward MET rather than rejecting a possibly-strong candidate on a data gap. If the profile shows NO startup-like signal at all, the claim is NOT met — absent data is never evidence for OR against. Do NOT fabricate startup status.
+
+## Must-Have Verdict: three states, not two
+Every must-have gets one of three verdicts — never collapse this to a binary met/fail:
+- met: the profile shows clear, credible evidence the requirement is satisfied.
+- not_met: the profile CONTRADICTS the requirement — specific evidence against it (e.g. located in the US when the role requires Europe, 1 year of experience shown when 3+ is required, current employer is the excluded competitor). Cite the contradicting evidence.
+- needs_verification: the profile simply does not mention it either way. This is the correct verdict whenever you cannot point to either supporting or contradicting evidence — absence of evidence is NEVER treated as a fail. Do not write "does not verify", "does not establish", or similar and then mark it not_met; that reasoning describes needs_verification, not not_met.
+This affects the final decision: any not_met (or a matched exclusion) is a hard NO GO. With no not_met and no matched exclusion, one or more needs_verification must-haves means the decision is NEEDS VERIFICATION, not NO GO — an unproven requirement is worth a human check, not an automatic rejection.
 
 ## Evidence vs Buzzwords
 Discount vague claims: "passionate", "results-driven", "hands-on architect", "microservices expert", "responsible for", "involved in", "worked on", "familiar with". Credit concrete action: built, designed, shipped, owned, migrated, scaled, optimized, reduced latency/cost, launched, mentored, defined architecture, deployed to production, measurable outcomes.
@@ -154,13 +161,13 @@ For EXCLUSIONS, apply the SCOPE rule from "User-Stated Hard Constraints" above �
 
 Return ONLY this JSON object, no prose, no markdown:
 {
-  "must_haves": [{"text": "<must-have, verbatim>", "met": true or false, "evidence": "<one sentence>"}],
+  "must_haves": [{"text": "<must-have, verbatim>", "met": "met" or "not_met" or "needs_verification", "evidence": "<one sentence>"}],
   "exclusions": [{"text": "<exclusion, verbatim>", "matched": true or false, "why": "<if matched: the specific evidence from the profile that triggered it — title/company/dates for employment exclusions, or the relevant field (location, language, etc.) for others — if you can't cite one, it did not match>"}],
-  "decision": "GO" or "NO GO",
+  "decision": "GO" or "NO GO" or "NEEDS VERIFICATION",
   "score": integer 1-10,
-  "reasoning": "2-3 sentences: strongest signal, biggest concern, why GO/NO GO."
+  "reasoning": "2-3 sentences: strongest signal, biggest concern, why GO/NO GO/NEEDS VERIFICATION."
 }
-Give an explicit verdict on every must-have and every exclusion before deciding. GO only when every must-have is met and no exclusion matched.
+Give an explicit verdict on every must-have and every exclusion before deciding. GO only when every must-have is met and no exclusion matched. See the Must-Have Verdict rule above: "met" requires positive evidence, "not_met" requires a contradiction, and unproven/absent evidence is "needs_verification" — never "not_met". Decision: any not_met or matched exclusion -> NO GO (name the contradiction). No not_met and no matched exclusion, but at least one needs_verification -> NEEDS VERIFICATION (never NO GO for this). All met and no exclusion matched -> GO. A legacy boolean for "met" is also accepted for backward compatibility: true = met, false = not_met.
 
 Today's date: {today}
 """

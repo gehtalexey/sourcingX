@@ -29,7 +29,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from crustdata_search import search_people_db  # noqa: E402
+from crustdata_search import search_people_db_v2  # noqa: E402
 from db import get_supabase_client, save_enriched_profiles_bulk  # noqa: E402
 
 
@@ -154,7 +154,7 @@ def build_mobility_filters(base_filters: dict) -> dict:
 
 def run_count_query(filters: dict) -> tuple:
     """Run a limit:1 search just to read total_count. Returns (total_count, credits_used)."""
-    result = search_people_db(filters, limit=1)
+    result = search_people_db_v2(filters, limit=1)
     return result.get("total_count", 0), result.get("credits_used", 0)
 
 
@@ -163,7 +163,7 @@ def run_count_query(filters: dict) -> tuple:
 # ---------------------------------------------------------------------------
 
 def pull_all_profiles(filters: dict) -> tuple:
-    """Page through search_people_db until exhausted. Returns (profiles, total_count, credits_used)."""
+    """Page through search_people_db_v2 until exhausted. Returns (profiles, total_count, credits_used)."""
     profiles = []
     total_count = None
     cursor = None
@@ -172,7 +172,7 @@ def pull_all_profiles(filters: dict) -> tuple:
 
     while page_num < MAX_PAGES:
         page_num += 1
-        result = search_people_db(filters, limit=PAGE_LIMIT, cursor=cursor)
+        result = search_people_db_v2(filters, limit=PAGE_LIMIT, cursor=cursor)
         page_profiles = result.get("profiles", [])
         if total_count is None:
             total_count = result.get("total_count", len(page_profiles))

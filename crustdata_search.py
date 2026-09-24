@@ -4,11 +4,13 @@ Crustdata People Search Database API Client
 This module provides functions to search Crustdata's 100M+ professional database.
 Used by the Search tab in dashboard.py to find candidates before enrichment.
 
-API Endpoint: POST https://api.crustdata.com/screener/persondb/search
-Cost: 3 credits per 100 results
+API Endpoint: POST https://api.crustdata.com/person/search (v2025-11-01,
+search_people_db_v2). The legacy search_people_db() is kept only until its
+deletion is approved; nothing in the app calls it (legacy /screener/* stops
+2026-09-30).
 
 Usage:
-    from crustdata_search import search_people_db, build_filters, normalize_search_results_to_df
+    from crustdata_search import search_people_db_v2, build_filters, normalize_search_results_to_df
 
     # Build filters from UI inputs
     filters = build_filters(
@@ -54,6 +56,11 @@ from normalizers import normalize_linkedin_url, clean_value, is_nan_or_none, pic
 # =============================================================================
 
 CRUSTDATA_SEARCH_ENDPOINT = "https://api.crustdata.com/screener/persondb/search"
+# Credits balance (free). Called with the v2025-11-01 headers (Bearer +
+# x-api-version). Verified live 2026-09-24: returns
+# {"account": {"credits": N, "recurring_credits": N, ...}}. GET /user/credits
+# also works with the same headers and returns a flat {"credits": N};
+# check_credits() parses both shapes.
 CRUSTDATA_CREDITS_ENDPOINT = "https://api.crustdata.com/account/credits"
 
 # Natural-language ("semantic") people search — Crustdata's newer v2025-11-01
@@ -729,6 +736,7 @@ _LEGACY_TO_V2_FIELD = {
     "current_employers.company_industries": "experience.employment_details.current.company_industries",
     "current_employers.business_email_verified": "experience.employment_details.current.business_email_verified",
     "current_employers.function_category": "experience.employment_details.current.function_category",
+    "current_employers.start_date": "experience.employment_details.current.start_date",
     "past_employers.name": "experience.employment_details.past.name",
     "past_employers.title": "experience.employment_details.past.title",
     "region": "professional_network.location.raw",
@@ -925,6 +933,31 @@ def search_people_db(
         )
 
 
+def _parse_credits_response(data: Any) -> Dict[str, Any]:
+    """Read the balance out of either credits response shape:
+    nested {"account": {"credits": N, "recurring_credits": N}} (GET
+    /account/credits) or flat {"credits": N} (GET /user/credits). Older
+    key names (credits_remaining / remaining ...) are still accepted."""
+    if not isinstance(data, dict):
+        data = {}
+    src = data.get("account") if isinstance(data.get("account"), dict) else data
+
+    def _first(*keys):
+        for k in keys:
+            if src.get(k) is not None:
+                return src[k]
+        return None
+
+    remaining = _first("credits", "credits_remaining", "remaining")
+    total = _first("recurring_credits", "credits_total", "total")
+    used = _first("credits_used", "used")
+    return {
+        "remaining": remaining if remaining is not None else 0,
+        "used": used if used is not None else 0,
+        "total": total if total is not None else 0,
+    }
+
+
 @retry_with_backoff(
     max_retries=2,
     base_delay=1.0,
@@ -960,7 +993,7 @@ def check_credits(api_key: str = None) -> Dict[str, Any]:
     try:
         response = requests.get(
             CRUSTDATA_CREDITS_ENDPOINT,
-            headers={"Authorization": f"Token {api_key}"},
+            headers=_v2_headers(api_key),
             timeout=30,
         )
 
@@ -976,12 +1009,7 @@ def check_credits(api_key: str = None) -> Dict[str, Any]:
             )
 
         data = response.json()
-
-        return {
-            "remaining": data.get("credits_remaining", data.get("remaining", 0)),
-            "used": data.get("credits_used", data.get("used", 0)),
-            "total": data.get("credits_total", data.get("total", 0)),
-        }
+        return _parse_credits_response(data)
 
     except requests.exceptions.Timeout:
         raise ExternalServiceError(

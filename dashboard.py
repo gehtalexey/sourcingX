@@ -125,7 +125,6 @@ except ImportError:
 # Crustdata people search module
 try:
     from crustdata_search import (
-        search_people_db,
         search_people_db_v2,
         build_filters as build_search_filters,
         normalize_search_results_to_df,
@@ -142,25 +141,17 @@ try:
     )
     HAS_CRUSTDATA_SEARCH = True
 
-    # Crustdata's legacy /screener/persondb/search endpoint (compact=false)
-    # returns full profiles — skills/summary included — in one call, and is
-    # cheaper/richer than the new v2025-11-01 /person/search endpoint, which
-    # never returns skills/summary regardless of what's requested. Crustdata
-    # has confirmed the legacy endpoint stays live until end of September
-    # 2026, so this branch's search-endpoint migration ships DISABLED by
-    # default — search_people_db() (legacy) stays the default search
-    # function everywhere in this file. The auto-fill-before-screening step
-    # (enrich_thin_profiles_for_batch, already live since 2026-07-20) already
-    # covers thin profiles regardless of which search sourced them, so
-    # flipping this one flag is the only change needed when the legacy
-    # endpoint is retired — nothing else in this file changes. Flip via
-    # CRUSTDATA_USE_SEARCH_V2=true in the environment (not config.json —
-    # this is a deploy-time switch, not a per-user setting).
-    CRUSTDATA_USE_SEARCH_V2 = os.environ.get('CRUSTDATA_USE_SEARCH_V2', 'false').strip().lower() == 'true'
-    _active_search_people_db = search_people_db_v2 if CRUSTDATA_USE_SEARCH_V2 else search_people_db
+    # Filter search always uses the new v2025-11-01 POST /person/search
+    # endpoint. Crustdata stops serving every legacy /screener/* endpoint on
+    # 2026-09-30, so the old CRUSTDATA_USE_SEARCH_V2 switch (which kept the
+    # legacy search_people_db() as the default) is gone. The new endpoint
+    # never returns skills/summary; enrich_thin_profiles_for_batch tops
+    # those profiles up via the 1-credit new batch enrich right before AI
+    # Screen, so screening quality does not depend on which search sourced
+    # a profile.
+    _active_search_people_db = search_people_db_v2
 except ImportError:
     HAS_CRUSTDATA_SEARCH = False
-    CRUSTDATA_USE_SEARCH_V2 = False
 
 # Plotly for charts
 try:
@@ -5138,7 +5129,8 @@ def enrich_thin_profiles_for_batch(profiles: list, api_key: str, db_client=None,
 
     Why this exists: the description-search beta (search_people_semantic,
     via semantic_profile_to_legacy_shape) doesn't return skills/summary —
-    only the regular filter search (search_people_db, compact=false) does.
+    neither does the regular filter search (search_people_db_v2, the new
+    /person/search endpoint).
     This is the auto-fill step that keeps AI Screen quality unchanged
     regardless of which search sourced a profile — it's endpoint-agnostic,
     so it also covers any future search path (e.g. a filter-search

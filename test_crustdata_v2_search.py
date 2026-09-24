@@ -1,11 +1,10 @@
 """Tests for the filter-based v2025-11-01 people search (search_people_db_v2)
 and the legacy-column -> v2-field filter remap it depends on.
 
-search_people_db() (legacy /screener/persondb/search, compact=false) stays
-the default search function until Crustdata retires it (end of September
-2026 per Crustdata) — see CRUSTDATA_USE_SEARCH_V2 in dashboard.py. These
-tests cover the v2 replacement so it's fully built and verified ahead of
-that cutover, without any real network calls.
+search_people_db_v2() is the only filter search the dashboard uses
+(Crustdata stops serving every legacy /screener/* endpoint on 2026-09-30).
+These tests also cover check_credits() on the new headers. No real network
+calls: requests.post/get are patched throughout.
 """
 
 from unittest.mock import MagicMock, patch
@@ -249,3 +248,143 @@ class TestSearchV2Response:
             mock_post.return_value = _mock_response(status_code=401)
             with pytest.raises(AuthenticationError):
                 search_people_db_v2({}, api_key="bad-key")
+
+
+# ---------------------------------------------------------------------------
+# Dashboard wiring — the Search tab must only ever call the new endpoint
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardUsesV2SearchOnly:
+    def test_active_search_alias_is_v2(self):
+        import dashboard
+
+        assert dashboard._active_search_people_db is search_people_db_v2
+        assert not hasattr(dashboard, "CRUSTDATA_USE_SEARCH_V2")
+
+    def test_dashboard_search_call_hits_new_endpoint_with_bearer(self):
+        import dashboard
+
+        filters = build_filters(title="Engineer", country="Israel")
+        with patch(
+            "crustdata_search.requests.post",
+            return_value=_mock_response(200, {"profiles": [], "total_count": 0}),
+        ) as mock_post:
+            dashboard._active_search_people_db(
+                filters, limit=100,
+                sorts=[{"column": "num_of_connections", "order": "desc"}],
+                api_key="test-key",
+                exclude_profiles=["https://www.linkedin.com/in/past-candidate"],
+            )
+
+        url = mock_post.call_args.args[0]
+        headers = mock_post.call_args.kwargs["headers"]
+        body = mock_post.call_args.kwargs["json"]
+        assert url == CRUSTDATA_SEARCH_V2_ENDPOINT
+        assert "/screener/" not in url
+        assert headers["Authorization"] == "Bearer test-key"
+        assert "Token" not in headers["Authorization"]
+        assert headers["x-api-version"] == CRUSTDATA_API_VERSION
+        assert body["post_processing"]["exclude_profiles"] == [
+            "https://www.linkedin.com/in/past-candidate"
+        ]
+
+    def test_v2_search_row_is_topped_up_before_screening(self, monkeypatch):
+        """A profile sourced from the v2 filter search has no skills/summary,
+        so enrich_thin_profiles_for_batch() must pick it up and send it to
+        the new batch enrich (not skip it as already rich or on cooldown)."""
+        import dashboard
+        from crustdata_search import normalize_linkedin_url
+
+        raw_v2 = {
+            "basic_profile": {"name": "Dana Levi", "headline": "Engineer"},
+            "experience": {"employment_details": {"current": [{"name": "Acme", "title": "Engineer"}]}},
+            "social_handles": {"professional_network_identifier": {
+                "profile_url": "https://www.linkedin.com/in/dana-levi"}},
+            "crustdata_person_id": 123,
+        }
+        with patch(
+            "crustdata_search.requests.post",
+            return_value=_mock_response(200, {"profiles": [raw_v2], "total_count": 1}),
+        ):
+            result = dashboard._active_search_people_db({}, limit=1, api_key="test-key")
+
+        row = result["profiles"][0]
+        url = normalize_linkedin_url(row["flagship_profile_url"])
+        batch_profile = {"linkedin_url": url, "name": row["name"], "raw_crustdata": row}
+
+        captured = {}
+
+        def fake_batch_enrich(urls, api_key=None):
+            captured["urls"] = urls
+            return {"by_url": {}, "requested": len(urls), "fulfilled": 0,
+                    "unmatched": urls, "credits_used": 0, "batch_ids": []}
+
+        monkeypatch.setattr(dashboard, "batch_enrich_profiles", fake_batch_enrich)
+        stats = dashboard.enrich_thin_profiles_for_batch([batch_profile], api_key="test-key")
+
+        assert captured["urls"] == [url]
+        assert stats["thin_found"] == 1
+        assert stats["on_cooldown"] == 0
+
+
+# ---------------------------------------------------------------------------
+# check_credits — new headers, both response shapes
+# ---------------------------------------------------------------------------
+
+
+class TestCheckCreditsNewHeaders:
+    def test_sends_bearer_and_version_header_to_new_path(self):
+        from crustdata_search import check_credits, CRUSTDATA_CREDITS_ENDPOINT
+
+        with patch(
+            "crustdata_search.requests.get",
+            return_value=_mock_response(200, {"account": {"credits": 5}}),
+        ) as mock_get:
+            check_credits(api_key="test-key")
+
+        url = mock_get.call_args.args[0]
+        headers = mock_get.call_args.kwargs["headers"]
+        assert url == CRUSTDATA_CREDITS_ENDPOINT
+        assert url == "https://api.crustdata.com/account/credits"
+        assert "/screener/" not in url
+        assert headers["Authorization"] == "Bearer test-key"
+        assert "Token" not in headers["Authorization"]
+        assert headers["x-api-version"] == CRUSTDATA_API_VERSION
+
+    def test_parses_nested_account_shape(self):
+        from crustdata_search import check_credits
+
+        payload = {"account": {
+            "credits": 138940.37, "recurring_credits": 150000,
+            "recurring_credits_frequency": "monthly", "wallets": [],
+        }}
+        with patch("crustdata_search.requests.get", return_value=_mock_response(200, payload)):
+            info = check_credits(api_key="test-key")
+
+        assert info["remaining"] == 138940.37
+        assert info["total"] == 150000
+
+    def test_parses_flat_shape(self):
+        from crustdata_search import check_credits
+
+        with patch(
+            "crustdata_search.requests.get",
+            return_value=_mock_response(200, {"credits": 9406}),
+        ):
+            info = check_credits(api_key="test-key")
+
+        assert info["remaining"] == 9406
+        assert info["used"] == 0
+        assert info["total"] == 0
+
+    def test_zero_balance_is_not_mistaken_for_missing(self):
+        from crustdata_search import check_credits
+
+        with patch(
+            "crustdata_search.requests.get",
+            return_value=_mock_response(200, {"account": {"credits": 0, "remaining": 99}}),
+        ):
+            info = check_credits(api_key="test-key")
+
+        assert info["remaining"] == 0

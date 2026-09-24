@@ -4,7 +4,7 @@ End-to-end test: Senior Full Stack Developer in Israel
 Tech stack: React, Node.js, AWS, Docker/Kubernetes, Claude/AI
 
 Flow mirrors the SourcingX dashboard:
-  STEP 1 - Search    (crustdata_search.py: build_filters + search_people_db)
+  STEP 1 - Search    (crustdata_search.py: build_filters + search_people_db_v2)
   STEP 2 - Normalize (crustdata_search.py: normalize_search_results_to_df)
   STEP 3 - Filter    (title keywords, boolean search -- each tested one by one)
   STEP 4 - AI Screen (structured_screening.py via Anthropic)
@@ -31,7 +31,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 # ---------------------------------------------------------------------------
 from crustdata_search import (
     build_filters,
-    search_people_db,
+    search_people_db_v2,
     normalize_search_results_to_df,
 )
 
@@ -177,7 +177,7 @@ def step1_search(api_key):
 
     print("\n  Calling Crustdata API...")
     t0 = time.time()
-    results = search_people_db(filters, limit=100, sorts=sorts, api_key=api_key)
+    results = search_people_db_v2(filters, limit=100, sorts=sorts, api_key=api_key)
     elapsed = round(time.time() - t0, 1)
 
     profiles = results.get("profiles", [])

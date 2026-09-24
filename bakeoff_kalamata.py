@@ -339,6 +339,33 @@ def dedupe_candidates_by_url(rows: list) -> list:
     return list(best.values())
 
 
+def dedupe_sample_rows_by_profile_url(rows: list) -> list:
+    """Collapse sample rows that resolved to the same profile_url. kalamata's
+    pipeline_candidates can hold more than one LinkedIn URL alias for the
+    same person (a rescrape under a slightly different slug, say), and those
+    aliases can land in different kalamata groups after matching -- one
+    person must appear once, in one group, in the sample. Deterministic
+    rule: keep the row with the latest screened_at; on a tie, keep the row
+    whose (pipeline) linkedin_url sorts lowest, so the result never depends
+    on input order."""
+    best = {}
+    for row in rows:
+        url = row.get("profile_url")
+        if not url:
+            continue
+        prev = best.get(url)
+        if prev is None:
+            best[url] = row
+            continue
+        row_screened = row.get("screened_at") or ""
+        prev_screened = prev.get("screened_at") or ""
+        if row_screened > prev_screened:
+            best[url] = row
+        elif row_screened == prev_screened and (row.get("linkedin_url") or "") < (prev.get("linkedin_url") or ""):
+            best[url] = row
+    return list(best.values())
+
+
 def fetch_profiles_by_urls(client: SupabaseClient, urls, chunk_size: int = PROFILE_OR_CHUNK) -> dict:
     """Look up profiles by linkedin_url OR original_url OR original_urls --
     pipeline URLs from kalamata are often aliases of the profile's stored
@@ -449,7 +476,7 @@ def cmd_sample(args):
 
         profiles_by_url = fetch_profiles_by_urls(client, needed_urls)
 
-        groups = defaultdict(list)
+        all_enriched = []
         for group, row in kept:
             norm = normalize_linkedin_url(row["linkedin_url"]) or row["linkedin_url"]
             profile = profiles_by_url.get(norm)
@@ -458,7 +485,20 @@ def cmd_sample(args):
                 enriched["profile_url"] = (
                     normalize_linkedin_url(profile.get("linkedin_url")) or profile.get("linkedin_url")
                 )
-                groups[group].append(enriched)
+                enriched["group"] = group
+                all_enriched.append(enriched)
+
+        # One person (profile_url) must appear once, in one group -- kalamata
+        # can hold more than one alias URL for the same profile, and those
+        # aliases can fall into different groups. Dedupe BEFORE the seeded
+        # per-group sampling below, so the sample never double-counts a person.
+        deduped = dedupe_sample_rows_by_profile_url(all_enriched)
+        dropped = len(all_enriched) - len(deduped)
+        print(f"[{position_id}] dropped {dropped} alias duplicate(s) by profile_url")
+
+        groups = defaultdict(list)
+        for enriched in deduped:
+            groups[enriched["group"]].append(enriched)
 
         pos_eligible = {g: len(groups.get(g, [])) for g in ("yes", "no_fullscreen", "no_prescreen")}
         eligible_counts[position_id] = pos_eligible
@@ -587,12 +627,25 @@ def cmd_jev(args):
                     "jev_reason": "", "jev_model": "", "input_tokens": "", "output_tokens": "",
                     "error": f"{type(e).__name__}: {e}"}
         result = verdict.get("screening_result")
+        reason = verdict.get("reason") or ""
+        # jev_client.screen_with_jev() does NOT raise on an API failure -- it
+        # fails open with a deferral verdict whose reason is prefixed
+        # "Jev call failed: ..." and jev_model is None (jev_client.py:682-687).
+        # That's a call that didn't actually happen and must be retried on
+        # resume, so it goes into `error`, same as an exception. A genuine
+        # low-confidence deferral (any other _defer() reason) is a real,
+        # completed Jev answer -- "incomplete" but done, not an error.
+        if reason.startswith("Jev call failed:"):
+            return {**base, "jev_verdict": "", "jev_score": "", "jev_fit_level": result or "",
+                    "jev_reason": reason[:200], "jev_model": verdict.get("jev_model") or "",
+                    "input_tokens": verdict.get("input_tokens"), "output_tokens": verdict.get("output_tokens"),
+                    "error": reason}
         return {
             **base,
             "jev_verdict": jev_verdict_from_result(result) or "",
             "jev_score": verdict.get("screening_score"),
             "jev_fit_level": result or "",
-            "jev_reason": (verdict.get("reason") or "")[:200],
+            "jev_reason": reason[:200],
             "jev_model": verdict.get("jev_model") or "",
             "input_tokens": verdict.get("input_tokens"),
             "output_tokens": verdict.get("output_tokens"),

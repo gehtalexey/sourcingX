@@ -769,6 +769,138 @@ class TestBakeoffKalamata:
         assert by_url["https://www.linkedin.com/in/candidate-3"]["jev_fit_level"] == "incomplete"
         assert by_url["https://www.linkedin.com/in/candidate-3"]["error"] == ""
 
+    # -- fail-open Jev call failures must be treated as retryable errors,
+    # -- not as a completed "incomplete" deferral --
+
+    def test_jev_call_failed_deferral_is_written_as_error(self, tmp_path, monkeypatch):
+        """screen_with_jev() fails open on an API failure -- it returns a
+        verdict, not an exception -- with reason starting "Jev call failed:"
+        and jev_model=None. That must be written with `error` set so a
+        resume run retries it, not treated as a genuine low-confidence
+        deferral."""
+        import bakeoff_kalamata as bk
+
+        sample = {
+            "seed": 1,
+            "positions": ["pos-a"],
+            "rows": [
+                {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                 "group": "yes", "kalamata_verdict": "yes", "kalamata_score": 8, "kalamata_reason": "ok"},
+            ],
+        }
+        sample_path = tmp_path / "sample.json"
+        sample_path.write_text(json.dumps(sample), encoding="utf-8")
+        briefs_path = tmp_path / "briefs.json"
+        briefs_path.write_text(json.dumps({"pos-a": {"role_context": "Backend Engineer"}}), encoding="utf-8")
+        out_path = tmp_path / "jev_results.csv"
+
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: object())
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {
+            "https://www.linkedin.com/in/candidate-1": {"raw_data": {"skills": ["Python"]}},
+        })
+        monkeypatch.setattr(bk.jev_client, "build_client", lambda: "fake-client")
+
+        def _fake_screen_fail_open(profile, job_description, client=None, screening_brief=None):
+            # Mirrors jev_client.screen_with_jev()'s own fail-open shape on
+            # an API failure (jev_client.py:682-687) -- no exception raised.
+            return {
+                "screening_result": None, "screening_score": None,
+                "reason": "Jev call failed: RateLimitError after 3 retries",
+                "jev_model": None, "input_tokens": None, "output_tokens": None,
+            }
+
+        monkeypatch.setattr(bk.jev_client, "screen_with_jev", _fake_screen_fail_open)
+
+        args = argparse.Namespace(
+            sample=str(sample_path), briefs=str(briefs_path), out=str(out_path),
+            yes=True, limit=None, workers=2,
+        )
+        bk.cmd_jev(args)
+
+        with open(out_path, encoding="utf-8-sig", newline="") as f:
+            written = list(csv.DictReader(f))
+        assert len(written) == 1
+        assert written[0]["jev_verdict"] == ""
+        assert written[0]["error"].startswith("Jev call failed:")
+
+        # A resume run must retry this row -- an error row, not a done one.
+        calls = {"n": 0}
+
+        def _fake_screen_success(profile, job_description, client=None, screening_brief=None):
+            calls["n"] += 1
+            return {
+                "screening_result": "qualified", "screening_score": 8,
+                "reason": "Fit score: qualified", "jev_model": "jev-1.0",
+                "input_tokens": 100, "output_tokens": 10,
+            }
+
+        monkeypatch.setattr(bk.jev_client, "screen_with_jev", _fake_screen_success)
+        bk.cmd_jev(args)
+        assert calls["n"] == 1
+        with open(out_path, encoding="utf-8-sig", newline="") as f:
+            written = list(csv.DictReader(f))
+        assert len(written) == 1
+        assert written[0]["jev_verdict"] == "yes"
+        assert written[0]["error"] == ""
+
+    def test_jev_genuine_low_confidence_deferral_has_no_error_and_is_not_retried(self, tmp_path, monkeypatch):
+        """A real low-confidence fail-open deferral (no "Jev call failed:"
+        prefix) is a completed answer -- it must be written with no error,
+        and a resume run must not retry it."""
+        import bakeoff_kalamata as bk
+
+        sample = {
+            "seed": 1,
+            "positions": ["pos-a"],
+            "rows": [
+                {"position_id": "pos-a", "linkedin_url": "https://www.linkedin.com/in/candidate-1",
+                 "group": "yes", "kalamata_verdict": "yes", "kalamata_score": 8, "kalamata_reason": "ok"},
+            ],
+        }
+        sample_path = tmp_path / "sample.json"
+        sample_path.write_text(json.dumps(sample), encoding="utf-8")
+        briefs_path = tmp_path / "briefs.json"
+        briefs_path.write_text(json.dumps({"pos-a": {"role_context": "Backend Engineer"}}), encoding="utf-8")
+        out_path = tmp_path / "jev_results.csv"
+
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: object())
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {
+            "https://www.linkedin.com/in/candidate-1": {"raw_data": {"skills": ["Python"]}},
+        })
+        monkeypatch.setattr(bk.jev_client, "build_client", lambda: "fake-client")
+
+        def _fake_screen_low_confidence(profile, job_description, client=None, screening_brief=None):
+            return {
+                "screening_result": None, "screening_score": None,
+                "reason": "fit score confidence too low (0.42) -- failing open",
+                "jev_model": "jev-1.0", "input_tokens": 40, "output_tokens": 3,
+            }
+
+        monkeypatch.setattr(bk.jev_client, "screen_with_jev", _fake_screen_low_confidence)
+
+        args = argparse.Namespace(
+            sample=str(sample_path), briefs=str(briefs_path), out=str(out_path),
+            yes=True, limit=None, workers=2,
+        )
+        bk.cmd_jev(args)
+
+        with open(out_path, encoding="utf-8-sig", newline="") as f:
+            written = list(csv.DictReader(f))
+        assert len(written) == 1
+        assert written[0]["jev_verdict"] == ""
+        assert written[0]["error"] == ""
+
+        def _fail_if_called(*args, **kwargs):
+            raise AssertionError("a genuine low-confidence deferral must not be retried")
+
+        monkeypatch.setattr(bk.jev_client, "screen_with_jev", _fail_if_called)
+        bk.cmd_jev(args)  # resume run -- must not call screen_with_jev again
+
+        with open(out_path, encoding="utf-8-sig", newline="") as f:
+            written = list(csv.DictReader(f))
+        assert len(written) == 1
+        assert written[0]["error"] == ""
+
     def test_jev_resume_fail_open_row_alone_is_not_retried(self, tmp_path, monkeypatch):
         """A resume run where every existing row is a fail-open incomplete
         (no error, no yes/no verdict) must make zero Jev calls."""
@@ -889,6 +1021,91 @@ class TestBakeoffKalamata:
         by_url = {r["linkedin_url"]: r for r in result}
         assert len(result) == 2
         assert by_url["https://www.linkedin.com/in/dup"]["screening_score"] == 9
+
+    # -- sample dedupe by profile_url: one person, one group --
+
+    def test_dedupe_sample_rows_by_profile_url_keeps_latest_screened_at(self):
+        import bakeoff_kalamata as bk
+        rows = [
+            {"linkedin_url": "https://www.linkedin.com/in/alias-a", "profile_url": "https://www.linkedin.com/in/canonical",
+             "group": "no_fullscreen", "screened_at": "2026-01-01T00:00:00Z"},
+            {"linkedin_url": "https://www.linkedin.com/in/alias-b", "profile_url": "https://www.linkedin.com/in/canonical",
+             "group": "yes", "screened_at": "2026-06-01T00:00:00Z"},
+            {"linkedin_url": "https://www.linkedin.com/in/other", "profile_url": "https://www.linkedin.com/in/other-canonical",
+             "group": "yes", "screened_at": "2026-02-01T00:00:00Z"},
+        ]
+        result = bk.dedupe_sample_rows_by_profile_url(rows)
+        assert len(result) == 2
+        by_profile = {r["profile_url"]: r for r in result}
+        assert by_profile["https://www.linkedin.com/in/canonical"]["linkedin_url"] == "https://www.linkedin.com/in/alias-b"
+        assert by_profile["https://www.linkedin.com/in/canonical"]["group"] == "yes"
+
+    def test_dedupe_sample_rows_by_profile_url_tie_breaks_on_lowest_linkedin_url(self):
+        import bakeoff_kalamata as bk
+        rows = [
+            {"linkedin_url": "https://www.linkedin.com/in/zzz-alias", "profile_url": "https://www.linkedin.com/in/canonical",
+             "group": "no_fullscreen", "screened_at": "2026-01-01T00:00:00Z"},
+            {"linkedin_url": "https://www.linkedin.com/in/aaa-alias", "profile_url": "https://www.linkedin.com/in/canonical",
+             "group": "yes", "screened_at": "2026-01-01T00:00:00Z"},
+        ]
+        # Same screened_at both orders -- result must not depend on input order.
+        result_a = bk.dedupe_sample_rows_by_profile_url(rows)
+        result_b = bk.dedupe_sample_rows_by_profile_url(list(reversed(rows)))
+        assert result_a == result_b
+        assert result_a[0]["linkedin_url"] == "https://www.linkedin.com/in/aaa-alias"
+
+    def test_cmd_sample_drops_alias_duplicates_across_groups(self, tmp_path, monkeypatch, capsys):
+        """Two pipeline aliases for the same profile that land in different
+        kalamata groups must collapse to one row, in one group, before the
+        per-group seeded sample -- never two rows for the same person."""
+        import bakeoff_kalamata as bk
+
+        fake_client = MagicMock()
+        fake_client.select.return_value = [
+            {
+                "position_id": "pos-a",
+                "linkedin_url": "https://www.linkedin.com/in/alias-a",
+                "screening_result": "not_qualified",
+                "screening_score": 3,
+                "screening_notes": "missed a must-have",
+                "screening_detail": None,
+                "screened_at": "2026-01-01T00:00:00Z",
+            },
+            {
+                "position_id": "pos-a",
+                "linkedin_url": "https://www.linkedin.com/in/alias-b",
+                "screening_result": "qualified",
+                "screening_score": 8,
+                "screening_notes": "",
+                "screening_detail": None,
+                "screened_at": "2026-06-01T00:00:00Z",
+            },
+        ]
+        monkeypatch.setattr(bk, "_load_supabase_client", lambda: fake_client)
+        monkeypatch.setattr(bk, "fetch_profiles_by_urls", lambda client, urls: {
+            "https://www.linkedin.com/in/alias-a": {
+                "linkedin_url": "https://www.linkedin.com/in/canonical-123",
+                "raw_data": {"skills": ["Python"]},
+            },
+            "https://www.linkedin.com/in/alias-b": {
+                "linkedin_url": "https://www.linkedin.com/in/canonical-123",
+                "raw_data": {"skills": ["Python"]},
+            },
+        })
+
+        out_dir = tmp_path / "out"
+        args = argparse.Namespace(
+            positions=["pos-a"], per_group=5, seed=1, out_dir=str(out_dir),
+        )
+        bk.cmd_sample(args)
+
+        sample = json.loads((out_dir / "sample.json").read_text(encoding="utf-8"))
+        assert len(sample["rows"]) == 1
+        assert sample["rows"][0]["linkedin_url"] == "https://www.linkedin.com/in/alias-b"
+        assert sample["rows"][0]["group"] == "yes"
+
+        captured = capsys.readouterr()
+        assert "dropped 1 alias duplicate" in captured.out
 
     def test_fetch_pipeline_candidates_passes_stable_order_and_dedupes(self, monkeypatch):
         import bakeoff_kalamata as bk

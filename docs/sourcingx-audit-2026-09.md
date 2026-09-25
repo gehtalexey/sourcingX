@@ -44,7 +44,7 @@ instead of rejection. Either way the rejection stops being automatic.
 | 11 | "Maybe" means different things in different places; the shared table stores only the label | `_decision_to_fit_label()` (Maybe = low-score GO) vs comment ~10532 ("borderline NO GO") vs policy ~88 | Texts read | One definition; store GO/NO GO too | small | verified |
 | 12 | Found emails may not be saved to the shared table | `db.py` `update_profile_emails_batch()` ~1272 uses the upsert route migration 025 says rejects existing identities | Not testable today (the run found no emails) | Save through the supported route; show failures | medium | expert opinion |
 | 13 | Paid top-up even when a richer copy is already stored; headline-only profiles still get a paid screening | `fetch_raw_data_for_batch()` ~5028, `enrich_thin_profiles_for_batch()`, `screen_profile()` ~4814 | Code read | Check the stored copy first; skip profiles with no job history | small-medium | expert opinion |
-| 14 | A GO with no per-must-have answers still counts as Good Fit | `_verdicts_force_no_go()` accepts empty verdicts (deliberate per its docstring) | Astra reproduced with a mocked reply; Fable ranks it low (a false GO is easy to spot) | Require an answer per must-have or mark incomplete | medium | expert opinion |
+| 14 | A GO with no per-must-have answers still counts as Good Fit | `_verdicts_force_no_go()` accepts empty verdicts (deliberate per its docstring) | Astra reproduced with a mocked reply; Fable ranks it low (a false GO is easy to spot) | Require an answer per must-have or mark incomplete | medium | FIXED, PR #150 (a missing or repeated answer is now NO GO) |
 | 15 | Nice-to-haves cost a second full model call per candidate | `screen_profile()` ~4856-4865 | 2 calls per candidate in `api_usage_logs` (592 for 296) | Experts split: merge into one call (Fable) vs keep separate so bonuses cannot affect rejection (Astra); compare quality first | small | verified (cost); fix is a judgement call |
 | 16 | New-format profiles: blank Location column; degree and field lost from search results | `screen_profiles_batch()` ~5422 reads only `location`; translator emits only school names | Seen in the app; code read | Fall back to `region`; emit full education | small | verified / expert opinion |
 
@@ -56,6 +56,127 @@ instead of rejection. Either way the rejection stops being automatic.
 | Openers crashed on new-format profiles | PR #140 |
 | Default filter search was the legacy endpoint that stops working 2026-09-30; credits display broken; the new search failed on every call (asked for two fields this account cannot read); thin search rows saved to the shared table as "enriched"; legacy search and `enrich.py` removed | PR #141 |
 | No way to combine a description with filters | PR #142 — combined search, used in the run (10/10 relevant, 7 s) |
+
+## What changed (trust-fixes goal, 2026-09-24)
+
+| Item | Status | Change |
+|---|---|---|
+| 1 | FIXED, PR #144 | Each must-have is now met / not met / needs verification. Only a contradiction rejects. Unproven must-haves go to a visible "Needs verification" group with its own download, kept out of outreach. Stored as "Maybe" plus `screening_notes` "Needs verification: ...", because agent-kalamata and Supanova filter on `screening_fit_level`. |
+| 2 | IMPROVED, PR #144 | The biggest source of flips (unproven = fail) is gone. Repeatability itself was not re-measured. |
+| 3 | FIXED, PRs #146, #147 | AI Screen shows "N profiles need a top-up = N Crustdata credits · AI ≈ $X" from the last run's real cost. Email buttons say "N lookups". All 5 search call sites write to `api_usage_logs`. Enrichment labels say 1 credit. SalesQL misses are logged as 0 credits (SalesQL does not charge for them). |
+| 4 | PR #145, waiting to merge | Openers cite one concrete thing from the profile, take the company from the position, and are checked in code for banned starts and words; an opener that breaks the rules twice is dropped. |
+| 8 | PARTLY FIXED, PR #146 | After a lookup the app says "SalesQL found N of M emails". Four causes fixed: empty group, result erased by an instant reload, hidden rows dropped from the session, Load tab counting one table and looking up another. "Send to Filter Tab" and the wrong banner are still open. |
+
+**The 20 kalamata-approved Dwelly candidates, original brief (must-have kept):**
+before 2 GO / 18 NO GO; now **2 GO / 15 Needs verification / 3 NO GO**. All 3 NO GOs cite
+evidence: a consultancy career, backend only in PHP, a research-heavy profile.
+
+**Blind test (40 anonymised profiles, Dwelly and Owner).** Fable 5.1 and GPT-6 Astra each
+labelled every profile outreach / needs verification / reject from the brief alone. They
+agreed on 31 of 40. This is AI judging AI, not recruiters.
+- Both experts say outreach (3): SourcingX says NO GO to **0** (2 GO, 1 needs verification).
+- Both experts say reject (10): SourcingX says GO to **0** (7 NO GO, 3 needs verification).
+- SourcingX matches the experts' shared answer on 23 of 31.
+- SourcingX says NO GO where neither expert rejects: 4. One is its own short-stint rule,
+  one is a real contradiction, and 2 still reject for "not shown" (the old habit, about 1 in 20).
+- The "both say outreach" group is small, so treat the 0 as encouraging, not proven.
+
+**Live check (18:48-18:51 UTC):** a 10-result search logged 0.3 credits; screening 3 profiles
+predicted 2 top-up credits and charged 2; one email lookup found nothing, said "found 0 of 1"
+and logged 0 credits.
+
+## What changed (automatic GO / NO GO goal, 2026-09-25)
+
+**Decision (Alexey, 2026-09-25): no manual "Needs verification" bucket. Every candidate ends
+GO or NO GO on its own.** This replaces the "Needs verification" group added in PR #144. PR #150.
+
+The rule, decided in code from the per-criterion answers plus the score (the model's own
+`decision` field is never trusted):
+- A contradicted must-have, a matched exclusion or a hard filter is NO GO.
+- Otherwise GO only at a score of 7 or more (`GO_CONFIDENCE_THRESHOLD`, one constant). A
+  must-have that is not shown but clearly implied by the visible career keeps the score up and
+  gives GO with a "Verify in call" note. One that is not shown and not clearly implied keeps
+  the score at 6 or below, so NO GO with the reason "Not shown and the visible career doesn't
+  clearly imply: X".
+- Stored fit labels stay "Good Fit" and "Not a Fit". No new value is written, because
+  agent-kalamata reads that column. Old "Needs verification" rows display as NO GO until they
+  are screened again.
+
+**How answers are tied to criteria.** The prompt numbers every criterion (M1, M2 for
+must-haves, E1, E2 for exclusions) and the model must send the id back. A criterion is
+answered only by exactly one verdict carrying its id. A missing, repeated, unknown-id or
+invalid-valued answer makes the screening incomplete: NO GO, with "Screening incomplete" or
+"not judged" in the reason. A must-have with no answer is no longer treated as "needs
+verification" (audit item 14). Matching by wording was tried first and dropped: Codex rounds
+2 to 5 each found another way two similar requirements could be mixed up (Python and Java,
+C++ and C#, .NET and NET). Fable 5.1 and GPT-6 Astra, asked separately, both recommended ids.
+After the change, the last two Codex rounds found no problem with the matching.
+
+**Re-screen, 100 stored profiles (96 unique person and brief pairs), model gpt-5.6-luna,
+0 Crustdata credits, $0.32.** 0 of 100 answers were incomplete.
+
+| Role | Both experts: outreach | SourcingX NO GO (missed) | Both experts: reject | SourcingX GO (wrongly approved) |
+|---|---|---|---|---|
+| Dwelly | 2 | 1 | 6 | 1 |
+| Owner | 1 | 0 | 4 | 0 |
+| Autofleet | 1 | 0 | 2 | 0 |
+| ScaleOps | 5 | 1 | 8 | 0 |
+| **All 80 blind profiles** | **9** | **2** | **20** | **1** |
+
+- Both misses scored exactly 6. The wrongly approved profile scored 8.
+- Bar sensitivity: at 6, 0 missed but 6 of the 20 clear rejects approved; at 7, 2 missed and
+  1 approved. The bar stays at 7.
+- The 20 candidates kalamata approved for Dwelly: **5 GO / 15 NO GO** (was 2 GO / 15 needs
+  verification / 3 NO GO). 14 of the 15 NO GOs scored exactly 6 because the shipped-AI
+  must-have is not shown and not clearly implied; 1 is a contradiction. This is the direct
+  cost of removing the manual bucket: kalamata approves these people, SourcingX does not.
+- Caveats: the experts are AI, not recruiters; only 9 profiles were "both say outreach";
+  screening is not perfectly repeatable, so borderline counts can move by 1 or 2; the blind
+  id lists were rebuilt from the label packs by matching profile text (80 of 80 matched, 2
+  differed only in a redacted name).
+- Results were saved to the shared `screening_results` table as Good Fit or Not a Fit only
+  (96 rows). Dwelly and Owner used the same brief text as 2026-09-24, so their older rows for
+  the same people are replaced.
+
+## Follow-up: score like kalamata (PR #151, merged 2026-09-25)
+
+**Why.** After #150, 15 of the 20 people kalamata approved for Dwelly were NO GO (14 at exactly
+score 6). Alexey's aim is for SourcingX to screen like kalamata. **What changed:** a must-have the
+profile does not mention (and does not contradict) is now scored as if met and gets a "Verify in
+call" note. Removed: the cap of 6 for an unclear must-have, the cap when the job-defining
+must-have is not shown, and the strict rule on when a company name counts as evidence.
+Contradictions, matched exclusions and hard filters still give NO GO. The bar stays at 7.
+Prompt text only (`screening_policy.py`); this supersedes the score rule described in the #150
+section above.
+
+**Measured on the same 96 stored profiles (gpt-5.6-luna, $0.32, 0 credits), against kalamata's
+stored verdicts for 89 of them:**
+
+| Role | People | Agree with kalamata, #150 | Agree, #151 | Kalamata GO also GO (#151) | Kalamata NO GO passed (#151) |
+|---|---|---|---|---|---|
+| Dwelly | 32 | 41% | 81% | 22 of 25 | 3 of 7 |
+| ScaleOps (backend) | 20 | 85% | 80% | 9 of 10 | 3 of 10 |
+| Autofleet (fullstack) | 19 | 63% | 58% | 9 of 10 | 7 of 9 |
+| Owner | 18 | 61% | 56% | 6 of 8 | 6 of 10 |
+| **All** | **89** | **60%** | **71%** | **46 of 53 (87%)** | **19 of 36 (53%)** |
+
+Against the two AI experts (80 blind profiles): of 9 "both say outreach", #150 missed 2 and #151
+missed 1; of 20 "both say reject", #150 approved 1 and #151 approved 5.
+
+**Consult (Fable 5.1 and GPT-6 Astra, asked separately, 2026-09-25).** Agreed: "match kalamata"
+is not one rule, because each kalamata role has its own hand-written rulebook (which companies
+count, what proof a must-have needs; its general rule also has a thin-profile carve-out and a GO
+floor of 6). Matching a role means writing that role's evidence rules into its brief. The bar
+stays at 7: scores under #151 pile up at 7 (30) and 8 (35), so a bar of 8 splits that cluster on
+noise. They split on the fix. Fable: keep the lenient rule and put each role's strictness in the
+brief. Astra: keep a strict default that forgives only routes the brief lists. Alexey merged #151
+as it is.
+
+**Not done.** Rewriting the Owner and Autofleet briefs from kalamata's rulebooks and re-checking
+those 37 people (about $0.12) was proposed and not run. The #151 results were not saved to the
+shared `screening_results` table, so the 96 rows saved under #150 still hold the stricter answers
+until those people are screened again. Caveats: 89 people is small; the sample leans toward
+kalamata's approved people; kalamata is not ground truth; the experts are AI.
 
 ## What the experts said
 
@@ -79,5 +200,8 @@ kalamata alone cannot establish correctness.
    candidates with the must-have kept: 12+ passing means the policy was the cause.
 2. Items 3 and 8 together (cost shown before every paid click; no silent loss of work).
 3. Item 4 (opener prompt) and item 5 (combined search as the default).
+4. Put the Owner and Autofleet evidence rules from kalamata's rulebooks into their SourcingX
+   briefs and re-check the 37 people (about $0.12). Repeat the blind test with recruiters instead
+   of AI experts.
 
 Raw expert answers and the run record: session scratchpad (`consult-*-audit*.md`, `run-record.md`).

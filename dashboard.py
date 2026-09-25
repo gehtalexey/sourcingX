@@ -61,6 +61,7 @@ from screening_policy import (
     build_structured_user_prompt as _structured_user_prompt,
     build_nice_to_have_prompt as _nice_to_have_prompt,
     NICE_TO_HAVE_SYSTEM_PROMPT as _NICE_TO_HAVE_SYSTEM,
+    clean_criteria,
 )
 
 
@@ -4802,56 +4803,78 @@ def _hard_filter_failure_named(hard_filter_failed) -> bool:
     return True
 
 
-def _norm_criterion_text(text) -> str:
-    """Lowercase and drop only HARMLESS formatting (commas, quotes, brackets,
-    hyphens, stray dots, extra spaces) so a verdict whose text differs from
-    the brief line only by case/spacing still matches it. Punctuation that
-    carries meaning is kept: "C++" and "C#" must stay different, and so must
-    "3.11" and "311" (Codex review, PR #150 round 4)."""
-    t = re.sub(r"[,;:!?\"'()\[\]{}_\-–—]", " ", str(text or "").lower())
-    return " ".join(w.strip(".") for w in t.split() if w.strip("."))
+_CRITERION_ID_RE = re.compile(r"([ME])(\d+)")
 
 
-def _align_verdicts_to_criteria(expected_texts, verdicts):
-    """Pair each REQUESTED criterion with exactly one returned verdict.
+def _align_verdicts_by_id(prefix, expected_texts, verdicts):
+    """Tie each returned verdict to the criterion it answers, by ID.
 
-    A model that returns the same verdict twice, or a verdict for something
-    that was never asked, must not satisfy a completeness check that only
-    counts verdicts (Codex review, PR #150 round 2). Each verdict is used at
-    most once, matched on normalized text (case/punctuation/spacing only).
-    There is deliberately NO fuzzy matching: two different requirements can
-    look alike ("5+ years of Python" vs "5+ years of Java" score ~0.82), and
-    letting one stand in for the other would pass a criterion nobody judged
-    (Codex review, PR #150 round 3). The prompt tells the model to echo each
-    line verbatim; a reworded one just counts as not judged, which fails safe.
+    The prompt numbers every criterion (M1, M2, ... for must-haves, E1, E2,
+    ... for exclusions) and the model must send that id back. Matching on an
+    id needs no rules about wording, punctuation or similarity, which is
+    where four rounds of Codex findings on PR #150 all came from ("Java" vs
+    "Python", "C++" vs "C#", ".NET" vs "NET"). Both consulted experts
+    (2026-09-25) recommended this.
 
-    Returns (aligned, leftover):
-      aligned  -- list of (criterion_text, verdict_dict_or_None), one per
-                  expected criterion, in brief order (None = never judged).
-      leftover -- verdicts that matched no requested criterion; the caller
-                  keeps them so a stray not_met / matched=true still counts
-                  toward NO GO, but they never count toward completeness.
+    A criterion counts as answered only when EXACTLY ONE well-formed verdict
+    carries its id. Returns (aligned, problems):
+      aligned  -- [(id, criterion_text, verdict_dict_or_None)], one per
+                  expected criterion in brief order (None = not answered).
+      problems -- plain-English reasons the answer set is not well-formed:
+                  an id used twice, an unknown / wrong-group / blank id, an
+                  entry that is not an object, or answers that are not a
+                  list. Any problem means the screening is incomplete.
     """
-    pool = [v for v in (verdicts or []) if isinstance(v, dict)]
-    norm_pool = [_norm_criterion_text(v.get('text')) for v in pool]
-    used = [False] * len(pool)
-    expected = [str(t).strip() for t in (expected_texts or []) if str(t).strip()]
-    norm_expected = [_norm_criterion_text(t) for t in expected]
-    matched = [None] * len(expected)
+    expected = list(expected_texts or [])
+    problems = []
+    if verdicts is None:
+        verdicts = []
+    if not isinstance(verdicts, list):
+        verdicts = []
+        problems.append("the answers were not a list")
+    by_index = {}
+    for v in verdicts:
+        if not isinstance(v, dict):
+            problems.append("an answer was not an object")
+            continue
+        raw_id = v.get('id')
+        m = _CRITERION_ID_RE.fullmatch(raw_id.strip().upper()) if isinstance(raw_id, str) else None
+        idx = int(m.group(2)) if (m and m.group(1) == prefix) else None
+        if idx is None or not (1 <= idx <= len(expected)):
+            shown = str(raw_id)[:20] if raw_id not in (None, "") else "missing"
+            problems.append(f"unknown id ({shown})")
+            continue
+        by_index.setdefault(idx, []).append(v)
+    aligned = []
+    for i, text in enumerate(expected, 1):
+        found = by_index.get(i, [])
+        if len(found) > 1:
+            problems.append(f"{prefix}{i} answered {len(found)} times")
+            found = []
+        aligned.append((f"{prefix}{i}", text, found[0] if found else None))
+    return aligned, problems
 
-    for i, ne in enumerate(norm_expected):
-        for j, nv in enumerate(norm_pool):
-            if not used[j] and ne and nv == ne:
-                matched[i], used[j] = pool[j], True
-                break
-    aligned = list(zip(expected, matched))
-    leftover = [pool[j] for j in range(len(pool)) if not used[j]]
-    return aligned, leftover
+
+def _with_criterion_text(prefix, expected_texts, verdicts):
+    """Copy of the verdict list with `text` filled in from the brief (the
+    model now sends only an id). Keeps stored results and the results table
+    showing the criterion wording exactly as the recruiter wrote it."""
+    expected = list(expected_texts or [])
+    out = []
+    for v in (verdicts if isinstance(verdicts, list) else []):
+        if not isinstance(v, dict):
+            continue
+        item = dict(v)
+        raw_id = v.get('id')
+        m = _CRITERION_ID_RE.fullmatch(raw_id.strip().upper()) if isinstance(raw_id, str) else None
+        if m and m.group(1) == prefix and 1 <= int(m.group(2)) <= len(expected):
+            item['text'] = expected[int(m.group(2)) - 1]
+        out.append(item)
+    return out
 
 
 def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdicts,
-                                   score=0, num_expected_must_haves=None,
-                                   num_expected_exclusions=None,
+                                   score=0,
                                    hard_filter_failed=None, stability_failed=False,
                                    experience_limit_failed=False,
                                    expected_must_haves=None,
@@ -4867,25 +4890,16 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
             override note only -- never trusted for the actual outcome).
         must_have_verdicts / exclusion_verdicts: per-criterion verdict lists.
         score: the model's 1-10 score for this profile.
-        num_expected_must_haves: how many must-haves the brief actually
-            asked about. If the model returned fewer verdicts than this
-            (or an unparseable state for one), the missing ones are treated
-            as needs_verification rather than silently passing -- a GO must
-            never rest on a must-have the model never actually judged. Pass
-            None (default) to skip this check (e.g. no brief / no must-haves).
-        num_expected_exclusions: how many exclusions the brief actually
-            asked about. Same idea as num_expected_must_haves, but for
-            exclusions: a missing or unparseable `matched` value is never
-            treated as "cleared" -- it blocks GO until the model actually
-            rules it out (Codex review, PR #150). Pass None (default) to
-            skip this check.
-        expected_must_haves / expected_exclusions: the requested criterion
-            TEXTS. Preferred over the num_expected_* counts: each requested
-            criterion must be matched to its own returned verdict, so a
-            response that repeats one verdict, or answers an unrelated
-            criterion, cannot satisfy the completeness check (Codex review,
-            PR #150 round 2). The counts remain for callers that only know
-            how many there are.
+        expected_must_haves / expected_exclusions: the criterion TEXTS the
+            brief asked about, in the same order they were numbered in the
+            prompt (M1, M2, ... / E1, E2, ...). Each must be answered by
+            exactly one verdict carrying its id (see
+            _align_verdicts_by_id). A missing, repeated, unknown-id or
+            invalid-valued answer means the screening is incomplete and the
+            result is NO GO -- never a GO, and never a "needs_verification"
+            (that is a judgement the model made; "no answer" is not one).
+            Pass None (default) only for callers that have no brief: the
+            verdicts are then taken as given.
         hard_filter_failed: the model's own free-text name of a generic
             Hard Filter it applied (empty/None means it didn't cite one).
         stability_failed: Python-computed STABILITY VERDICT is FAIL (see
@@ -4922,23 +4936,19 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
       5. Otherwise (score below threshold) -> NO GO, with a
          "not shown..." note when needs_verification items exist.
     """
-    # Normalize verdicts: an unparseable/missing state, or a must-have the
-    # model never returned a verdict for at all, is needs_verification --
-    # never silently treated as met.
+    incomplete = []           # structure problems with the set of answers
+    unjudged_must_haves = []  # requested must-haves with no valid answer
+
     normalized = []
-    if expected_must_haves:
-        # Each requested must-have needs its OWN verdict (see
-        # _align_verdicts_to_criteria) -- a duplicated or unrelated verdict
-        # never stands in for one the model didn't return.
-        aligned, leftover = _align_verdicts_to_criteria(expected_must_haves, must_have_verdicts)
-        for crit_text, m in aligned:
-            state = (_must_have_verdict_state(m.get('met')) or 'needs_verification') if m else 'needs_verification'
-            normalized.append((crit_text, state))
-        for m in leftover:
-            # Not something the brief asked about: it can only ever push
-            # toward NO GO (a stray contradiction), never toward GO.
-            if _must_have_verdict_state(m.get('met')) == 'not_met':
-                normalized.append((str(m.get('text', '')).strip(), 'not_met'))
+    if expected_must_haves is not None:
+        aligned, mh_problems = _align_verdicts_by_id("M", expected_must_haves, must_have_verdicts)
+        incomplete.extend(mh_problems)
+        for _cid, crit_text, m in aligned:
+            state = _must_have_verdict_state(m.get('met')) if m else None
+            if state is None:
+                unjudged_must_haves.append(crit_text)
+            else:
+                normalized.append((crit_text, state))
     else:
         for m in (must_have_verdicts or []):
             if not isinstance(m, dict):
@@ -4946,39 +4956,26 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
             text = str(m.get('text', '')).strip()
             state = _must_have_verdict_state(m.get('met')) or 'needs_verification'
             normalized.append((text, state))
-        if num_expected_must_haves:
-            missing = num_expected_must_haves - len(normalized)
-            for _ in range(max(0, missing)):
-                normalized.append(('', 'needs_verification'))
 
     # An explicit not_met always blocks GO, even if the model left its text
     # blank -- only the label shown in the reason falls back to a placeholder.
     not_met_items = [t or 'unnamed requirement' for t, s in normalized if s == 'not_met']
 
-    # Normalize exclusions: matched=True is a match, matched=False is
-    # cleared, and anything else (missing key, None, unparseable value, or
-    # an exclusion the model never returned a verdict for at all) is
-    # "unjudged" -- it must never be silently treated as cleared.
+    # Exclusions: matched=True is a match, matched=False is cleared, and
+    # anything else (no answer, or an unparseable value) is "unjudged" --
+    # never silently treated as cleared.
     exclusion_normalized = []
-    if expected_exclusions:
-        aligned, leftover = _align_verdicts_to_criteria(expected_exclusions, exclusion_verdicts)
-        for crit_text, e in aligned:
+    if expected_exclusions is not None:
+        aligned, ex_problems = _align_verdicts_by_id("E", expected_exclusions, exclusion_verdicts)
+        incomplete.extend(ex_problems)
+        for _cid, crit_text, e in aligned:
             exclusion_normalized.append((crit_text, _tri(e.get('matched')) if e else None))
-        for e in leftover:
-            # A stray match on something the brief didn't ask about can
-            # only block GO; a stray "cleared" never satisfies a requested one.
-            if _tri(e.get('matched')) is True:
-                exclusion_normalized.append((str(e.get('text', '')).strip(), True))
     else:
         for e in (exclusion_verdicts or []):
             if not isinstance(e, dict):
                 continue
             text = str(e.get('text', '')).strip()
             exclusion_normalized.append((text, _tri(e.get('matched'))))
-        if num_expected_exclusions:
-            missing = num_expected_exclusions - len(exclusion_normalized)
-            for _ in range(max(0, missing)):
-                exclusion_normalized.append(('', None))
 
     matched_exclusions = [t for t, tri in exclusion_normalized if tri is True and t]
 
@@ -4993,9 +4990,15 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
         return ('NO GO', note)
 
     unjudged_exclusions = [t if t else 'unnamed' for t, tri in exclusion_normalized if tri is None]
-    if unjudged_exclusions:
-        note = "Exclusion not judged: " + "; ".join(unjudged_exclusions)
-        return ('NO GO', note)
+    if incomplete or unjudged_must_haves or unjudged_exclusions:
+        parts = []
+        if incomplete:
+            parts.append("Screening incomplete: " + "; ".join(incomplete))
+        if unjudged_must_haves:
+            parts.append("Must-have not judged: " + "; ".join(unjudged_must_haves))
+        if unjudged_exclusions:
+            parts.append("Exclusion not judged: " + "; ".join(unjudged_exclusions))
+        return ('NO GO', " | ".join(parts))
 
     hard_filter_named = _hard_filter_failure_named(hard_filter_failed)
     other_hard_fail = hard_filter_named or stability_failed or experience_limit_failed
@@ -5279,22 +5282,30 @@ def screen_profile(profile: dict, job_description: str, client,
             # with a "verify in call" note for any needs_verification
             # must-have; otherwise NO GO, noting when a needs_verification
             # must-have was the reason it fell short).
+            must_haves_shown = clean_criteria(must_haves)
+            exclusions_shown = clean_criteria(exclusions)
             final_decision, note = _resolve_three_state_decision(
                 model_decision, must_have_verdicts, exclusion_verdicts,
                 score=score,
-                num_expected_must_haves=len(must_haves) if must_haves else None,
-                num_expected_exclusions=len(exclusions) if exclusions else None,
-                expected_must_haves=[str(m) for m in must_haves] if must_haves else None,
-                expected_exclusions=[str(e) for e in exclusions] if exclusions else None,
+                expected_must_haves=must_haves_shown,
+                expected_exclusions=exclusions_shown,
                 hard_filter_failed=hard_filter_failed,
                 stability_failed=_stability_verdict_failed(durations_text),
             )
+            # The model sends only ids; put the brief's own wording back on
+            # each verdict for storage and the results table.
+            must_have_verdicts = _with_criterion_text("M", must_haves_shown, must_have_verdicts)
+            exclusion_verdicts = _with_criterion_text("E", exclusions_shown, exclusion_verdicts)
 
             verify_note = note if (final_decision == "GO" and note.startswith("Verify in call:")) else None
             if final_decision == "NO GO" and note.startswith("Not shown and the visible career"):
                 # Score fell short with an unproven-but-implied must-have in
                 # play -- reasoning must lead with this, always (whether or
                 # not the model already agreed on NO GO).
+                reasoning = f"{note} {reasoning}".strip()
+            elif final_decision == "NO GO" and (note.startswith("Screening incomplete") or "not judged" in note):
+                # An incomplete answer is always explained, even when the
+                # model itself said NO GO.
                 reasoning = f"{note} {reasoning}".strip()
             elif final_decision != model_decision and note and not verify_note:
                 # Guard overrode the model's own decision on a signal it

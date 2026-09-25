@@ -32,6 +32,8 @@ import pytest
 import db
 
 from dashboard import (
+    _align_verdicts_by_id,
+    _with_criterion_text,
     _tri,
     _verdicts_force_no_go,
     _must_have_verdict_state,
@@ -494,203 +496,179 @@ class TestResolveThreeStateDecision:
         assert decision == "NO GO"
         assert "Job hopper" in note
 
-    def test_missing_verdict_for_a_must_have_treated_as_needs_verification_go_with_note(self):
-        # The brief listed 2 must-haves; the model only returned a verdict
-        # for 1. The missing one must not silently pass -- it's treated as
-        # needs_verification, so a GO still requires score >= threshold and
-        # carries a verify note.
-        must_haves = [{"text": "5+ years Python", "met": "met"}]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, [], score=8, num_expected_must_haves=2,
+    # --- Answers are tied to criteria by ID (PR #150 review rounds 2-5 and
+    # both expert consults, 2026-09-25). The prompt numbers each criterion
+    # (M1, M2 / E1, E2); a criterion is answered only by EXACTLY ONE verdict
+    # carrying its id. Any missing / repeated / unknown id, or an invalid
+    # value, means the screening is incomplete: NO GO, never GO.
+
+    MH = ["5+ years Python", "Kubernetes in production"]
+    EX = ["Currently at a competitor", "No pure managers"]
+
+    @staticmethod
+    def _mh(cid, met="met", **extra):
+        return {"id": cid, "met": met, **extra}
+
+    @staticmethod
+    def _ex(cid, matched=False, **extra):
+        return {"id": cid, "matched": matched, **extra}
+
+    def _resolve(self, must_haves, exclusions, score=9, mh=None, ex=None, **kw):
+        return _resolve_three_state_decision(
+            "GO", must_haves, exclusions, score=score,
+            expected_must_haves=self.MH if mh is None else mh,
+            expected_exclusions=self.EX if ex is None else ex, **kw,
         )
-        assert decision == "GO"
-        assert note.startswith("Verify in call:")
 
-    def test_missing_verdict_for_a_must_have_low_score_is_no_go(self):
-        must_haves = [{"text": "5+ years Python", "met": "met"}]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, [], score=5, num_expected_must_haves=2,
+    def test_every_criterion_answered_once_can_go_and_order_does_not_matter(self):
+        decision, note = self._resolve(
+            [self._mh("M2"), self._mh("M1")], [self._ex("E2"), self._ex("E1")],
         )
-        assert decision == "NO GO"
-        assert note.startswith("Not shown and the visible career doesn't clearly imply:")
+        assert (decision, note) == ("GO", "")
 
-    def test_missing_exclusion_verdict_blocks_go_even_at_high_score(self):
-        # The brief listed 2 exclusions; the model only returned a verdict
-        # for 1. A missing exclusion verdict must never be treated as
-        # "cleared" -- it blocks GO regardless of score (Codex review, PR #150).
-        must_haves = [{"text": "5+ years Python", "met": "met"}]
-        exclusions = [{"text": "Currently at a competitor", "matched": False}]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, exclusions, score=9, num_expected_exclusions=2,
+    def test_ids_are_case_and_space_tolerant(self):
+        decision, note = self._resolve(
+            [self._mh(" m1 "), self._mh("M2")], [self._ex("e1"), self._ex("E2")],
         )
-        assert decision == "NO GO"
-        assert "Exclusion not judged" in note
+        assert (decision, note) == ("GO", "")
 
-    def test_unparseable_matched_value_blocks_go(self):
-        must_haves = [{"text": "5+ years Python", "met": "met"}]
-        exclusions = [{"text": "Currently at a competitor", "matched": "partial"}]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, exclusions, score=9,
+    def test_the_wording_the_model_sends_is_ignored(self):
+        # Matching is by id only: whatever text comes back never decides
+        # which criterion an answer belongs to.
+        decision, note = self._resolve(
+            [self._mh("M1", text="something else entirely"), self._mh("M2", text="5+ years Python")],
+            [self._ex("E1", text="No pure managers"), self._ex("E2", text="")],
         )
-        assert decision == "NO GO"
-        assert "Exclusion not judged" in note
-        assert "Currently at a competitor" in note
+        assert (decision, note) == ("GO", "")
 
-    def test_all_exclusions_present_and_cleared_can_go(self):
-        must_haves = [{"text": "5+ years Python", "met": "met"}]
-        exclusions = [
-            {"text": "Currently at a competitor", "matched": False},
-            {"text": "No pure managers", "matched": False},
-        ]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, exclusions, score=9, num_expected_exclusions=2,
-        )
-        assert decision == "GO"
-        assert note == ""
-
-    # --- Codex review, PR #150 round 2: verdicts must match the REQUESTED
-    # criteria, not just add up to the right count.
-
-    def test_duplicate_cleared_exclusion_does_not_satisfy_two_requested(self):
-        # Two exclusions were asked; the model answered the same one twice
-        # and never judged the second. Counting verdicts would call that
-        # complete and let a score of 9 through as GO.
-        exclusions = [
-            {"text": "Currently at a competitor", "matched": False},
-            {"text": "Currently at a competitor", "matched": False},
-        ]
-        decision, note = _resolve_three_state_decision(
-            "GO", [{"text": "5+ years Python", "met": "met"}], exclusions, score=9,
-            expected_must_haves=["5+ years Python"],
-            expected_exclusions=["Currently at a competitor", "No pure managers"],
+    def test_similar_looking_requirements_stay_separate(self):
+        # "C++" vs "C#" (and "Java" vs "Python", ".NET" vs "NET") can never
+        # be confused, because nothing is compared by wording.
+        decision, note = self._resolve(
+            [self._mh("M1"), self._mh("M2", "not_met")], [],
+            mh=["C++ experience", "C# experience"], ex=[],
         )
         assert decision == "NO GO"
-        assert "Exclusion not judged" in note
-        assert "No pure managers" in note
+        assert "C# experience" in note and "C++ experience" not in note
 
-    def test_unrelated_exclusion_verdicts_do_not_satisfy_requested_ones(self):
-        exclusions = [
-            {"text": "Lives abroad", "matched": False},
-            {"text": "Freelancer", "matched": False},
-        ]
-        decision, note = _resolve_three_state_decision(
-            "GO", [{"text": "5+ years Python", "met": "met"}], exclusions, score=9,
-            expected_must_haves=["5+ years Python"],
-            expected_exclusions=["Currently at a competitor", "No pure managers"],
-        )
+    def test_missing_must_have_answer_is_no_go_even_at_a_high_score(self):
+        # No answer is not the same as "needs_verification": it is an
+        # incomplete screening.
+        decision, note = self._resolve([self._mh("M1")], [self._ex("E1"), self._ex("E2")], score=9)
         assert decision == "NO GO"
-        assert "Exclusion not judged" in note
+        assert "Must-have not judged: Kubernetes in production" in note
 
-    def test_duplicate_must_have_verdict_does_not_cover_a_missing_one(self):
-        # Same must-have answered twice, the other never judged: the missing
-        # one is needs_verification, so a low score is NO GO with its name.
-        must_haves = [
-            {"text": "5+ years Python", "met": "met"},
-            {"text": "5+ years Python", "met": "met"},
-        ]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, [], score=5,
-            expected_must_haves=["5+ years Python", "Kubernetes in production"],
-        )
-        assert decision == "NO GO"
-        assert "Kubernetes in production" in note
-
-    def test_missing_must_have_at_high_score_is_go_with_named_verify_note(self):
-        must_haves = [{"text": "5+ years Python", "met": "met"}]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, [], score=8,
-            expected_must_haves=["5+ years Python", "Kubernetes in production"],
+    def test_explicit_needs_verification_can_still_go_at_a_high_score(self):
+        decision, note = self._resolve(
+            [self._mh("M1"), self._mh("M2", "needs_verification")],
+            [self._ex("E1"), self._ex("E2")], score=8,
         )
         assert decision == "GO"
         assert note == "Verify in call: Kubernetes in production"
 
-    def test_verdict_text_may_differ_in_case_punctuation_or_light_rewording(self):
-        must_haves = [{"text": "5+ years python.", "met": "met"}]
-        exclusions = [
-            {"text": "currently at a competitor", "matched": False},
-            {"text": "No pure managers", "matched": False},
-        ]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, exclusions, score=9,
-            expected_must_haves=["5+ years Python"],
-            expected_exclusions=["Currently at a competitor", "No pure managers"],
-        )
-        assert decision == "GO"
-        assert note == ""
-
-    def test_similar_looking_but_different_requirement_is_not_matched(self):
-        # Codex review, PR #150 round 3: "5+ years of Python" and
-        # "5+ years of Java" look ~82% alike. A Java verdict must never
-        # stand in for the Python requirement.
-        must_haves = [{"text": "5+ years of Java experience", "met": "met"}]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, [], score=5,
-            expected_must_haves=["5+ years of Python experience"],
+    def test_explicit_needs_verification_at_a_low_score_is_no_go_naming_it(self):
+        decision, note = self._resolve(
+            [self._mh("M1"), self._mh("M2", "needs_verification")],
+            [self._ex("E1"), self._ex("E2")], score=5,
         )
         assert decision == "NO GO"
-        assert "5+ years of Python experience" in note
+        assert note.startswith("Not shown and the visible career doesn't clearly imply:")
+        assert "Kubernetes in production" in note
 
-    def test_meaningful_punctuation_is_kept_when_matching(self):
-        # Codex review, PR #150 round 4: "C++" and "C#" must not collapse
-        # to the same text.
-        must_haves = [{"text": "C# experience", "met": "met"}]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, [], score=5,
-            expected_must_haves=["C++ experience"],
+    def test_same_must_have_answered_twice_is_incomplete(self):
+        decision, note = self._resolve(
+            [self._mh("M1"), self._mh("M1"), self._mh("M2")], [self._ex("E1"), self._ex("E2")],
         )
         assert decision == "NO GO"
-        assert "C++ experience" in note
+        assert "Screening incomplete" in note and "M1 answered 2 times" in note
 
-    def test_version_numbers_are_not_merged(self):
-        must_haves = [{"text": "Python 311", "met": "met"}]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, [], score=5,
-            expected_must_haves=["Python 3.11"],
+    def test_same_exclusion_answered_twice_leaves_the_other_unjudged(self):
+        # Two exclusions asked; the same cleared one returned twice. A count
+        # of verdicts would call that complete (Codex, PR #150 round 2).
+        decision, note = self._resolve(
+            [self._mh("M1"), self._mh("M2")], [self._ex("E1"), self._ex("E1")],
         )
         assert decision == "NO GO"
+        assert "E1 answered 2 times" in note
+        assert "Exclusion not judged: Currently at a competitor; No pure managers" in note
 
-    def test_blank_text_not_met_verdict_still_blocks_go(self):
-        # An explicit not_met with no "text" field must not be dropped.
-        must_haves = [{"met": "not_met"}, {"text": "5+ years Python", "met": "met"}]
-        decision, note = _resolve_three_state_decision(
-            "GO", must_haves, [], score=9,
-            expected_must_haves=["5+ years Python"],
+    def test_unknown_or_wrong_group_or_blank_id_is_incomplete(self):
+        for bad in ("M7", "E1", "", None, "banana", 3):
+            decision, note = self._resolve(
+                [self._mh("M1"), self._mh("M2"), {"id": bad, "met": "met"}],
+                [self._ex("E1"), self._ex("E2")],
+            )
+            assert decision == "NO GO", bad
+            assert "Screening incomplete" in note, bad
+
+    def test_an_answer_that_is_not_an_object_is_incomplete(self):
+        decision, note = self._resolve(
+            [self._mh("M1"), self._mh("M2"), "yes"], [self._ex("E1"), self._ex("E2")],
         )
         assert decision == "NO GO"
-        assert "unnamed requirement" in note
+        assert "Screening incomplete" in note
 
-    def test_similar_looking_exclusion_is_not_matched(self):
-        exclusions = [{"text": "Currently at Wix", "matched": False}]
-        decision, note = _resolve_three_state_decision(
-            "GO", [{"text": "5+ years Python", "met": "met"}], exclusions, score=9,
-            expected_must_haves=["5+ years Python"],
-            expected_exclusions=["Currently at Wiz"],
+    def test_answers_that_are_not_a_list_are_incomplete(self):
+        decision, note = self._resolve({"M1": "met"}, [self._ex("E1"), self._ex("E2")])
+        assert decision == "NO GO"
+        assert "Screening incomplete" in note
+
+    def test_invalid_must_have_value_is_not_judged(self):
+        decision, note = self._resolve(
+            [self._mh("M1", "banana"), self._mh("M2")], [self._ex("E1"), self._ex("E2")],
         )
         assert decision == "NO GO"
-        assert "Exclusion not judged: Currently at Wiz" in note
+        assert "Must-have not judged: 5+ years Python" in note
 
-    def test_no_verdict_arrays_at_all_still_names_what_to_verify(self):
-        decision, note = _resolve_three_state_decision(
-            "GO", [], [], score=8,
-            expected_must_haves=["5+ years Python"],
-        )
-        assert decision == "GO"
-        assert note == "Verify in call: 5+ years Python"
-
-    def test_verdict_for_unrequested_criterion_can_only_push_toward_no_go(self):
-        # A stray "matched: true" for something the brief never asked about
-        # still blocks GO; a stray "cleared" never helps.
-        exclusions = [
-            {"text": "Currently at a competitor", "matched": False},
-            {"text": "Works in a country we do not hire in", "matched": True},
-        ]
-        decision, note = _resolve_three_state_decision(
-            "GO", [{"text": "5+ years Python", "met": "met"}], exclusions, score=9,
-            expected_must_haves=["5+ years Python"],
-            expected_exclusions=["Currently at a competitor"],
+    def test_invalid_exclusion_value_is_not_judged(self):
+        decision, note = self._resolve(
+            [self._mh("M1"), self._mh("M2")], [self._ex("E1", "partial"), self._ex("E2")],
         )
         assert decision == "NO GO"
-        assert "country we do not hire in" in note
+        assert "Exclusion not judged: Currently at a competitor" in note
+
+    def test_no_answers_at_all_is_no_go(self):
+        decision, note = self._resolve([], [])
+        assert decision == "NO GO"
+        assert "Must-have not judged" in note and "Exclusion not judged" in note
+
+    def test_no_criteria_asked_and_none_returned_can_go(self):
+        decision, note = self._resolve([], [], score=8, mh=[], ex=[])
+        assert (decision, note) == ("GO", "")
+
+    def test_no_criteria_asked_but_answers_returned_is_incomplete(self):
+        decision, note = self._resolve([self._mh("M1")], [], score=8, mh=[], ex=[])
+        assert decision == "NO GO"
+        assert "Screening incomplete" in note
+
+    def test_explicit_not_met_without_any_text_still_blocks_go(self):
+        decision, note = self._resolve(
+            [self._mh("M1", "not_met"), self._mh("M2")], [self._ex("E1"), self._ex("E2")],
+        )
+        assert decision == "NO GO"
+        assert "5+ years Python" in note  # the wording comes from the brief
+
+    def test_matched_exclusion_blocks_go(self):
+        decision, note = self._resolve(
+            [self._mh("M1"), self._mh("M2")], [self._ex("E1"), self._ex("E2", True)],
+        )
+        assert decision == "NO GO"
+        assert "No pure managers" in note
+
+    def test_align_verdicts_by_id_reports_each_problem(self):
+        aligned, problems = _align_verdicts_by_id(
+            "M", ["a", "b"], [{"id": "M1"}, {"id": "M1"}, {"id": "E1"}, "x"],
+        )
+        assert [(cid, text, v) for cid, text, v in aligned] == [("M1", "a", None), ("M2", "b", None)]
+        assert "M1 answered 2 times" in problems
+        assert "unknown id (E1)" in problems
+        assert "an answer was not an object" in problems
+
+    def test_with_criterion_text_fills_the_brief_wording(self):
+        out = _with_criterion_text("M", ["a", "b"], [{"id": "M2", "met": "met"}, {"id": "zzz"}, "junk"])
+        assert out[0]["text"] == "b"
+        assert "text" not in out[1]
+        assert len(out) == 2
 
     def test_model_no_go_with_hard_filter_named_stays_no_go(self):
         must_haves = [{"text": "EU-based", "met": "needs_verification"}]
@@ -878,3 +856,79 @@ class TestResultBucketHistoricNeedsVerification:
         from dashboard import _result_bucket
         assert _result_bucket({"decision": "GO", "fit": "Good Fit"}) == "Good Fit"
         assert _result_bucket({"decision": "NO GO", "fit": "Not a Fit"}) == "Not a Fit"
+
+
+class TestScreenProfileTiesAnswersToIds:
+    """End to end through screen_profile with a faked model reply: the prompt
+    must number the criteria (M1.. / E1..), the decision must come from the
+    ids, and stored verdicts must carry the brief's own wording."""
+
+    BRIEF = {
+        "role_context": "Senior backend engineer",
+        "must_haves": ["5+ years Python", "Kubernetes in production"],
+        "exclusions": ["Currently at a competitor"],
+        "nice_to_haves": [],
+    }
+    PROFILE = {
+        "linkedin_url": "https://www.linkedin.com/in/someone",
+        "name": "Test Person",
+        "raw_crustdata": {
+            "name": "Test Person",
+            "current_employers": [{"employer_name": "Acme", "employee_title": "Engineer",
+                                   "start_date": "2020-01-01T00:00:00"}],
+        },
+    }
+
+    def _run(self, monkeypatch, reply):
+        import dashboard
+        seen = {}
+
+        def fake_call(client, ai_provider, ai_model, system_prompt, user_prompt, **kw):
+            seen["prompt"] = user_prompt
+            return reply
+
+        monkeypatch.setattr(dashboard, "_screening_api_call", fake_call)
+        result = dashboard.screen_profile(
+            dict(self.PROFILE), "", object(), screening_brief=self.BRIEF,
+        )
+        return result, seen["prompt"]
+
+    def test_prompt_numbers_every_criterion_and_go_keeps_brief_wording(self, monkeypatch):
+        reply = {
+            "must_haves": [{"id": "M2", "met": "met"}, {"id": "M1", "met": "met"}],
+            "exclusions": [{"id": "E1", "matched": False}],
+            "decision": "GO", "score": 9, "reasoning": "ok",
+        }
+        result, prompt = self._run(monkeypatch, reply)
+        assert "M1. 5+ years Python" in prompt
+        assert "M2. Kubernetes in production" in prompt
+        assert "E1. Currently at a competitor" in prompt
+        assert result["decision"] == "GO"
+        assert result["fit"] == "Good Fit"
+        texts = {v["id"]: v["text"] for v in result["must_have_verdicts"]}
+        assert texts == {"M1": "5+ years Python", "M2": "Kubernetes in production"}
+        assert result["exclusion_verdicts"][0]["text"] == "Currently at a competitor"
+
+    def test_reply_without_ids_is_no_go_and_says_why(self, monkeypatch):
+        # The model ignored the id instruction and echoed text instead.
+        reply = {
+            "must_haves": [{"text": "5+ years Python", "met": "met"},
+                           {"text": "Kubernetes in production", "met": "met"}],
+            "exclusions": [{"text": "Currently at a competitor", "matched": False}],
+            "decision": "GO", "score": 9, "reasoning": "looks great",
+        }
+        result, _ = self._run(monkeypatch, reply)
+        assert result["decision"] == "NO GO"
+        assert result["fit"] == "Not a Fit"
+        assert "Screening incomplete" in result["summary"]
+        assert "looks great" in result["summary"]
+
+    def test_missing_answer_is_explained_even_when_model_said_no_go(self, monkeypatch):
+        reply = {
+            "must_haves": [{"id": "M1", "met": "met"}],
+            "exclusions": [{"id": "E1", "matched": False}],
+            "decision": "NO GO", "score": 3, "reasoning": "weak",
+        }
+        result, _ = self._run(monkeypatch, reply)
+        assert result["decision"] == "NO GO"
+        assert "Must-have not judged: Kubernetes in production" in result["summary"]

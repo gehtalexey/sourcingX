@@ -168,14 +168,14 @@ For EXCLUSIONS, apply the SCOPE rule from "User-Stated Hard Constraints" above �
 
 Return ONLY this JSON object, no prose, no markdown:
 {
-  "must_haves": [{"text": "<must-have, verbatim>", "met": "met" or "not_met" or "needs_verification", "evidence": "<one sentence>"}],
-  "exclusions": [{"text": "<exclusion, verbatim>", "matched": true or false, "why": "<if matched: the specific evidence from the profile that triggered it — title/company/dates for employment exclusions, or the relevant field (location, language, etc.) for others — if you can't cite one, it did not match>"}],
+  "must_haves": [{"id": "<the must-have's id exactly as listed, e.g. M1>", "met": "met" or "not_met" or "needs_verification", "evidence": "<one sentence>"}],
+  "exclusions": [{"id": "<the exclusion's id exactly as listed, e.g. E1>", "matched": true or false, "why": "<if matched: the specific evidence from the profile that triggered it — title/company/dates for employment exclusions, or the relevant field (location, language, etc.) for others — if you can't cite one, it did not match>"}],
   "hard_filter_failed": "" (empty string) unless a rule failed -- when one does, and your NO GO is NOT caused by a not_met must-have or a matched exclusion above, name the generic Hard Filter / STABILITY VERDICT / EXPERIENCE LIMIT CHECK rule this profile fails, citing the evidence,
   "decision": "GO" or "NO GO",
   "score": integer 1-10,
   "reasoning": "2-3 sentences: strongest signal, biggest concern, why GO/NO GO."
 }
-Give an explicit verdict on every must-have and every exclusion before deciding. See the Must-Have Verdict rule above: "met" requires positive evidence, "not_met" requires a contradiction, and unproven/absent evidence is "needs_verification" — never "not_met". Every candidate gets a final GO or NO GO, never a third bucket — there is no manual review step, so decide as a senior recruiter would on the visible career alone. Decision: any not_met or matched exclusion -> NO GO (name the contradiction). Otherwise, follow the needs_verification scoring rule above (score as if met with a "verify in call" note when the visible career clearly implies it, 6 or below when it's genuinely ambiguous) and let the score carry the call: score 7 or higher -> GO, below 7 -> NO GO. A legacy boolean for "met" is also accepted for backward compatibility: true = met, false = not_met.
+Give exactly ONE verdict per listed id -- every must-have (M1, M2, ...) and every exclusion (E1, E2, ...) -- never skip one, repeat one, or invent an id. An incomplete answer is treated as NO GO. Give an explicit verdict on every must-have and every exclusion before deciding. See the Must-Have Verdict rule above: "met" requires positive evidence, "not_met" requires a contradiction, and unproven/absent evidence is "needs_verification" — never "not_met". Every candidate gets a final GO or NO GO, never a third bucket — there is no manual review step, so decide as a senior recruiter would on the visible career alone. Decision: any not_met or matched exclusion -> NO GO (name the contradiction). Otherwise, follow the needs_verification scoring rule above (score as if met with a "verify in call" note when the visible career clearly implies it, 6 or below when it's genuinely ambiguous) and let the score carry the call: score 7 or higher -> GO, below 7 -> NO GO. A legacy boolean for "met" is also accepted for backward compatibility: true = met, false = not_met.
 A NO GO can also come from something outside the must-haves/exclusions lists entirely — the generic Hard Filters (job hopper, career arc predominantly non-tech, telecom/banking/outsourcing, 8+ years stagnation), the pre-computed STABILITY VERDICT FAIL, or a recruiter-stated experience-years ceiling the candidate's INDUSTRY EXPERIENCE exceeds. Whenever THAT is your reason for NO GO (not a not_met must-have or matched exclusion), name it in "hard_filter_failed" -- this keeps a real hard-filter rejection from ever being mistaken for a merely-unproven must-have. When no such rule failed, "hard_filter_failed" MUST be the empty string "" -- never a placeholder word like "none", "N/A", "no hard filter", "null", "-", "no", or "false".
 
 Today's date: {today}
@@ -203,12 +203,21 @@ def get_structured_system_prompt() -> str:
     return body.replace("{today}", datetime.now().strftime("%Y-%m-%d"))
 
 
-def _format_list(items) -> str:
-    """Render a list of criteria as a numbered block, or '(none specified)'."""
-    cleaned = [str(i).strip() for i in (items or []) if str(i).strip()]
+def clean_criteria(items) -> list:
+    """The criteria actually shown to the model: stripped, blanks dropped.
+    The prompt and the answer checker must both use THIS list, so the id a
+    criterion gets in the prompt (M1, M2, ...) is the id the checker expects."""
+    return [str(i).strip() for i in (items or []) if str(i).strip()]
+
+
+def _format_list(items, id_prefix: str = "") -> str:
+    """Render a list of criteria as a numbered block, or '(none specified)'.
+    With id_prefix ("M" / "E") each line carries an id the model must send
+    back with its verdict: "M1. text", "M2. text", ..."""
+    cleaned = clean_criteria(items)
     if not cleaned:
         return "(none specified)"
-    return "\n".join(f"{n}. {text}" for n, text in enumerate(cleaned, 1))
+    return "\n".join(f"{id_prefix}{n}. {text}" for n, text in enumerate(cleaned, 1))
 
 
 def build_structured_user_prompt(role_context: str, must_haves: list,
@@ -231,10 +240,10 @@ def build_structured_user_prompt(role_context: str, must_haves: list,
 {(role_context or "").strip() or "(none specified)"}
 
 ## Must-Haves (ALL required — any one not met = NO GO)
-{_format_list(must_haves)}
+{_format_list(must_haves, "M")}
 
 ## Exclusions / Deal-Breakers (any match = NO GO)
-{_format_list(exclusions)}
+{_format_list(exclusions, "E")}
 
 ## Candidate Profile (raw JSON)
 ```json

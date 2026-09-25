@@ -618,6 +618,36 @@ class TestResolveThreeStateDecision:
         assert decision == "GO"
         assert note == ""
 
+    def test_similar_looking_but_different_requirement_is_not_matched(self):
+        # Codex review, PR #150 round 3: "5+ years of Python" and
+        # "5+ years of Java" look ~82% alike. A Java verdict must never
+        # stand in for the Python requirement.
+        must_haves = [{"text": "5+ years of Java experience", "met": "met"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=5,
+            expected_must_haves=["5+ years of Python experience"],
+        )
+        assert decision == "NO GO"
+        assert "5+ years of Python experience" in note
+
+    def test_similar_looking_exclusion_is_not_matched(self):
+        exclusions = [{"text": "Currently at Wix", "matched": False}]
+        decision, note = _resolve_three_state_decision(
+            "GO", [{"text": "5+ years Python", "met": "met"}], exclusions, score=9,
+            expected_must_haves=["5+ years Python"],
+            expected_exclusions=["Currently at Wiz"],
+        )
+        assert decision == "NO GO"
+        assert "Exclusion not judged: Currently at Wiz" in note
+
+    def test_no_verdict_arrays_at_all_still_names_what_to_verify(self):
+        decision, note = _resolve_three_state_decision(
+            "GO", [], [], score=8,
+            expected_must_haves=["5+ years Python"],
+        )
+        assert decision == "GO"
+        assert note == "Verify in call: 5+ years Python"
+
     def test_verdict_for_unrequested_criterion_can_only_push_toward_no_go(self):
         # A stray "matched: true" for something the brief never asked about
         # still blocks GO; a stray "cleared" never helps.
@@ -799,3 +829,23 @@ class TestHardFilterFailureNamed:
         decision, note = _resolve_three_state_decision("GO", must_haves, [], score=8)
         assert decision == "GO"
         assert note == ""
+
+
+class TestResultBucketHistoricNeedsVerification:
+    """Codex review, PR #150 round 3: a carried-over row still marked
+    NEEDS VERIFICATION (fit "Maybe") has not been re-screened under the
+    no-manual-bucket policy, so it must not join the Maybe filter/outreach
+    flow."""
+
+    def test_historic_needs_verification_shows_as_not_a_fit(self):
+        from dashboard import _result_bucket
+        assert _result_bucket({"decision": "NEEDS VERIFICATION", "fit": "Maybe"}) == "Not a Fit"
+
+    def test_plain_historic_maybe_still_displays_as_maybe(self):
+        from dashboard import _result_bucket
+        assert _result_bucket({"decision": "GO", "fit": "Maybe"}) == "Maybe"
+
+    def test_new_results_unchanged(self):
+        from dashboard import _result_bucket
+        assert _result_bucket({"decision": "GO", "fit": "Good Fit"}) == "Good Fit"
+        assert _result_bucket({"decision": "NO GO", "fit": "Not a Fit"}) == "Not a Fit"

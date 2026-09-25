@@ -4656,7 +4656,14 @@ def _result_bucket(r: dict) -> str:
     to break out separately. Kept as its own function (rather than reading
     r['fit'] directly everywhere) so an older session result that still
     carries a "Maybe" fit_level from a previous build displays under its
-    own bucket instead of erroring or vanishing."""
+    own bucket instead of erroring or vanishing.
+
+    A carried-over row whose decision is still NEEDS VERIFICATION has not
+    been re-screened under the no-manual-bucket policy: it must not land in
+    the Maybe filter / download / outreach flow, so it shows as Not a Fit
+    until it is screened again (Codex review, PR #150 round 3)."""
+    if r.get('decision') == 'NEEDS VERIFICATION':
+        return 'Not a Fit'
     return r.get('fit', '') or ''
 
 
@@ -4808,9 +4815,12 @@ def _align_verdicts_to_criteria(expected_texts, verdicts):
     A model that returns the same verdict twice, or a verdict for something
     that was never asked, must not satisfy a completeness check that only
     counts verdicts (Codex review, PR #150 round 2). Each verdict is used at
-    most once: exact match on normalized text first, then the closest
-    remaining verdict at >= 0.8 similarity (models sometimes trim or reword a
-    line despite the "verbatim" instruction).
+    most once, matched on normalized text (case/punctuation/spacing only).
+    There is deliberately NO fuzzy matching: two different requirements can
+    look alike ("5+ years of Python" vs "5+ years of Java" score ~0.82), and
+    letting one stand in for the other would pass a criterion nobody judged
+    (Codex review, PR #150 round 3). The prompt tells the model to echo each
+    line verbatim; a reworded one just counts as not judged, which fails safe.
 
     Returns (aligned, leftover):
       aligned  -- list of (criterion_text, verdict_dict_or_None), one per
@@ -4819,7 +4829,6 @@ def _align_verdicts_to_criteria(expected_texts, verdicts):
                   keeps them so a stray not_met / matched=true still counts
                   toward NO GO, but they never count toward completeness.
     """
-    import difflib
     pool = [v for v in (verdicts or []) if isinstance(v, dict)]
     norm_pool = [_norm_criterion_text(v.get('text')) for v in pool]
     used = [False] * len(pool)
@@ -4832,19 +4841,6 @@ def _align_verdicts_to_criteria(expected_texts, verdicts):
             if not used[j] and ne and nv == ne:
                 matched[i], used[j] = pool[j], True
                 break
-    for i, ne in enumerate(norm_expected):
-        if matched[i] is not None:
-            continue
-        best_j, best_r = None, 0.8
-        for j, nv in enumerate(norm_pool):
-            if used[j] or not nv:
-                continue
-            r = difflib.SequenceMatcher(None, ne, nv).ratio()
-            if r >= best_r:
-                best_j, best_r = j, r
-        if best_j is not None:
-            matched[i], used[best_j] = pool[best_j], True
-
     aligned = list(zip(expected, matched))
     leftover = [pool[j] for j in range(len(pool)) if not used[j]]
     return aligned, leftover
@@ -11177,7 +11173,7 @@ with tab_screening:
                     "met" string isn't miscounted as missing."""
                     mh = r.get('must_have_verdicts') or []
                     ex = r.get('exclusion_verdicts') or []
-                    if not mh and not ex:
+                    if not mh and not ex and not r.get('verify_note'):
                         return ''
                     parts = []
                     if mh:

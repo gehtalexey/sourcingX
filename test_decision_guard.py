@@ -307,7 +307,12 @@ class TestThreeStateDecisionGuardIntegration:
         assert force_no_go is True
         assert "Located in Europe" in guard_reason
 
-    def test_no_not_met_one_needs_verification_yields_needs_verification_decision(self):
+    def test_no_not_met_one_needs_verification_is_not_a_force_no_go(self):
+        # A needs_verification must-have is unproven, not contradicted --
+        # it must never force NO GO on its own. There is no manual-review
+        # bucket any more: whether this ends up GO or NO GO is decided by
+        # _resolve_three_state_decision from the score (see
+        # TestResolveThreeStateDecision), not by this guard.
         must_haves = [
             {"text": "5+ years Python", "met": "met"},
             {"text": "Located in Europe", "met": "needs_verification"},
@@ -317,13 +322,6 @@ class TestThreeStateDecisionGuardIntegration:
         assert force_no_go is False
         assert needs_verif is True
         assert items == ["Located in Europe"]
-        # The fit label a NEEDS VERIFICATION decision maps to is "Maybe" —
-        # screening_fit_level keeps its existing three values; the caller
-        # tells needs-verification apart via the separate `decision` field
-        # and the `notes`/screening_notes text ("Needs verification: ...").
-        assert _decision_to_fit_label("NEEDS VERIFICATION", 8) == "Maybe"
-        notes = "Needs verification: " + "; ".join(items)
-        assert notes == "Needs verification: Located in Europe"
 
     def test_all_met_high_score_is_a_go(self):
         must_haves = [
@@ -365,6 +363,22 @@ class TestPolicyNoLongerTreatsMissingEvidenceAsFail:
         assert "absence of evidence is never" in SCREENING_POLICY.lower() or \
                "absence of evidence is NEVER" in SCREENING_POLICY
 
+    def test_policy_no_longer_lists_insufficient_data_as_a_score_reason(self):
+        from screening_policy import SCREENING_POLICY
+        assert "insufficient data (NO GO)" not in SCREENING_POLICY
+        assert "insufficient data is not a score reason" in SCREENING_POLICY.lower()
+
+    def test_policy_states_defining_requirement_score_cap(self):
+        from screening_policy import SCREENING_POLICY
+        assert "the requirement named in the role title" in SCREENING_POLICY
+        assert "A strong engineer with no signal on the defining requirement is a 6, not a 7." in SCREENING_POLICY
+
+    def test_no_needs_verification_decision_text_left_in_schema(self):
+        from screening_policy import SCREENING_POLICY
+        assert '"decision": "GO" or "NO GO" or "NEEDS VERIFICATION"' not in SCREENING_POLICY
+        assert '"decision": "GO" or "NO GO"' in SCREENING_POLICY
+        assert "GO/NO GO/NEEDS VERIFICATION" not in SCREENING_POLICY
+
 
 class TestStabilityVerdictFailed:
     """_stability_verdict_failed(durations_text) -> bool. Parses the exact
@@ -384,13 +398,93 @@ class TestStabilityVerdictFailed:
 
 
 class TestResolveThreeStateDecision:
-    """_resolve_three_state_decision(...) -> (decision, note). The
-    combined guard used by screen_profile(): must-have/exclusion
-    contradictions still force NO GO; a generic hard filter / STABILITY
-    VERDICT FAIL is never mistaken for a merely-unproven must-have and
-    flipped into NEEDS VERIFICATION; only a genuinely unproven-but-not-
-    contradicted must-have (with no hard filter involved) becomes NEEDS
-    VERIFICATION."""
+    """_resolve_three_state_decision(...) -> (decision, note). There is no
+    manual-review bucket -- every candidate ends GO or NO GO, decided
+    purely from the verdicts and score, regardless of what the model's own
+    top-level `decision` field said:
+      1. Any not_met must-have or matched exclusion -> NO GO.
+      2. Otherwise a real hard filter / STABILITY VERDICT FAIL -> NO GO.
+      3. Otherwise GO only when score >= GO_CONFIDENCE_THRESHOLD (7); any
+         needs_verification must-haves ride along as a "Verify in call"
+         note, never lowering the score themselves.
+      4. Otherwise (score below threshold) -> NO GO, with a "Not shown..."
+         note when needs_verification must-haves were involved.
+    A must-have the model never returned a verdict for (fewer verdicts
+    than the brief listed) or gave an unparseable state for is treated as
+    needs_verification too -- a GO must never rest on a must-have the
+    model never actually judged."""
+
+    def test_not_met_forces_no_go_regardless_of_score(self):
+        must_haves = [{"text": "5+ years Python", "met": "not_met"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=9,
+        )
+        assert decision == "NO GO"
+        assert "5+ years Python" in note
+
+    def test_needs_verification_high_score_is_go_with_verify_in_call_note(self):
+        must_haves = [
+            {"text": "5+ years Python", "met": "met"},
+            {"text": "EU-based", "met": "needs_verification"},
+        ]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=8,
+        )
+        assert decision == "GO"
+        assert note.startswith("Verify in call:")
+        assert "EU-based" in note
+
+    def test_needs_verification_low_score_is_no_go_with_not_shown_note(self):
+        must_haves = [
+            {"text": "5+ years Python", "met": "met"},
+            {"text": "EU-based", "met": "needs_verification"},
+        ]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=6,
+        )
+        assert decision == "NO GO"
+        assert note.startswith("Not shown and the visible career doesn't clearly imply:")
+        assert "EU-based" in note
+
+    def test_all_met_score_six_is_no_go(self):
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        decision, note = _resolve_three_state_decision("GO", must_haves, [], score=6)
+        assert decision == "NO GO"
+
+    def test_all_met_score_seven_is_go(self):
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        decision, note = _resolve_three_state_decision("GO", must_haves, [], score=7)
+        assert decision == "GO"
+        assert note == ""
+
+    def test_hard_filter_with_score_nine_still_no_go(self):
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=9,
+            hard_filter_failed="Job hopper: 4 roles under 1 year",
+        )
+        assert decision == "NO GO"
+        assert "Job hopper" in note
+
+    def test_missing_verdict_for_a_must_have_treated_as_needs_verification_go_with_note(self):
+        # The brief listed 2 must-haves; the model only returned a verdict
+        # for 1. The missing one must not silently pass -- it's treated as
+        # needs_verification, so a GO still requires score >= threshold and
+        # carries a verify note.
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=8, num_expected_must_haves=2,
+        )
+        assert decision == "GO"
+        assert note.startswith("Verify in call:")
+
+    def test_missing_verdict_for_a_must_have_low_score_is_no_go(self):
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=5, num_expected_must_haves=2,
+        )
+        assert decision == "NO GO"
+        assert note.startswith("Not shown and the visible career doesn't clearly imply:")
 
     def test_model_no_go_with_hard_filter_named_stays_no_go(self):
         must_haves = [{"text": "EU-based", "met": "needs_verification"}]
@@ -408,31 +502,6 @@ class TestResolveThreeStateDecision:
         )
         assert decision == "NO GO"
         assert note == ""
-
-    def test_model_no_go_with_nothing_failed_becomes_needs_verification(self):
-        must_haves = [{"text": "EU-based", "met": "needs_verification"}]
-        decision, note = _resolve_three_state_decision("NO GO", must_haves, [])
-        assert decision == "NEEDS VERIFICATION"
-        assert "EU-based" in note
-
-    def test_model_needs_verification_with_hard_filter_forced_to_no_go(self):
-        # The model itself said NEEDS VERIFICATION, but a real hard filter
-        # applies -- that must win, never stay as a soft "check this".
-        must_haves = [{"text": "EU-based", "met": "needs_verification"}]
-        decision, note = _resolve_three_state_decision(
-            "NEEDS VERIFICATION", must_haves, [],
-            hard_filter_failed="Career arc predominantly non-tech",
-        )
-        assert decision == "NO GO"
-        assert "Career arc predominantly non-tech" in note
-
-    def test_model_needs_verification_with_stability_fail_forced_to_no_go(self):
-        must_haves = [{"text": "EU-based", "met": "needs_verification"}]
-        decision, note = _resolve_three_state_decision(
-            "NEEDS VERIFICATION", must_haves, [], stability_failed=True,
-        )
-        assert decision == "NO GO"
-        assert "STABILITY VERDICT" in note
 
     def test_model_go_with_stability_fail_forced_to_no_go(self):
         # Codex review (PR #144, round 1): a real hard filter must override
@@ -514,15 +583,11 @@ class TestScreeningNotesClearedOnRescreen:
 
 
 class TestResultBucket:
-    """_result_bucket(r) -> str. Codex review (PR #144, round 2, issue 3):
-    NEEDS VERIFICATION rows store fit_level "Maybe" (agent-kalamata reads
-    that column), but the UI must treat them as their own group, separate
-    from an ordinary borderline "Maybe", in filters/downloads/email-opener
-    selection so they're never silently treated as outreach-ready."""
-
-    def test_needs_verification_decision_is_its_own_bucket(self):
-        r = {"fit": "Maybe", "decision": "NEEDS VERIFICATION"}
-        assert _result_bucket(r) == "Needs Verification"
+    """_result_bucket(r) -> str. There is no more NEEDS VERIFICATION
+    decision to break out separately -- new results only ever carry fit
+    "Good Fit" or "Not a Fit". This just needs to keep passing through
+    whatever fit_level is on the row, including a "Maybe" left over from
+    an older session result from a previous build."""
 
     def test_ordinary_maybe_stays_maybe(self):
         r = {"fit": "Maybe", "decision": "GO"}
@@ -584,6 +649,6 @@ class TestHardFilterFailureNamed:
 
     def test_all_met_no_hard_filter_stays_go(self):
         must_haves = [{"text": "5+ years Python", "met": "met"}]
-        decision, note = _resolve_three_state_decision("GO", must_haves, [])
+        decision, note = _resolve_three_state_decision("GO", must_haves, [], score=8)
         assert decision == "GO"
         assert note == ""

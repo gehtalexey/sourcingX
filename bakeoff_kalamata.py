@@ -49,15 +49,14 @@ import jev_client  # noqa: E402
 # than invent a threshold.
 # ============================================================================
 
-# Luna pass rule -- dashboard.py:4527-4551 (_decision_to_fit_label). A GO
-# decision (must-haves met, no exclusion matched) buckets into "Good Fit"
-# (score >= GO_CONFIDENCE_THRESHOLD, 7) or "Maybe" (score < 7); only a NO GO
-# decision becomes "Not a Fit". screening_results.screening_fit_level only
-# ever stores this fit label (the raw GO/NO GO decision isn't saved), so
-# "Luna passed" here means the underlying decision was GO, i.e. fit_level in
-# {"Good Fit", "Maybe"}. (dashboard.py:10493's comment calling "Maybe" a
-# "borderline NO GO" is stale next to the authoritative code at 4544-4551;
-# the code wins, not that comment.)
+# Luna pass rule -- dashboard.py (_decision_to_fit_label / _resolve_three_state_decision).
+# GO only ever comes back at score >= GO_CONFIDENCE_THRESHOLD (7; a
+# needs_verification must-have never lowers this on its own), and maps
+# directly to fit_level "Good Fit"; NO GO maps to "Not a Fit". There is no
+# manual-review bucket. "Maybe" is kept here only because an older session
+# result from a previous build may still carry that fit_level in the shared
+# table -- "Luna passed" means the underlying decision was GO, i.e.
+# fit_level in {"Good Fit", "Maybe"}.
 LUNA_PASS_FIT_LEVELS = frozenset({"Good Fit", "Maybe"})
 LUNA_FAIL_FIT_LEVELS = frozenset({"Not a Fit"})
 

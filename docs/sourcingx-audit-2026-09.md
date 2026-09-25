@@ -138,6 +138,46 @@ After the change, the last two Codex rounds found no problem with the matching.
   (96 rows). Dwelly and Owner used the same brief text as 2026-09-24, so their older rows for
   the same people are replaced.
 
+## Follow-up: score like kalamata (PR #151, merged 2026-09-25)
+
+**Why.** After #150, 15 of the 20 people kalamata approved for Dwelly were NO GO (14 at exactly
+score 6). Alexey's aim is for SourcingX to screen like kalamata. **What changed:** a must-have the
+profile does not mention (and does not contradict) is now scored as if met and gets a "Verify in
+call" note. Removed: the cap of 6 for an unclear must-have, the cap when the job-defining
+must-have is not shown, and the strict rule on when a company name counts as evidence.
+Contradictions, matched exclusions and hard filters still give NO GO. The bar stays at 7.
+Prompt text only (`screening_policy.py`); this supersedes the score rule described in the #150
+section above.
+
+**Measured on the same 96 stored profiles (gpt-5.6-luna, $0.32, 0 credits), against kalamata's
+stored verdicts for 89 of them:**
+
+| Role | People | Agree with kalamata, #150 | Agree, #151 | Kalamata GO also GO (#151) | Kalamata NO GO passed (#151) |
+|---|---|---|---|---|---|
+| Dwelly | 32 | 41% | 81% | 22 of 25 | 3 of 7 |
+| ScaleOps (backend) | 20 | 85% | 80% | 9 of 10 | 3 of 10 |
+| Autofleet (fullstack) | 19 | 63% | 58% | 9 of 10 | 7 of 9 |
+| Owner | 18 | 61% | 56% | 6 of 8 | 6 of 10 |
+| **All** | **89** | **60%** | **71%** | **46 of 53 (87%)** | **19 of 36 (53%)** |
+
+Against the two AI experts (80 blind profiles): of 9 "both say outreach", #150 missed 2 and #151
+missed 1; of 20 "both say reject", #150 approved 1 and #151 approved 5.
+
+**Consult (Fable 5.1 and GPT-6 Astra, asked separately, 2026-09-25).** Agreed: "match kalamata"
+is not one rule, because each kalamata role has its own hand-written rulebook (which companies
+count, what proof a must-have needs; its general rule also has a thin-profile carve-out and a GO
+floor of 6). Matching a role means writing that role's evidence rules into its brief. The bar
+stays at 7: scores under #151 pile up at 7 (30) and 8 (35), so a bar of 8 splits that cluster on
+noise. They split on the fix. Fable: keep the lenient rule and put each role's strictness in the
+brief. Astra: keep a strict default that forgives only routes the brief lists. Alexey merged #151
+as it is.
+
+**Not done.** Rewriting the Owner and Autofleet briefs from kalamata's rulebooks and re-checking
+those 37 people (about $0.12) was proposed and not run. The #151 results were not saved to the
+shared `screening_results` table, so the 96 rows saved under #150 still hold the stricter answers
+until those people are screened again. Caveats: 89 people is small; the sample leans toward
+kalamata's approved people; kalamata is not ground truth; the experts are AI.
+
 ## What the experts said
 
 **Fable 5.1:** SourcingX can be trusted today to find people (the combined search is good and
@@ -160,7 +200,8 @@ kalamata alone cannot establish correctness.
    candidates with the must-have kept: 12+ passing means the policy was the cause.
 2. Items 3 and 8 together (cost shown before every paid click; no silent loss of work).
 3. Item 4 (opener prompt) and item 5 (combined search as the default).
-4. Decide who sets the bar for "shipped AI to production": SourcingX now says NO GO to 15 of the
-   20 people kalamata pushed. Repeat the blind test with recruiters instead of AI experts.
+4. Put the Owner and Autofleet evidence rules from kalamata's rulebooks into their SourcingX
+   briefs and re-check the 37 people (about $0.12). Repeat the blind test with recruiters instead
+   of AI experts.
 
 Raw expert answers and the run record: session scratchpad (`consult-*-audit*.md`, `run-record.md`).

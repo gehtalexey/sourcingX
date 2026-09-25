@@ -398,10 +398,18 @@ class TestPolicyNoLongerTreatsMissingEvidenceAsFail:
         assert "insufficient data (NO GO)" not in SCREENING_POLICY
         assert "insufficient data is not a score reason" in SCREENING_POLICY.lower()
 
-    def test_policy_states_defining_requirement_score_cap(self):
-        from screening_policy import SCREENING_POLICY
-        assert "the requirement named in the role title" in SCREENING_POLICY
-        assert "A strong engineer with no signal on the defining requirement is a 6, not a 7." in SCREENING_POLICY
+    def test_policy_scores_an_unproven_must_have_as_if_met(self):
+        # Alexey (2026-09-25): SourcingX should screen like kalamata, where a
+        # must-have that is not contradicted passes. Not shown is never a
+        # reason for a score of 6 or below, and no cap applies to the
+        # "defining" requirement any more.
+        from screening_policy import SCREENING_POLICY, _STRUCTURED_OUTPUT
+        assert "exactly as if that must-have were met" in SCREENING_POLICY
+        assert "Missing text is never a reason for a score of 6 or below" in SCREENING_POLICY
+        assert "the requirement named in the role title" not in SCREENING_POLICY
+        assert "is a 6, not a 7" not in SCREENING_POLICY
+        assert "score 6 or below" not in SCREENING_POLICY
+        assert "genuinely ambiguous" not in _STRUCTURED_OUTPUT
 
     def test_no_needs_verification_decision_text_left_in_schema(self):
         from screening_policy import SCREENING_POLICY

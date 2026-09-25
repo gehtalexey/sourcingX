@@ -964,9 +964,14 @@ def search_people_semantic(
     recall_mode: str = "managed",
     api_key: str = None,
     filters: Optional[Dict[str, Any]] = None,
+    tracker=None,
 ) -> Dict[str, Any]:
     """
     Natural-language ("search by description") people search — beta.
+
+    Pass `tracker` (a UsageTracker) to log the spend: one api_usage_logs row
+    per successful call, credits = results returned x CREDITS_PER_RESULT_SEMANTIC.
+    A failed call raises before logging (Crustdata doesn't bill failures).
 
     Instead of building filter conditions, pass a plain-language description
     of who you're looking for (a role, a persona, or a pasted JD) and get
@@ -1073,13 +1078,16 @@ def search_people_semantic(
         next_cursor = data.get("next_cursor")
         total_count = data.get("total_count", len(profiles))
         credits_used = round(len(profiles) * CREDITS_PER_RESULT_SEMANTIC, 2)
+        response_time_ms = int((time.time() - start_time) * 1000)
+        log_search_usage(tracker, len(profiles), credits_used,
+                         response_time_ms=response_time_ms)
 
         return {
             "profiles": profiles,
             "cursor": next_cursor,
             "total_count": total_count,
             "credits_used": credits_used,
-            "response_time_ms": int((time.time() - start_time) * 1000),
+            "response_time_ms": response_time_ms,
         }
 
     except requests.exceptions.Timeout:
@@ -1107,9 +1115,15 @@ def search_people_db_v2(
     sorts: List[Dict[str, str]] = None,
     api_key: str = None,
     exclude_profiles: List[str] = None,
+    tracker=None,
 ) -> Dict[str, Any]:
     """
     Filter-based people search via the new v2025-11-01 POST /person/search
+
+    Pass `tracker` (a UsageTracker) to log the spend: one api_usage_logs row
+    per successful call, credits = results returned x CREDITS_PER_RESULT_V2.
+    A failed call raises before logging (Crustdata doesn't bill failures).
+
     endpoint — the replacement for the legacy /screener/persondb/search
     client (search_people_db, removed 2026-09-24). Takes the legacy filters
     dict shape (build_filters() output);
@@ -1229,13 +1243,16 @@ def search_people_db_v2(
 
         profiles = [semantic_profile_to_legacy_shape(p) for p in raw_profiles]
         credits_used = round(len(raw_profiles) * CREDITS_PER_RESULT_V2, 2)
+        response_time_ms = int((time.time() - start_time) * 1000)
+        log_search_usage(tracker, len(raw_profiles), credits_used,
+                         response_time_ms=response_time_ms)
 
         return {
             "profiles": profiles,
             "cursor": next_cursor,
             "total_count": total_count,
             "credits_used": credits_used,
-            "response_time_ms": int((time.time() - start_time) * 1000),
+            "response_time_ms": response_time_ms,
         }
 
     except requests.exceptions.Timeout:

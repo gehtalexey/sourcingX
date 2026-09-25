@@ -499,3 +499,147 @@ class TestFilterSearchDoesNotSaveThinRows:
         assert result["analytics"]["topEmployers"] == [{"name": "Acme", "count": 1}]
         assert any("topSkills is empty" in line for line in logs)
         assert any("not saving 2 search rows" in line for line in logs)
+
+
+# ---------------------------------------------------------------------------
+# Every paid search is logged once, with the real credits
+# ---------------------------------------------------------------------------
+
+
+class TestSearchUsageLogged:
+    def test_v2_search_logs_exactly_once_with_credits(self):
+        tracker = MagicMock()
+        with patch("crustdata_search.requests.post") as mock_post:
+            mock_post.return_value = _mock_response(
+                json_data={"profiles": [_SAMPLE_V2_SEARCH_PROFILE] * 50, "total_count": 50}
+            )
+            search_people_db_v2({}, api_key="test-key", tracker=tracker)
+
+        tracker.log_usage.assert_called_once()
+        kwargs = tracker.log_usage.call_args.kwargs
+        assert kwargs["provider"] == "crustdata"
+        assert kwargs["operation"] == "search"
+        assert kwargs["credits_used"] == pytest.approx(1.5)  # 50 x 0.03
+        assert kwargs["metadata"] == {"profiles_found": 50}
+
+    def test_semantic_search_logs_exactly_once_with_credits(self):
+        from crustdata_search import search_people_semantic
+
+        tracker = MagicMock()
+        with patch("crustdata_search.requests.post") as mock_post:
+            mock_post.return_value = _mock_response(
+                json_data={"profiles": [_SAMPLE_V2_SEARCH_PROFILE] * 20, "total_count": 20}
+            )
+            search_people_semantic("founding engineers", api_key="test-key", tracker=tracker)
+
+        tracker.log_usage.assert_called_once()
+        assert tracker.log_usage.call_args.kwargs["credits_used"] == pytest.approx(0.6)
+
+    def test_failed_search_logs_nothing(self):
+        from error_handling import AuthenticationError
+
+        tracker = MagicMock()
+        with patch("crustdata_search.requests.post") as mock_post:
+            mock_post.return_value = _mock_response(status_code=401)
+            with pytest.raises(AuthenticationError):
+                search_people_db_v2({}, api_key="bad-key", tracker=tracker)
+        tracker.log_usage.assert_not_called()
+
+    def test_no_tracker_still_works(self):
+        with patch("crustdata_search.requests.post") as mock_post:
+            mock_post.return_value = _mock_response(json_data={"profiles": [], "total_count": 0})
+            result = search_people_db_v2({}, api_key="test-key")
+        assert result["credits_used"] == 0
+
+    def test_every_dashboard_search_call_passes_a_tracker(self):
+        """Filter search, its auto-pagination, description (+filters) search,
+        and both Load More paths: each call must hand over the usage tracker,
+        or that search's spend never reaches api_usage_logs."""
+        import ast
+        import os
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard.py")
+        with open(path, encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        calls = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                fn = node.func
+                name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+                if name in ("search_people_semantic", "_active_search_people_db", "search_people_db_v2"):
+                    calls.append(node)
+        assert len(calls) >= 5
+        for call in calls:
+            assert any(kw.arg == "tracker" for kw in call.keywords), ast.dump(call)[:200]
+
+
+# ---------------------------------------------------------------------------
+# AI Screen cost shown before the click
+# ---------------------------------------------------------------------------
+
+
+class TestScreeningEstimate:
+    def test_estimate_uses_history_and_counts_topups(self):
+        from usage_tracker import estimate_screening_cost
+
+        est = estimate_screening_cost(100, 9, recent_cost_per_candidate=0.004)
+        assert est["crustdata_credits"] == 9
+        assert est["ai_usd"] == pytest.approx(0.40)
+        assert est["from_history"] is True
+
+    def test_estimate_falls_back_to_default_without_history(self):
+        from usage_tracker import estimate_screening_cost, DEFAULT_SCREEN_COST_PER_CANDIDATE
+
+        est = estimate_screening_cost(10, 0, None)
+        assert est["ai_usd"] == pytest.approx(10 * DEFAULT_SCREEN_COST_PER_CANDIDATE)
+        assert est["crustdata_credits"] == 0
+        assert est["from_history"] is False
+
+    def test_thin_count_never_exceeds_candidates(self):
+        from usage_tracker import estimate_screening_cost
+
+        assert estimate_screening_cost(3, 10, None)["crustdata_credits"] == 3
+
+    def test_cost_per_candidate_uses_only_latest_run(self):
+        from usage_tracker import cost_per_candidate_from_logs
+
+        rows = [
+            # latest run: 2 candidates, 2 calls each (bonus call logs 0 profiles)
+            {"created_at": "2026-09-24T10:05:00", "cost_usd": 0.002, "metadata": {"profiles_screened": 1}},
+            {"created_at": "2026-09-24T10:05:01", "cost_usd": 0.001, "metadata": {"profiles_screened": 0}},
+            {"created_at": "2026-09-24T10:04:00", "cost_usd": 0.002, "metadata": {"profiles_screened": 1}},
+            {"created_at": "2026-09-24T10:04:01", "cost_usd": 0.001, "metadata": {"profiles_screened": 0}},
+            # an older run an hour earlier -- must be ignored
+            {"created_at": "2026-09-24T09:00:00", "cost_usd": 5.0, "metadata": {"profiles_screened": 1}},
+        ]
+        assert cost_per_candidate_from_logs(rows) == pytest.approx(0.003)
+
+    def test_cost_per_candidate_normalises_flex_rows(self):
+        from usage_tracker import cost_per_candidate_from_logs
+
+        rows = [{"created_at": "2026-09-24T10:00:00", "cost_usd": 0.001,
+                 "metadata": {"profiles_screened": 1, "service_tier": "flex"}}]
+        assert cost_per_candidate_from_logs(rows) == pytest.approx(0.002)
+
+    def test_cost_per_candidate_none_without_history(self):
+        from usage_tracker import cost_per_candidate_from_logs
+
+        assert cost_per_candidate_from_logs([]) is None
+
+    def test_thin_count_matches_what_gets_charged(self):
+        """The number on screen is split_thin_profiles(), the same check
+        enrich_thin_profiles_for_batch() charges by -- cooldown included."""
+        from datetime import datetime
+        import dashboard
+
+        recent = datetime.utcnow().isoformat()
+        profiles = [
+            {"linkedin_url": "https://www.linkedin.com/in/thin", "raw_crustdata": {"name": "A"}},
+            {"linkedin_url": "https://www.linkedin.com/in/rich", "raw_crustdata": {"skills": ["python"]}},
+            {"linkedin_url": "https://www.linkedin.com/in/cool", "raw_crustdata": {
+                "name": "C", dashboard._THIN_LAST_ENRICH_ATTEMPT_KEY: recent}},
+        ]
+        assert dashboard.count_thin_for_estimate(profiles, db_client=None) == 1
+        thin, cooldown = dashboard.split_thin_profiles(profiles)
+        assert [p["linkedin_url"] for p in thin] == ["https://www.linkedin.com/in/thin"]
+        assert cooldown == ["https://www.linkedin.com/in/cool"]

@@ -175,3 +175,19 @@ class TestStartupFitDoesNotDefaultToNotMet:
 
     def test_startup_section_keeps_judge_at_the_time_rule(self):
         assert "AT THE TIME the candidate worked there" in SCREENING_POLICY
+
+    def test_startup_section_no_signal_is_needs_verification_not_not_met(self):
+        # Codex review (PR #144, round 2, issue 2): reconciled with the
+        # three-state Must-Have Verdict rule -- no startup-like signal at
+        # all is unproven (needs_verification), not a contradiction
+        # (not_met). Only an established/large/enterprise/public-company
+        # employer is a real contradiction.
+        assert "genuinely no startup-like signal at all is needs_verification" in SCREENING_POLICY.lower() or \
+               "is needs_verification, not not_met" in SCREENING_POLICY
+        assert "the claim is NOT met" not in SCREENING_POLICY
+
+    def test_startup_section_not_met_requires_a_contradiction(self):
+        assert "Mark it not_met ONLY when evidence CONTRADICTS it" in SCREENING_POLICY
+
+    def test_startup_section_still_forbids_fabrication(self):
+        assert "Do NOT fabricate startup status." in SCREENING_POLICY

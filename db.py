@@ -34,18 +34,38 @@ DEFAULT_SCREENING_JD_HASH = 'default'
 
 
 def _sanitize_nan(value):
-    """Recursively replace float NaN/Infinity/-Infinity with None.
+    """Recursively make a value safe to send to Postgres as JSON.
 
-    Used before json.dumps(allow_nan=False) so no invalid JSON token can be
-    emitted regardless of where the bad value sits (top-level, nested dict,
-    or inside a list) — see SupabaseClient.rpc()'s docstring for why the
-    older colon-prefixed string-replace patch wasn't enough.
+    Two things are cleaned, anywhere in the structure (top-level, nested dict,
+    or inside a list/tuple):
+
+    1. float NaN/Infinity/-Infinity become None, so json.dumps never emits an
+       invalid JSON token — see SupabaseClient.rpc()'s comment for why the
+       older colon-prefixed string-replace patch wasn't enough.
+    2. Every NUL character ('\\x00') is removed from str values and from str
+       dict keys. Postgres jsonb/text rejects NUL: json.dumps writes it as
+       '\\u0000' and Postgres fails with "unsupported Unicode escape
+       sequence", which fails the WHOLE batch (a sibling project lost 50
+       profiles to one Crustdata profile on 2026-09-24). If two keys collide
+       after stripping (e.g. 'a\\x00' and 'a'), the last one wins.
+
+    Tuples come back as lists (json.dumps turns them into arrays anyway).
+    Other values (int, bool, None, finite float) pass through untouched.
+
+    Must stay behaviourally identical to the ports in agent-kalamata
+    core/db.py (`_sanitize_nan_inf` / `_json_dumps_sanitized`) and Supanova
+    db_core/db.py — the three projects share one `profiles` table.
     """
     if isinstance(value, float) and (value != value or value in (float('inf'), float('-inf'))):
         return None
+    if isinstance(value, str):
+        return value.replace('\x00', '') if '\x00' in value else value
     if isinstance(value, dict):
-        return {k: _sanitize_nan(v) for k, v in value.items()}
-    if isinstance(value, list):
+        return {
+            (k.replace('\x00', '') if isinstance(k, str) else k): _sanitize_nan(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
         return [_sanitize_nan(v) for v in value]
     return value
 
@@ -158,7 +178,7 @@ class SupabaseClient:
         if on_conflict:
             params['on_conflict'] = on_conflict
         # Pre-serialize JSON to handle NaN values
-        json_str = json.dumps(data, allow_nan=True)
+        json_str = json.dumps(_sanitize_nan(data), allow_nan=True)
         json_str = json_str.replace(': NaN', ': null').replace(':NaN', ':null')
         json_str = json_str.replace(': Infinity', ': null').replace(':Infinity', ':null')
         json_str = json_str.replace(': -Infinity', ': null').replace(':-Infinity', ':null')
@@ -181,7 +201,7 @@ class SupabaseClient:
         params = {}
         if on_conflict:
             params['on_conflict'] = on_conflict
-        json_str = json.dumps(rows, allow_nan=True)
+        json_str = json.dumps(_sanitize_nan(rows), allow_nan=True)
         json_str = json_str.replace(': NaN', ': null').replace(':NaN', ':null')
         json_str = json_str.replace(': Infinity', ': null').replace(':Infinity', ':null')
         json_str = json_str.replace(': -Infinity', ': null').replace(':-Infinity', ':null')
@@ -224,7 +244,8 @@ class SupabaseClient:
         # one bad value (real Codex finding, PR #125 round 2). Walking the
         # object and replacing float NaN/Infinity with None before
         # json.dumps(allow_nan=False) guarantees no invalid token can be
-        # emitted, regardless of position.
+        # emitted, regardless of position. It also strips NUL ('\x00') from
+        # strings and keys, which Postgres jsonb/text rejects outright.
         json_str = json.dumps(_sanitize_nan(params or {}), allow_nan=False)
         response = requests.post(url, headers=headers, data=json_str, timeout=30)
         if response.status_code >= 400:

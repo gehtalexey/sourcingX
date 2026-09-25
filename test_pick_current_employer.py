@@ -323,8 +323,72 @@ from email_generator import (
     build_email_prompt,
     _opener_violations,
     _split_position_company,
+    _extract_company_from_context,
     generate_email_for_profile,
 )
+
+
+def test_extract_company_from_context_em_dash_separator():
+    assert _extract_company_from_context(
+        'Orca Security — agentless cloud security platform, competitor to Wiz'
+    ) == 'Orca Security'
+
+
+def test_extract_company_from_context_hyphen_separator():
+    assert _extract_company_from_context(
+        'Wiz - cloud security platform'
+    ) == 'Wiz'
+
+
+def test_extract_company_from_context_colon_separator():
+    assert _extract_company_from_context('Monday.com: work OS platform') == 'Monday.com'
+
+
+def test_extract_company_from_context_plain_company_name_only():
+    assert _extract_company_from_context('Wiz') == 'Wiz'
+
+
+def test_extract_company_from_context_full_sentence_no_separator_returns_none():
+    long_sentence = 'A cloud security platform that helps enterprises find and fix risks fast'
+    assert len(long_sentence) > 40
+    assert _extract_company_from_context(long_sentence) is None
+
+
+def test_extract_company_from_context_empty_or_none():
+    assert _extract_company_from_context('') is None
+    assert _extract_company_from_context(None) is None
+    assert _extract_company_from_context('   ') is None
+
+
+def test_extract_company_from_context_reaches_prompt_via_generate_emails_batch(monkeypatch):
+    """End-to-end check for point 1: the extracted company reaches the
+    opener prompt the same way dashboard.py wires it up (extract, then pass
+    as `company=` to generate_emails_batch)."""
+    import email_generator
+
+    captured = {}
+
+    class _Capturing(_CapturingOpenAIClient):
+        def _create(self, **kwargs):
+            for msg in kwargs.get('messages', []):
+                if msg.get('role') == 'system':
+                    captured['system_prompt'] = msg.get('content')
+            return super()._create(**kwargs)
+
+    monkeypatch.setattr(email_generator, 'OpenAI', lambda api_key=None: _Capturing([CLEAN_OPENER]))
+
+    company_context = 'Orca Security — agentless cloud security platform, competitor to Wiz'
+    extracted_company = _extract_company_from_context(company_context)
+
+    email_generator.generate_emails_batch(
+        [THIN_PROFILE],
+        api_key='test-key',
+        generate_type='opener_only',
+        ai_provider='openai',
+        company=extracted_company
+    )
+
+    assert 'at Orca Security' in captured['system_prompt']
 
 
 def test_position_with_at_company_splits_into_role_and_company():
@@ -511,8 +575,33 @@ def test_retry_exception_with_bad_first_returns_empty_opener_with_error():
     )
     assert client.call_count == 2
     assert result['email_opener'] == ''
-    assert 'Opener broke the writing rules twice' in result['opener_error']
+    # The retry CALL failed (simulated API error) - the second opener was
+    # never actually checked, so this must NOT say "broke the rules twice".
+    assert result['opener_error'].startswith('Retry failed:')
+    assert 'simulated API failure' in result['opener_error']
     assert 'error' not in result
+
+
+class _FakeTracker:
+    """Records log_openai calls so tests can assert error logging happened."""
+
+    def __init__(self):
+        self.calls = []
+
+    def log_openai(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+def test_retry_exception_logs_through_usage_tracker():
+    client = _StubOpenAIClientRetryRaises(VIOLATING_OPENER)
+    tracker = _FakeTracker()
+    generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='opener_only', ai_provider='openai', tracker=tracker
+    )
+    error_calls = [c for c in tracker.calls if c.get('status') == 'error']
+    assert len(error_calls) == 1
+    assert 'simulated API failure' in error_calls[0]['error_message']
 
 
 VIOLATING_BOTH = json.dumps({
@@ -613,6 +702,52 @@ def test_has_descriptive_text_false_when_only_titles_and_skills():
         'current_employers': [{'title': 'Backend Engineer', 'company': 'CyberArk'}],
         'skills': ['Python'],
     }) is False
+
+
+def test_has_descriptive_text_false_with_only_company_description():
+    """Codex round 5: company_description is the EMPLOYER's own blurb, not
+    anything the candidate did, so it must NOT count as descriptive text."""
+    assert _has_descriptive_text({
+        'current_employers': [{
+            'title': 'Backend Engineer',
+            'company': 'CyberArk',
+            'company_description': 'Cyber security vendor.',
+        }],
+    }) is False
+
+
+def test_has_descriptive_text_false_with_only_company_description_on_past_role():
+    assert _has_descriptive_text({
+        'current_employers': [{'title': 'Backend Engineer', 'company': 'CyberArk'}],
+        'past_employers': [{
+            'title': 'Engineer',
+            'company': 'OldCo',
+            'company_description': 'Enterprise software company.',
+        }],
+    }) is False
+
+
+def test_profile_with_only_company_description_gets_thin_profile_note():
+    client = _CapturingOpenAIClient([CLEAN_OPENER])
+    profile = {
+        'raw_data': {
+            'name': 'Company Blurb Candidate',
+            'current_employers': [
+                {
+                    'employee_title': 'Backend Engineer',
+                    'employer_name': 'CyberArk',
+                    'employer_linkedin_description': 'Cyber security vendor.',
+                    'start_date': '2023-01-01',
+                }
+            ],
+            'skills': ['Python'],
+        }
+    }
+    generate_email_for_profile(
+        profile, client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert 'do not claim anything they built' in client.last_user_prompt
 
 
 def test_has_descriptive_text_true_with_past_role_description_only():

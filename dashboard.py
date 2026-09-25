@@ -73,6 +73,7 @@ try:
         SENDER_PERSONAS,
         TONE_DESCRIPTIONS,
         LENGTH_DESCRIPTIONS,
+        _extract_company_from_context,
     )
     HAS_EMAIL_GENERATOR = True
 except ImportError:
@@ -11436,6 +11437,14 @@ with tab_emails:
                 else:
                     email_full_instruction = email_custom_instruction
 
+            # The "Company & Product" box mixes a company name with a product
+            # description (e.g. "Orca Security - agentless cloud security
+            # platform"). Pull out just the company name (when the leading
+            # segment is short enough to plausibly be one) to drive the
+            # opener's "at {company}" wording. The full text above still goes
+            # through as a custom instruction either way.
+            email_company = _extract_company_from_context(email_company_context)
+
             # Filter profiles by selected buckets (Good Fit = GO, Maybe =
             # borderline). Uses _result_bucket, not raw `fit`, so NEEDS
             # VERIFICATION rows (which store fit_level "Maybe") are ALWAYS
@@ -11573,7 +11582,8 @@ with tab_emails:
                             progress_callback=update_progress,
                             generate_type=email_generate_type,
                             position=email_position if email_position else None,
-                            ai_provider=email_ai_provider
+                            ai_provider=email_ai_provider,
+                            company=email_company
                         )
 
                         st.session_state['email_generation_results'] = results
@@ -11664,7 +11674,8 @@ with tab_emails:
                             progress_callback=update_custom_progress,
                             generate_type=email_generate_type,
                             position=email_position if email_position else None,
-                            ai_provider=email_ai_provider
+                            ai_provider=email_ai_provider,
+                            company=email_company
                         )
 
                         st.session_state['email_generation_results'] = results
@@ -11747,7 +11758,8 @@ with tab_emails:
                             progress_callback=update_all_progress,
                             generate_type=email_generate_type,
                             position=email_position if email_position else None,
-                            ai_provider=email_ai_provider
+                            ai_provider=email_ai_provider,
+                            company=email_company
                         )
 
                         st.session_state['email_generation_results'] = results

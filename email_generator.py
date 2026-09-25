@@ -269,6 +269,50 @@ def _split_position_company(position: str):
     return role, company
 
 
+# Maximum length a leading segment can be and still be treated as a company
+# name rather than a sentence/description.
+_COMPANY_CONTEXT_MAX_LEN = 40
+
+
+def _extract_company_from_context(text: str):
+    """Pull a short company name out of a free-typed "Company & Product"
+    field, e.g. "Orca Security - agentless cloud security platform,
+    competitor to Wiz" -> "Orca Security".
+
+    The dashboard's "Company & Product" text box mixes the company name
+    with a product description, typically separated by a dash or colon
+    (recruiters type things like "Orca Security - agentless cloud security
+    platform" or "Wiz: cloud security"). This takes the text BEFORE the
+    first such separator and uses it as the company name, but only when
+    that leading segment is short enough to plausibly be a company name
+    (<= _COMPANY_CONTEXT_MAX_LEN chars) rather than a full sentence.
+
+    The full, untouched text is still passed through separately as a
+    custom instruction (dashboard.py's `email_full_instruction`) - this
+    helper only decides what (if anything) also gets used as `company` in
+    the opener prompt.
+
+    Returns None when there's nothing short enough to use.
+    """
+    if not text:
+        return None
+
+    text = text.strip()
+    if not text:
+        return None
+
+    candidate = text
+    for sep in (' — ', ' – ', ' - ', ':'):
+        if sep in text:
+            candidate = text.split(sep, 1)[0].strip()
+            break
+
+    if candidate and len(candidate) <= _COMPANY_CONTEXT_MAX_LEN:
+        return candidate
+
+    return None
+
+
 def build_email_prompt(sender: str, tone: str, length: str, custom_instruction: str = None, position: str = None, generate_type: str = 'both', company: str = None) -> str:
     """Build the system prompt for email generation."""
 
@@ -541,7 +585,14 @@ def trim_profile_for_email(raw: dict) -> dict:
 
 def _has_descriptive_text(trimmed: dict) -> bool:
     """Whether the trimmed profile has any real descriptive text to draw a
-    concrete detail from (a summary, or a role/company description).
+    concrete detail from (the person's own summary, or a role description
+    of something THEY did).
+
+    `company_description` is deliberately excluded: it's the EMPLOYER's own
+    marketing blurb (from `employer_linkedin_description`), not anything the
+    candidate did, so it can't supply a concrete detail about the person -
+    counting it would let a profile with only a generic "Cyber security
+    vendor." company blurb skip the fabrication-guard note.
 
     Used to decide whether to warn the model against inventing a concrete
     detail when the profile is too thin to supply a real one.
@@ -549,10 +600,10 @@ def _has_descriptive_text(trimmed: dict) -> bool:
     if trimmed.get('summary'):
         return True
     for emp in (trimmed.get('current_employers') or []):
-        if emp.get('role_description') or emp.get('company_description'):
+        if emp.get('role_description'):
             return True
     for emp in (trimmed.get('past_employers') or []):
-        if emp.get('role_description') or emp.get('company_description'):
+        if emp.get('role_description'):
             return True
     return False
 
@@ -747,13 +798,22 @@ Your previous opener violated these rules: {'; '.join(violations)}.
 Rewrite the opener so it fixes ALL of these violations while still following every rule above."""
                 try:
                     retry_result = _post_process(_call_model(corrective_prompt))
-                except (json.JSONDecodeError, Exception):
-                    # Retry call itself failed - only the bad first result exists.
-                    # Keep the subject line (if any) but drop the still-broken opener.
+                except Exception as retry_exc:
+                    # The retry CALL itself failed (timeout, rate limit, API
+                    # error, bad JSON) - the second opener was never actually
+                    # checked, so this is NOT "broke the rules twice". Log it
+                    # the same way the outer handler logs a hard failure, keep
+                    # the subject line (if any), and drop the still-broken
+                    # first opener rather than send it out.
+                    retry_elapsed_ms = int((time.time() - start_time) * 1000)
+                    if tracker:
+                        tracker.log_openai(
+                            tokens_input=0, tokens_output=0, model=ai_model,
+                            profiles_screened=0, status='error',
+                            error_message=str(retry_exc)[:200], response_time_ms=retry_elapsed_ms
+                        )
                     result['email_opener'] = ''
-                    result['opener_error'] = (
-                        f"Opener broke the writing rules twice: {'; '.join(violations)}"
-                    )
+                    result['opener_error'] = f"Retry failed: {str(retry_exc)[:120]}"
                 else:
                     # Validate the retry result too - it may still break the rules.
                     retry_opener = retry_result.get('email_opener')

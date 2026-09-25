@@ -69,6 +69,7 @@ jobs:
             test_passed_email_split.py \
             test_geo_terms.py \
             test_db_similarity_rpc.py \
+            test_db_sanitize.py \
             test_similar_profiles_auto_enrich.py \
             test_people_search_history.py \
             test_crustdata_batch_enrich.py \

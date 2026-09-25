@@ -39,9 +39,9 @@ Nothing running. PR #150 is open, waiting for Codex round 2.
    md5(linkedin_url || '20260924')), blind set 1 (P01-P40) and blind set 2 (Q01-Q40). Use the
    approach in `docs/blindtest/rescreen_scripts/` (call `screen_profile()` directly with stored
    raw profiles, never the batch flow that tops up thin profiles; save through
-   `update_profile_screening_batch()`). Briefs: Dwelly/Owner in
-   `docs/GOAL-sourcingx-fix-and-expert-audit.md` block 8 and `docs/GOAL-sourcingx-trust-fixes.md`
-   block 8 (Dwelly role line WITHOUT a trailing period so jd_hash matches); Autofleet + ScaleOps
+   `update_profile_screening_batch()`). Briefs: the exact Dwelly + Owner briefs used on
+   2026-09-24 are in `docs/blindtest/rescreen_scripts/common.py` (Dwelly role line WITHOUT a
+   trailing period so jd_hash matches); Autofleet + ScaleOps
    in `docs/blindtest/set2_autofleet_scaleops/label_pack.md`.
 3. Report per role: of "both experts: outreach", how many SourcingX NO GO (missed); of "both
    experts: reject", how many SourcingX GO (wrongly approved). If misses are high, lower

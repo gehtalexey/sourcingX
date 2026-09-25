@@ -548,6 +548,91 @@ class TestResolveThreeStateDecision:
         assert decision == "GO"
         assert note == ""
 
+    # --- Codex review, PR #150 round 2: verdicts must match the REQUESTED
+    # criteria, not just add up to the right count.
+
+    def test_duplicate_cleared_exclusion_does_not_satisfy_two_requested(self):
+        # Two exclusions were asked; the model answered the same one twice
+        # and never judged the second. Counting verdicts would call that
+        # complete and let a score of 9 through as GO.
+        exclusions = [
+            {"text": "Currently at a competitor", "matched": False},
+            {"text": "Currently at a competitor", "matched": False},
+        ]
+        decision, note = _resolve_three_state_decision(
+            "GO", [{"text": "5+ years Python", "met": "met"}], exclusions, score=9,
+            expected_must_haves=["5+ years Python"],
+            expected_exclusions=["Currently at a competitor", "No pure managers"],
+        )
+        assert decision == "NO GO"
+        assert "Exclusion not judged" in note
+        assert "No pure managers" in note
+
+    def test_unrelated_exclusion_verdicts_do_not_satisfy_requested_ones(self):
+        exclusions = [
+            {"text": "Lives abroad", "matched": False},
+            {"text": "Freelancer", "matched": False},
+        ]
+        decision, note = _resolve_three_state_decision(
+            "GO", [{"text": "5+ years Python", "met": "met"}], exclusions, score=9,
+            expected_must_haves=["5+ years Python"],
+            expected_exclusions=["Currently at a competitor", "No pure managers"],
+        )
+        assert decision == "NO GO"
+        assert "Exclusion not judged" in note
+
+    def test_duplicate_must_have_verdict_does_not_cover_a_missing_one(self):
+        # Same must-have answered twice, the other never judged: the missing
+        # one is needs_verification, so a low score is NO GO with its name.
+        must_haves = [
+            {"text": "5+ years Python", "met": "met"},
+            {"text": "5+ years Python", "met": "met"},
+        ]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=5,
+            expected_must_haves=["5+ years Python", "Kubernetes in production"],
+        )
+        assert decision == "NO GO"
+        assert "Kubernetes in production" in note
+
+    def test_missing_must_have_at_high_score_is_go_with_named_verify_note(self):
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=8,
+            expected_must_haves=["5+ years Python", "Kubernetes in production"],
+        )
+        assert decision == "GO"
+        assert note == "Verify in call: Kubernetes in production"
+
+    def test_verdict_text_may_differ_in_case_punctuation_or_light_rewording(self):
+        must_haves = [{"text": "5+ years python.", "met": "met"}]
+        exclusions = [
+            {"text": "currently at a competitor", "matched": False},
+            {"text": "No pure managers", "matched": False},
+        ]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, exclusions, score=9,
+            expected_must_haves=["5+ years Python"],
+            expected_exclusions=["Currently at a competitor", "No pure managers"],
+        )
+        assert decision == "GO"
+        assert note == ""
+
+    def test_verdict_for_unrequested_criterion_can_only_push_toward_no_go(self):
+        # A stray "matched: true" for something the brief never asked about
+        # still blocks GO; a stray "cleared" never helps.
+        exclusions = [
+            {"text": "Currently at a competitor", "matched": False},
+            {"text": "Works in a country we do not hire in", "matched": True},
+        ]
+        decision, note = _resolve_three_state_decision(
+            "GO", [{"text": "5+ years Python", "met": "met"}], exclusions, score=9,
+            expected_must_haves=["5+ years Python"],
+            expected_exclusions=["Currently at a competitor"],
+        )
+        assert decision == "NO GO"
+        assert "country we do not hire in" in note
+
     def test_model_no_go_with_hard_filter_named_stays_no_go(self):
         must_haves = [{"text": "EU-based", "met": "needs_verification"}]
         decision, note = _resolve_three_state_decision(

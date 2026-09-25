@@ -4795,11 +4795,68 @@ def _hard_filter_failure_named(hard_filter_failed) -> bool:
     return True
 
 
+def _norm_criterion_text(text) -> str:
+    """Lowercase, drop punctuation, collapse whitespace -- so a verdict whose
+    text differs from the brief line only by case/punctuation/spacing still
+    matches it."""
+    return " ".join(re.sub(r"[^\w\s]", " ", str(text or "").lower()).split())
+
+
+def _align_verdicts_to_criteria(expected_texts, verdicts):
+    """Pair each REQUESTED criterion with exactly one returned verdict.
+
+    A model that returns the same verdict twice, or a verdict for something
+    that was never asked, must not satisfy a completeness check that only
+    counts verdicts (Codex review, PR #150 round 2). Each verdict is used at
+    most once: exact match on normalized text first, then the closest
+    remaining verdict at >= 0.8 similarity (models sometimes trim or reword a
+    line despite the "verbatim" instruction).
+
+    Returns (aligned, leftover):
+      aligned  -- list of (criterion_text, verdict_dict_or_None), one per
+                  expected criterion, in brief order (None = never judged).
+      leftover -- verdicts that matched no requested criterion; the caller
+                  keeps them so a stray not_met / matched=true still counts
+                  toward NO GO, but they never count toward completeness.
+    """
+    import difflib
+    pool = [v for v in (verdicts or []) if isinstance(v, dict)]
+    norm_pool = [_norm_criterion_text(v.get('text')) for v in pool]
+    used = [False] * len(pool)
+    expected = [str(t).strip() for t in (expected_texts or []) if str(t).strip()]
+    norm_expected = [_norm_criterion_text(t) for t in expected]
+    matched = [None] * len(expected)
+
+    for i, ne in enumerate(norm_expected):
+        for j, nv in enumerate(norm_pool):
+            if not used[j] and ne and nv == ne:
+                matched[i], used[j] = pool[j], True
+                break
+    for i, ne in enumerate(norm_expected):
+        if matched[i] is not None:
+            continue
+        best_j, best_r = None, 0.8
+        for j, nv in enumerate(norm_pool):
+            if used[j] or not nv:
+                continue
+            r = difflib.SequenceMatcher(None, ne, nv).ratio()
+            if r >= best_r:
+                best_j, best_r = j, r
+        if best_j is not None:
+            matched[i], used[best_j] = pool[best_j], True
+
+    aligned = list(zip(expected, matched))
+    leftover = [pool[j] for j in range(len(pool)) if not used[j]]
+    return aligned, leftover
+
+
 def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdicts,
                                    score=0, num_expected_must_haves=None,
                                    num_expected_exclusions=None,
                                    hard_filter_failed=None, stability_failed=False,
-                                   experience_limit_failed=False):
+                                   experience_limit_failed=False,
+                                   expected_must_haves=None,
+                                   expected_exclusions=None):
     """Deterministically resolve the final GO / NO GO decision. There is no
     manual-review bucket -- every candidate ends GO or NO GO, decided purely
     from the verdicts and the score, ignoring whatever the model's own
@@ -4823,6 +4880,13 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
             treated as "cleared" -- it blocks GO until the model actually
             rules it out (Codex review, PR #150). Pass None (default) to
             skip this check.
+        expected_must_haves / expected_exclusions: the requested criterion
+            TEXTS. Preferred over the num_expected_* counts: each requested
+            criterion must be matched to its own returned verdict, so a
+            response that repeats one verdict, or answers an unrelated
+            criterion, cannot satisfy the completeness check (Codex review,
+            PR #150 round 2). The counts remain for callers that only know
+            how many there are.
         hard_filter_failed: the model's own free-text name of a generic
             Hard Filter it applied (empty/None means it didn't cite one).
         stability_failed: Python-computed STABILITY VERDICT is FAIL (see
@@ -4863,16 +4927,30 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
     # model never returned a verdict for at all, is needs_verification --
     # never silently treated as met.
     normalized = []
-    for m in (must_have_verdicts or []):
-        if not isinstance(m, dict):
-            continue
-        text = str(m.get('text', '')).strip()
-        state = _must_have_verdict_state(m.get('met')) or 'needs_verification'
-        normalized.append((text, state))
-    if num_expected_must_haves:
-        missing = num_expected_must_haves - len(normalized)
-        for _ in range(max(0, missing)):
-            normalized.append(('', 'needs_verification'))
+    if expected_must_haves:
+        # Each requested must-have needs its OWN verdict (see
+        # _align_verdicts_to_criteria) -- a duplicated or unrelated verdict
+        # never stands in for one the model didn't return.
+        aligned, leftover = _align_verdicts_to_criteria(expected_must_haves, must_have_verdicts)
+        for crit_text, m in aligned:
+            state = (_must_have_verdict_state(m.get('met')) or 'needs_verification') if m else 'needs_verification'
+            normalized.append((crit_text, state))
+        for m in leftover:
+            # Not something the brief asked about: it can only ever push
+            # toward NO GO (a stray contradiction), never toward GO.
+            if _must_have_verdict_state(m.get('met')) == 'not_met':
+                normalized.append((str(m.get('text', '')).strip(), 'not_met'))
+    else:
+        for m in (must_have_verdicts or []):
+            if not isinstance(m, dict):
+                continue
+            text = str(m.get('text', '')).strip()
+            state = _must_have_verdict_state(m.get('met')) or 'needs_verification'
+            normalized.append((text, state))
+        if num_expected_must_haves:
+            missing = num_expected_must_haves - len(normalized)
+            for _ in range(max(0, missing)):
+                normalized.append(('', 'needs_verification'))
 
     not_met_items = [t for t, s in normalized if s == 'not_met' and t]
 
@@ -4881,15 +4959,25 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
     # an exclusion the model never returned a verdict for at all) is
     # "unjudged" -- it must never be silently treated as cleared.
     exclusion_normalized = []
-    for e in (exclusion_verdicts or []):
-        if not isinstance(e, dict):
-            continue
-        text = str(e.get('text', '')).strip()
-        exclusion_normalized.append((text, _tri(e.get('matched'))))
-    if num_expected_exclusions:
-        missing = num_expected_exclusions - len(exclusion_normalized)
-        for _ in range(max(0, missing)):
-            exclusion_normalized.append(('', None))
+    if expected_exclusions:
+        aligned, leftover = _align_verdicts_to_criteria(expected_exclusions, exclusion_verdicts)
+        for crit_text, e in aligned:
+            exclusion_normalized.append((crit_text, _tri(e.get('matched')) if e else None))
+        for e in leftover:
+            # A stray match on something the brief didn't ask about can
+            # only block GO; a stray "cleared" never satisfies a requested one.
+            if _tri(e.get('matched')) is True:
+                exclusion_normalized.append((str(e.get('text', '')).strip(), True))
+    else:
+        for e in (exclusion_verdicts or []):
+            if not isinstance(e, dict):
+                continue
+            text = str(e.get('text', '')).strip()
+            exclusion_normalized.append((text, _tri(e.get('matched'))))
+        if num_expected_exclusions:
+            missing = num_expected_exclusions - len(exclusion_normalized)
+            for _ in range(max(0, missing)):
+                exclusion_normalized.append(('', None))
 
     matched_exclusions = [t for t, tri in exclusion_normalized if tri is True and t]
 
@@ -5195,6 +5283,8 @@ def screen_profile(profile: dict, job_description: str, client,
                 score=score,
                 num_expected_must_haves=len(must_haves) if must_haves else None,
                 num_expected_exclusions=len(exclusions) if exclusions else None,
+                expected_must_haves=[str(m) for m in must_haves] if must_haves else None,
+                expected_exclusions=[str(e) for e in exclusions] if exclusions else None,
                 hard_filter_failed=hard_filter_failed,
                 stability_failed=_stability_verdict_failed(durations_text),
             )

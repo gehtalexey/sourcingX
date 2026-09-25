@@ -48,7 +48,7 @@ class TestStructuredSystemPrompt:
 
     def test_decision_definition_is_present(self):
         p = get_structured_system_prompt()
-        assert "GO only when every must-have is met and no exclusion matched" in p
+        assert "Every candidate gets a final GO or NO GO" in p
 
     def test_no_nice_to_haves_in_screening_prompt(self):
         # Fix 2: nice-to-haves are handled by a SEPARATE pass. They must not
@@ -117,23 +117,21 @@ class TestScreenProfileAcceptsBrief:
 
 
 class TestVerdictBuckets:
-    """The single recruiter-facing verdict — GO / MAYBE / NO GO — is derived
-    structure-first (decision), then score splits the GO-decisions:
-      - NO GO decision           -> Not a Fit  (regardless of score)
-      - GO decision, score >= 7  -> Good Fit
-      - GO decision, score <= 6  -> Maybe
+    """The single recruiter-facing verdict — GO / NO GO — is a direct map
+    from the decision _resolve_three_state_decision already computed (it
+    folds the score threshold in itself, so GO only ever comes back at
+    score >= GO_CONFIDENCE_THRESHOLD):
+      - GO    -> Good Fit
+      - NO GO -> Not a Fit (regardless of score)
     """
 
     @pytest.mark.parametrize("decision,score,expected", [
-        ("NO GO", 8, "Not a Fit"),   # failed must-have can't be a Maybe, even at 8
+        ("NO GO", 8, "Not a Fit"),   # failed must-have can't be a Good Fit, even at 8
         ("NO GO", 6, "Not a Fit"),
         ("NO GO", 2, "Not a Fit"),
         ("GO", 10, "Good Fit"),
         ("GO", 8, "Good Fit"),
-        ("GO", 7, "Good Fit"),       # 7 is the GO/Maybe line — 7 is a GO
-        ("GO", 6, "Maybe"),          # 6 is a Maybe
-        ("GO", 5, "Maybe"),
-        ("GO", 3, "Maybe"),          # GO-decision but low confidence — still a glance, not a skip
+        ("GO", 7, "Good Fit"),
     ])
     def test_decision_to_fit_label(self, decision, score, expected):
         from dashboard import _decision_to_fit_label

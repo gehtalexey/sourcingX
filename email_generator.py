@@ -177,16 +177,157 @@ LENGTH_DESCRIPTIONS = {
     'long': '2-3 sentences',
 }
 
+# ===== Opener hard rules: ONE shared source of truth =====
+# These constants are used to both RENDER the prompt's "NEVER" lines
+# (build_email_prompt) and CHECK a generated opener against the same rules
+# (_opener_violations), so the two can't silently drift apart.
+#
+# Note: "the opener must cite a concrete detail" is a quality/content rule,
+# not a mechanically checkable one (we can't tell whether a phrase is a
+# real concrete detail vs. filler by regex) - that rule is left entirely to
+# the prompt and is NOT part of _opener_violations.
 
-def build_email_prompt(sender: str, tone: str, length: str, custom_instruction: str = None, position: str = None, generate_type: str = 'both') -> str:
+# Words the opener must never start with.
+OPENER_FORBIDDEN_STARTS = ('Your', 'Leading', 'Handling')
+
+# Phrases/words banned anywhere in the opener, grouped the way they read in
+# the prompt's "NEVER use:" bullet lines.
+OPENER_NEVER_USE_GROUPS = (
+    ('impressive', 'exciting', 'dynamic', 'thrilling', 'fascinating', 'cutting edge', 'at the forefront'),
+    ('I noticed', 'I came across', 'caught my eye', 'I hope this finds you well', 'Reaching out because'),
+    ('aligns', 'mission', 'passionate'),
+)
+OPENER_NEVER_USE_PHRASES = tuple(phrase for group in OPENER_NEVER_USE_GROUPS for phrase in group)
+
+
+def _quoted_list(words: tuple, last_sep: str = 'or') -> str:
+    """Render ('a', 'b', 'c') as '"a", "b", or "c"' for the prompt text."""
+    quoted = [f'"{w}"' for w in words]
+    if len(quoted) == 1:
+        return quoted[0]
+    return ', '.join(quoted[:-1]) + f', {last_sep} ' + quoted[-1]
+
+
+def _opener_violations(text: str) -> list:
+    """Check an opener for the mechanically-checkable hard-rule violations.
+
+    Returns a list of short violation descriptions (empty if clean).
+    - Starts with one of OPENER_FORBIDDEN_STARTS (case-insensitive, after
+      stripping quotes/whitespace)
+    - Contains any of OPENER_NEVER_USE_PHRASES, matched on word boundaries
+      (case-insensitive) so e.g. "dynamically" or "submission"/"permission"
+      do not falsely trigger on "dynamic"/"mission"
+    - Contains an exclamation mark
+    """
+    violations = []
+    if not text:
+        return violations
+
+    stripped = text.strip().strip('"\'').strip()
+    for start_word in OPENER_FORBIDDEN_STARTS:
+        if re.match(rf'^{re.escape(start_word)}\b', stripped, re.IGNORECASE):
+            violations.append(f'starts with "{start_word}"')
+
+    for phrase in OPENER_NEVER_USE_PHRASES:
+        if re.search(rf'\b{re.escape(phrase)}\b', text, re.IGNORECASE):
+            violations.append(f'contains banned phrase "{phrase}"')
+
+    if '!' in text:
+        violations.append('contains an exclamation mark')
+
+    return violations
+
+
+def _split_position_company(position: str):
+    """Split a free-typed position string into (role, company).
+
+    Recruiters often type the position as "Applied AI Engineer at Dwelly"
+    rather than passing role and company separately. If `position` ends in
+    " at <company>" (case-insensitive, matching the LAST " at "), split it
+    into the role and the company, stripping trailing punctuation or a
+    trailing parenthetical like " (remote)" off the company.
+
+    Returns (position, None) unchanged when there's no " at " to split on.
+    """
+    if not position:
+        return position, None
+
+    match = re.match(r'^(.*\S)\s+at\s+(\S.*)$', position, re.IGNORECASE)
+    if not match:
+        return position, None
+
+    role, company = match.group(1), match.group(2)
+
+    # Strip a trailing parenthetical, e.g. "Dwelly (remote)" -> "Dwelly"
+    company = re.sub(r'\s*\([^)]*\)\s*$', '', company).strip()
+    # Strip trailing punctuation
+    company = company.rstrip(' .,;:-').strip()
+
+    if not company:
+        return position, None
+
+    return role, company
+
+
+# Maximum length a leading segment can be and still be treated as a company
+# name rather than a sentence/description.
+_COMPANY_CONTEXT_MAX_LEN = 40
+
+
+def _extract_company_from_context(text: str):
+    """Pull a short company name out of a free-typed "Company & Product"
+    field, e.g. "Orca Security - agentless cloud security platform,
+    competitor to Wiz" -> "Orca Security".
+
+    The dashboard's "Company & Product" text box mixes the company name
+    with a product description, typically separated by a dash or colon
+    (recruiters type things like "Orca Security - agentless cloud security
+    platform" or "Wiz: cloud security"). This takes the text BEFORE the
+    first such separator and uses it as the company name, but only when
+    that leading segment is short enough to plausibly be a company name
+    (<= _COMPANY_CONTEXT_MAX_LEN chars) rather than a full sentence.
+
+    The full, untouched text is still passed through separately as a
+    custom instruction (dashboard.py's `email_full_instruction`) - this
+    helper only decides what (if anything) also gets used as `company` in
+    the opener prompt.
+
+    Returns None when there's nothing short enough to use.
+    """
+    if not text:
+        return None
+
+    text = text.strip()
+    if not text:
+        return None
+
+    candidate = text
+    for sep in (' — ', ' – ', ' - ', ':'):
+        if sep in text:
+            candidate = text.split(sep, 1)[0].strip()
+            break
+
+    if candidate and len(candidate) <= _COMPANY_CONTEXT_MAX_LEN:
+        return candidate
+
+    return None
+
+
+def build_email_prompt(sender: str, tone: str, length: str, custom_instruction: str = None, position: str = None, generate_type: str = 'both', company: str = None) -> str:
     """Build the system prompt for email generation."""
 
     sender_desc = SENDER_PERSONAS.get(sender, 'a recruiter')
     tone_desc = TONE_DESCRIPTIONS.get(tone, TONE_DESCRIPTIONS['professional'])
     length_desc = LENGTH_DESCRIPTIONS.get(length, LENGTH_DESCRIPTIONS['medium'])
 
+    # An explicit `company` always wins. Otherwise, try to pull it out of a
+    # free-typed position like "Applied AI Engineer at Dwelly".
+    if company is None:
+        position, company = _split_position_company(position)
+
     custom_section = f"\n\nADDITIONAL INSTRUCTIONS FROM USER:\n{custom_instruction}" if custom_instruction else ""
     position_section = f" for a **{position}** position" if position else ""
+    company_desc = f"at {company}" if company else "at a tech company"
 
     # Output format based on generate_type
     if generate_type == 'subject_only':
@@ -210,19 +351,36 @@ def build_email_prompt(sender: str, tone: str, length: str, custom_instruction: 
 }"""
         generate_desc = "a personalized subject line and email opener"
 
-    return f"""You are {sender_desc} at an Israeli tech company writing {generate_desc} for candidates{position_section}.
+    never_use_lines = "\n".join(
+        "- NEVER use: " + ", ".join(f'"{w}"' for w in group)
+        for group in OPENER_NEVER_USE_GROUPS
+    )
+
+    return f"""You are {sender_desc} {company_desc} writing {generate_desc} for candidates{position_section}.
 
 Return ONLY valid JSON:
 {json_format}
 
 ## HARD RULES (violation = reject)
 - NEVER use em dash character (—). Use comma or regular dash (-) instead.
-- NEVER start opener with "Your", "Leading", or "Handling".
-- NEVER use: "impressive", "exciting", "dynamic", "thrilling", "fascinating", "cutting edge", "at the forefront"
-- NEVER use: "I noticed", "I came across", "caught my eye", "I hope this finds you well", "Reaching out because"
+- NEVER start opener with {_quoted_list(OPENER_FORBIDDEN_STARTS)}.
+{never_use_lines}
 - NEVER use exclamation marks (!) or ask generic questions about feelings/motivation.
 - NEVER mention companies from before 2021 or mention the same company twice.
 - Subject and opener MUST use DIFFERENT angles.
+
+## CONCRETE DETAIL (required)
+The opener must cite ONE concrete thing from the person's OWN profile: a product or system
+they built, a migration they ran, a launch they shipped, or a named project mentioned in
+their experience descriptions or summary. Their title, years of experience, or company name
+alone is NOT a concrete detail - go find something they actually did. End the opener with a
+short observation about why that specific thing is interesting.
+
+**Cite that detail ONLY if it actually appears in the provided profile data. If the profile
+has no experience descriptions or summary text to draw a concrete detail from, do NOT invent
+one - instead use the most specific REAL fact that is present (e.g. a named technology paired
+with a named company, or a specific career move between named companies/titles). NEVER invent
+a product, project, metric, or achievement that is not in the profile.**
 
 ## SUBJECT LINE
 Under 10 words, under 60 chars. Must mention something specific from their profile. Rotate formats:
@@ -344,6 +502,15 @@ def trim_profile_for_email(raw: dict) -> dict:
             company_desc = emp.get('employer_linkedin_description')
             if company_desc:
                 entry['company_description'] = _first_sentence(company_desc)
+            # Include what they did in the role (old shape: employee_description,
+            # new shape: description - handled by _emp_field). Safe to add for
+            # every entry reaching this point: the "no companies before 2021"
+            # rule is already enforced above (entries ending before 2021 were
+            # `continue`d past), so any past role we keep here is one the
+            # opener prompt is allowed to cite from.
+            role_desc = _emp_field(emp, 'description')
+            if role_desc:
+                entry['role_description'] = _first_sentence(role_desc)
             trimmed['past_employers'].append(entry)
 
     # Education - include more details
@@ -416,6 +583,31 @@ def trim_profile_for_email(raw: dict) -> dict:
     return trimmed
 
 
+def _has_descriptive_text(trimmed: dict) -> bool:
+    """Whether the trimmed profile has any real descriptive text to draw a
+    concrete detail from (the person's own summary, or a role description
+    of something THEY did).
+
+    `company_description` is deliberately excluded: it's the EMPLOYER's own
+    marketing blurb (from `employer_linkedin_description`), not anything the
+    candidate did, so it can't supply a concrete detail about the person -
+    counting it would let a profile with only a generic "Cyber security
+    vendor." company blurb skip the fabrication-guard note.
+
+    Used to decide whether to warn the model against inventing a concrete
+    detail when the profile is too thin to supply a real one.
+    """
+    if trimmed.get('summary'):
+        return True
+    for emp in (trimmed.get('current_employers') or []):
+        if emp.get('role_description'):
+            return True
+    for emp in (trimmed.get('past_employers') or []):
+        if emp.get('role_description'):
+            return True
+    return False
+
+
 # ===== Single Profile Generation =====
 
 def generate_email_for_profile(
@@ -429,7 +621,8 @@ def generate_email_for_profile(
     tracker=None,
     generate_type: str = 'both',
     position: str = None,
-    ai_provider: str = 'openai'
+    ai_provider: str = 'openai',
+    company: str = None
 ) -> dict:
     """Generate email subject line and/or opener for a single profile.
 
@@ -445,6 +638,7 @@ def generate_email_for_profile(
         generate_type: What to generate - 'both', 'subject_only', or 'opener_only'
         position: Optional position/role being recruited for (e.g., 'DevOps Engineer', 'Sales Manager')
         ai_provider: "openai" or "anthropic"
+        company: Optional hiring company name to mention instead of neutral wording
 
     Returns:
         Dict with subject_line, subject_angle, email_opener, opener_angle
@@ -472,11 +666,11 @@ def generate_email_for_profile(
     trimmed = trim_profile_for_email(raw)
 
     # Build prompts
-    system_prompt = build_email_prompt(sender, tone, length, custom_instruction, position, generate_type)
+    system_prompt = build_email_prompt(sender, tone, length, custom_instruction, position, generate_type, company)
 
     # Customize user prompt based on generate_type
     if generate_type == 'subject_only':
-        user_prompt = f"""## Candidate Profile:
+        base_user_prompt = f"""## Candidate Profile:
 ```json
 {json.dumps(trimmed, indent=2, default=str)}
 ```
@@ -484,21 +678,32 @@ def generate_email_for_profile(
 Generate ONLY a personalized subject line. Return JSON with: subject_line, subject_angle."""
     elif generate_type == 'opener_only':
         length_desc = LENGTH_DESCRIPTIONS.get(length, LENGTH_DESCRIPTIONS['medium'])
-        user_prompt = f"""## Candidate Profile:
+        base_user_prompt = f"""## Candidate Profile:
 ```json
 {json.dumps(trimmed, indent=2, default=str)}
 ```
 
 Generate ONLY a personalized email opener ({length_desc}). Return JSON with: email_opener, opener_angle."""
     else:  # both
-        user_prompt = f"""## Candidate Profile:
+        base_user_prompt = f"""## Candidate Profile:
 ```json
 {json.dumps(trimmed, indent=2, default=str)}
 ```
 
 Generate a personalized subject line and email opener. Remember: subject and opener MUST use DIFFERENT angles."""
 
-    try:
+    # Fabrication guard: if there's no descriptive text to pull a concrete
+    # detail from (no role/company descriptions, no summary), tell the model
+    # explicitly not to invent one and to fall back to a plain fact instead
+    # (title/company/skills only).
+    if generate_type in ('both', 'opener_only') and not _has_descriptive_text(trimmed):
+        base_user_prompt += (
+            "\n\nThis profile has no descriptions: do not claim anything they built; "
+            "use a specific fact from titles/companies/skills only."
+        )
+
+    def _call_model(user_prompt: str) -> dict:
+        """Make one model call and return the parsed JSON result. May raise."""
         if ai_provider == 'anthropic':
             # Anthropic API call
             response = client.messages.create(
@@ -529,7 +734,7 @@ Generate a personalized subject line and email opener. Remember: subject and ope
             if raw_content.strip().startswith('```'):
                 raw_content = re.sub(r'^```(?:json)?\s*', '', raw_content.strip())
                 raw_content = re.sub(r'\s*```$', '', raw_content.strip())
-            result = json.loads(raw_content)
+            return json.loads(raw_content)
         else:
             # OpenAI API call
             response = client.chat.completions.create(
@@ -556,8 +761,9 @@ Generate a personalized subject line and email opener. Remember: subject and ope
                     response_time_ms=elapsed_ms
                 )
 
-            result = json.loads(response.choices[0].message.content)
+            return json.loads(response.choices[0].message.content)
 
+    def _post_process(result: dict) -> dict:
         # Fill in empty values for fields not generated based on generate_type
         if generate_type == 'subject_only':
             result.setdefault('email_opener', '')
@@ -574,6 +780,50 @@ Generate a personalized subject line and email opener. Remember: subject and ope
         for key in ('subject_line', 'email_opener'):
             if result.get(key):
                 result[key] = result[key].replace('—', ' -').replace('–', ' -')
+
+        return result
+
+    try:
+        result = _post_process(_call_model(base_user_prompt))
+
+        # If an opener was generated, check it against the hard rules and retry
+        # once (max 2 model calls total) if it violates them.
+        opener = result.get('email_opener')
+        if opener:
+            violations = _opener_violations(opener)
+            if violations:
+                corrective_prompt = base_user_prompt + f"""
+
+Your previous opener violated these rules: {'; '.join(violations)}.
+Rewrite the opener so it fixes ALL of these violations while still following every rule above."""
+                try:
+                    retry_result = _post_process(_call_model(corrective_prompt))
+                except Exception as retry_exc:
+                    # The retry CALL itself failed (timeout, rate limit, API
+                    # error, bad JSON) - the second opener was never actually
+                    # checked, so this is NOT "broke the rules twice". Log it
+                    # the same way the outer handler logs a hard failure, keep
+                    # the subject line (if any), and drop the still-broken
+                    # first opener rather than send it out.
+                    retry_elapsed_ms = int((time.time() - start_time) * 1000)
+                    if tracker:
+                        tracker.log_openai(
+                            tokens_input=0, tokens_output=0, model=ai_model,
+                            profiles_screened=0, status='error',
+                            error_message=str(retry_exc)[:200], response_time_ms=retry_elapsed_ms
+                        )
+                    result['email_opener'] = ''
+                    result['opener_error'] = f"Retry failed: {str(retry_exc)[:120]}"
+                else:
+                    # Validate the retry result too - it may still break the rules.
+                    retry_opener = retry_result.get('email_opener')
+                    retry_violations = _opener_violations(retry_opener) if retry_opener else violations
+                    if retry_violations:
+                        retry_result['email_opener'] = ''
+                        retry_result['opener_error'] = (
+                            f"Opener broke the writing rules twice: {'; '.join(retry_violations)}"
+                        )
+                    result = retry_result
 
         return result
 
@@ -613,7 +863,8 @@ def generate_emails_batch(
     cancel_flag=None,
     generate_type: str = 'both',
     position: str = None,
-    ai_provider: str = 'openai'
+    ai_provider: str = 'openai',
+    company: str = None
 ) -> list:
     """Generate emails for multiple profiles in parallel.
 
@@ -631,6 +882,7 @@ def generate_emails_batch(
         generate_type: What to generate - 'both', 'subject_only', or 'opener_only'
         position: Optional position/role being recruited for
         ai_provider: "openai" or "anthropic"
+        company: Optional hiring company name to mention instead of neutral wording
 
     Returns:
         List of results with profile info + generated email content
@@ -661,7 +913,8 @@ def generate_emails_batch(
                 ai_model=ai_model, tracker=tracker,
                 generate_type=generate_type,
                 position=position,
-                ai_provider=ai_provider
+                ai_provider=ai_provider,
+                company=company
             )
 
             # Add profile info

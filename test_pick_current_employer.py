@@ -13,6 +13,8 @@ These tests pin two real-world scenarios that surfaced the bug:
   SourcingX stored Vesttoo for the same reason.
 """
 
+import json
+
 from normalizers import pick_current_employer
 
 
@@ -242,6 +244,7 @@ def test_trim_profile_for_email_reads_new_format_jobs_and_location():
     past = trimmed['past_employers'][0]
     assert past['title'] == 'Backend Engineer'
     assert past['company'] == 'Monday'  # normalize_company_name strips ".com"
+    assert past['role_description'] == 'Worked on the automations platform.'
 
 
 def test_trim_profile_for_email_old_format_location_still_wins():
@@ -312,3 +315,638 @@ def test_trim_profile_for_email_old_format_unchanged():
     past = trimmed['past_employers'][0]
     assert past['title'] == 'Director'
     assert past['company'] == 'CyberArk'
+
+
+# ===== Opener concrete-detail fixes (build_email_prompt / _opener_violations / retry) =====
+
+from email_generator import (
+    build_email_prompt,
+    _opener_violations,
+    _split_position_company,
+    _extract_company_from_context,
+    generate_email_for_profile,
+)
+
+
+def test_extract_company_from_context_em_dash_separator():
+    assert _extract_company_from_context(
+        'Orca Security — agentless cloud security platform, competitor to Wiz'
+    ) == 'Orca Security'
+
+
+def test_extract_company_from_context_hyphen_separator():
+    assert _extract_company_from_context(
+        'Wiz - cloud security platform'
+    ) == 'Wiz'
+
+
+def test_extract_company_from_context_colon_separator():
+    assert _extract_company_from_context('Monday.com: work OS platform') == 'Monday.com'
+
+
+def test_extract_company_from_context_plain_company_name_only():
+    assert _extract_company_from_context('Wiz') == 'Wiz'
+
+
+def test_extract_company_from_context_full_sentence_no_separator_returns_none():
+    long_sentence = 'A cloud security platform that helps enterprises find and fix risks fast'
+    assert len(long_sentence) > 40
+    assert _extract_company_from_context(long_sentence) is None
+
+
+def test_extract_company_from_context_empty_or_none():
+    assert _extract_company_from_context('') is None
+    assert _extract_company_from_context(None) is None
+    assert _extract_company_from_context('   ') is None
+
+
+def test_extract_company_from_context_reaches_prompt_via_generate_emails_batch(monkeypatch):
+    """End-to-end check for point 1: the extracted company reaches the
+    opener prompt the same way dashboard.py wires it up (extract, then pass
+    as `company=` to generate_emails_batch)."""
+    import email_generator
+
+    captured = {}
+
+    class _Capturing(_CapturingOpenAIClient):
+        def _create(self, **kwargs):
+            for msg in kwargs.get('messages', []):
+                if msg.get('role') == 'system':
+                    captured['system_prompt'] = msg.get('content')
+            return super()._create(**kwargs)
+
+    monkeypatch.setattr(email_generator, 'OpenAI', lambda api_key=None: _Capturing([CLEAN_OPENER]))
+
+    company_context = 'Orca Security — agentless cloud security platform, competitor to Wiz'
+    extracted_company = _extract_company_from_context(company_context)
+
+    email_generator.generate_emails_batch(
+        [THIN_PROFILE],
+        api_key='test-key',
+        generate_type='opener_only',
+        ai_provider='openai',
+        company=extracted_company
+    )
+
+    assert 'at Orca Security' in captured['system_prompt']
+
+
+def test_position_with_at_company_splits_into_role_and_company():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium', position='Applied AI Engineer at Dwelly')
+    assert 'at Dwelly' in prompt
+    assert '**Applied AI Engineer**' in prompt
+    assert 'at a tech company' not in prompt
+
+
+def test_position_without_at_stays_neutral():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium', position='DevOps Engineer')
+    assert 'at a tech company' in prompt
+    assert '**DevOps Engineer**' in prompt
+
+
+def test_explicit_company_overrides_position_text():
+    prompt = build_email_prompt(
+        'recruiter', 'professional', 'medium',
+        position='Applied AI Engineer at Dwelly', company='Wiz'
+    )
+    assert 'at Wiz' in prompt
+    assert 'a tech company' not in prompt
+    # Position text is passed through unsplit since an explicit company won.
+    assert '**Applied AI Engineer at Dwelly**' in prompt
+
+
+def test_split_position_company_handles_trailing_parenthetical():
+    role, company = _split_position_company('Backend Engineer at Monday.com (remote)')
+    assert role == 'Backend Engineer'
+    assert company == 'Monday.com'
+
+
+def test_split_position_company_no_at_returns_unchanged():
+    assert _split_position_company('DevOps Engineer') == ('DevOps Engineer', None)
+
+
+def test_split_position_company_none_returns_none():
+    assert _split_position_company(None) == (None, None)
+
+
+def test_prompt_has_no_israeli_tech_company_wording():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium', company='Wiz')
+    assert 'Israeli tech company' not in prompt
+
+
+def test_prompt_includes_passed_company_and_sender():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium', company='Wiz')
+    assert 'Wiz' in prompt
+    assert 'recruiter' in prompt
+
+
+def test_prompt_neutral_wording_when_company_none():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium', company=None)
+    assert 'at a tech company' in prompt
+    assert 'Israeli tech company' not in prompt
+
+
+def test_prompt_contains_concrete_detail_instruction_and_bans():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium')
+    assert 'CONCRETE DETAIL' in prompt
+    assert 'NEVER start opener with "Your"' in prompt
+    assert 'aligns' in prompt
+    assert 'mission' in prompt
+
+
+def test_opener_violations_flags_your_start():
+    assert _opener_violations('Your work at CyberArk stands out.') == ['starts with "Your"']
+
+
+def test_opener_violations_flags_aligns_well():
+    violations = _opener_violations('This role aligns well with your background.')
+    assert any('aligns' in v for v in violations)
+
+
+def test_opener_violations_flags_the_mission():
+    violations = _opener_violations('Excited about the mission you are building toward.')
+    assert any('mission' in v for v in violations)
+
+
+def test_opener_violations_clean_opener_returns_empty():
+    assert _opener_violations(
+        "Building the migration tooling that moved CyberArk's data pipeline to Kubernetes is the kind of hands-on work we need."
+    ) == []
+
+
+class _StubOpenAIResponse:
+    def __init__(self, content, prompt_tokens=10, completion_tokens=5):
+        message = type('Msg', (), {'content': content})()
+        choice = type('Choice', (), {'message': message})()
+        usage = type('Usage', (), {'prompt_tokens': prompt_tokens, 'completion_tokens': completion_tokens})()
+        self.choices = [choice]
+        self.usage = usage
+
+
+class _StubOpenAIClient:
+    """Stub OpenAI-shaped client that returns queued responses in order."""
+
+    def __init__(self, contents):
+        self._queue = list(contents)
+        self.call_count = 0
+        chat = type('Chat', (), {})()
+        completions = type('Completions', (), {})()
+        completions.create = self._create
+        chat.completions = completions
+        self.chat = chat
+
+    def _create(self, **kwargs):
+        self.call_count += 1
+        content = self._queue.pop(0)
+        return _StubOpenAIResponse(content)
+
+
+def _profile_with_data():
+    return {
+        'raw_data': {
+            'name': 'Test Candidate',
+            'current_employers': [
+                {'title': 'Backend Engineer', 'employer_name': 'CyberArk', 'start_date': '2020-01-01'}
+            ],
+            'skills': ['Python'],
+        }
+    }
+
+
+VIOLATING_OPENER = json.dumps({
+    "email_opener": "Your work at CyberArk aligns well with the mission here.",
+    "opener_angle": "career"
+})
+
+CLEAN_OPENER = json.dumps({
+    "email_opener": "Building the migration tooling that moved CyberArk's pipeline to Kubernetes shows real depth.",
+    "opener_angle": "career"
+})
+
+
+def test_retry_returns_clean_opener_after_one_violation_exactly_two_calls():
+    client = _StubOpenAIClient([VIOLATING_OPENER, CLEAN_OPENER])
+    result = generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert client.call_count == 2
+    assert result['email_opener'] == json.loads(CLEAN_OPENER)['email_opener']
+
+
+def test_retry_still_violating_returns_empty_opener_with_opener_error():
+    client = _StubOpenAIClient([VIOLATING_OPENER, VIOLATING_OPENER])
+    result = generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert client.call_count == 2
+    assert result['email_opener'] == ''
+    assert 'Opener broke the writing rules twice' in result['opener_error']
+    assert 'error' not in result
+
+
+class _StubOpenAIClientRetryRaises:
+    """Stub client whose FIRST call returns a queued response and whose
+    SECOND call (the corrective retry) raises, to simulate the retry
+    itself failing after a bad first opener."""
+
+    def __init__(self, first_content):
+        self._first_content = first_content
+        self.call_count = 0
+        chat = type('Chat', (), {})()
+        completions = type('Completions', (), {})()
+        completions.create = self._create
+        chat.completions = completions
+        self.chat = chat
+
+    def _create(self, **kwargs):
+        self.call_count += 1
+        if self.call_count == 1:
+            return _StubOpenAIResponse(self._first_content)
+        raise RuntimeError('simulated API failure on retry')
+
+
+def test_retry_exception_with_bad_first_returns_empty_opener_with_error():
+    client = _StubOpenAIClientRetryRaises(VIOLATING_OPENER)
+    result = generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert client.call_count == 2
+    assert result['email_opener'] == ''
+    # The retry CALL failed (simulated API error) - the second opener was
+    # never actually checked, so this must NOT say "broke the rules twice".
+    assert result['opener_error'].startswith('Retry failed:')
+    assert 'simulated API failure' in result['opener_error']
+    assert 'error' not in result
+
+
+class _FakeTracker:
+    """Records log_openai calls so tests can assert error logging happened."""
+
+    def __init__(self):
+        self.calls = []
+
+    def log_openai(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+def test_retry_exception_logs_through_usage_tracker():
+    client = _StubOpenAIClientRetryRaises(VIOLATING_OPENER)
+    tracker = _FakeTracker()
+    generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='opener_only', ai_provider='openai', tracker=tracker
+    )
+    error_calls = [c for c in tracker.calls if c.get('status') == 'error']
+    assert len(error_calls) == 1
+    assert 'simulated API failure' in error_calls[0]['error_message']
+
+
+VIOLATING_BOTH = json.dumps({
+    "subject_line": "Kubernetes at CyberArk?",
+    "subject_angle": "company",
+    "email_opener": "Your work at CyberArk aligns well with the mission here.",
+    "opener_angle": "career"
+})
+
+
+def test_retry_still_violating_keeps_subject_line_when_generated():
+    client = _StubOpenAIClient([VIOLATING_BOTH, VIOLATING_BOTH])
+    result = generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='both', ai_provider='openai'
+    )
+    assert client.call_count == 2
+    assert result['email_opener'] == ''
+    assert 'Opener broke the writing rules twice' in result['opener_error']
+    assert result['subject_line'] == 'Kubernetes at CyberArk?'
+
+
+def test_clean_opener_first_try_makes_only_one_call():
+    client = _StubOpenAIClient([CLEAN_OPENER])
+    result = generate_email_for_profile(
+        _profile_with_data(), client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert client.call_count == 1
+    assert result['email_opener'] == json.loads(CLEAN_OPENER)['email_opener']
+
+
+# ===== Codex round 1 fixes: fuller violation coverage + fabrication guard =====
+
+from email_generator import _has_descriptive_text
+
+
+def test_opener_violations_flags_leading_start():
+    violations = _opener_violations('Leading the platform rewrite at CyberArk stands out.')
+    assert any('Leading' in v for v in violations)
+
+
+def test_opener_violations_flags_handling_start():
+    violations = _opener_violations('Handling the migration to Kubernetes at CyberArk is notable.')
+    assert any('Handling' in v for v in violations)
+
+
+def test_opener_violations_flags_exciting():
+    violations = _opener_violations('The exciting work at CyberArk stands out.')
+    assert any('exciting' in v for v in violations)
+
+
+def test_opener_violations_flags_exclamation_mark():
+    violations = _opener_violations('The migration work at CyberArk is great!')
+    assert any('exclamation' in v for v in violations)
+
+
+def test_opener_violations_no_false_hit_on_submission_or_permission():
+    # "mission" is banned, but must not match inside "submission"/"permission".
+    violations = _opener_violations(
+        'The pull request submission process and permission model they built at CyberArk stand out.'
+    )
+    assert violations == []
+
+
+def test_opener_violations_no_false_hit_on_dynamically():
+    # "dynamic" is banned, but must not match inside "dynamically".
+    violations = _opener_violations('They configured the pipeline dynamically at CyberArk.')
+    assert violations == []
+
+
+def test_prompt_never_use_lines_render_from_shared_constant():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium')
+    from email_generator import OPENER_NEVER_USE_PHRASES, OPENER_FORBIDDEN_STARTS
+    for phrase in OPENER_NEVER_USE_PHRASES:
+        assert phrase in prompt
+    for start_word in OPENER_FORBIDDEN_STARTS:
+        assert start_word in prompt
+
+
+def test_prompt_contains_no_invention_rule():
+    prompt = build_email_prompt('recruiter', 'professional', 'medium')
+    assert 'do NOT invent' in prompt or 'NEVER invent' in prompt
+
+
+def test_has_descriptive_text_true_with_summary():
+    assert _has_descriptive_text({'summary': 'Built the payments platform.'}) is True
+
+
+def test_has_descriptive_text_true_with_role_description():
+    assert _has_descriptive_text({
+        'current_employers': [{'title': 'Engineer', 'role_description': 'Led the migration.'}]
+    }) is True
+
+
+def test_has_descriptive_text_false_when_only_titles_and_skills():
+    assert _has_descriptive_text({
+        'current_employers': [{'title': 'Backend Engineer', 'company': 'CyberArk'}],
+        'skills': ['Python'],
+    }) is False
+
+
+def test_has_descriptive_text_false_with_only_company_description():
+    """Codex round 5: company_description is the EMPLOYER's own blurb, not
+    anything the candidate did, so it must NOT count as descriptive text."""
+    assert _has_descriptive_text({
+        'current_employers': [{
+            'title': 'Backend Engineer',
+            'company': 'CyberArk',
+            'company_description': 'Cyber security vendor.',
+        }],
+    }) is False
+
+
+def test_has_descriptive_text_false_with_only_company_description_on_past_role():
+    assert _has_descriptive_text({
+        'current_employers': [{'title': 'Backend Engineer', 'company': 'CyberArk'}],
+        'past_employers': [{
+            'title': 'Engineer',
+            'company': 'OldCo',
+            'company_description': 'Enterprise software company.',
+        }],
+    }) is False
+
+
+def test_profile_with_only_company_description_gets_thin_profile_note():
+    client = _CapturingOpenAIClient([CLEAN_OPENER])
+    profile = {
+        'raw_data': {
+            'name': 'Company Blurb Candidate',
+            'current_employers': [
+                {
+                    'employee_title': 'Backend Engineer',
+                    'employer_name': 'CyberArk',
+                    'employer_linkedin_description': 'Cyber security vendor.',
+                    'start_date': '2023-01-01',
+                }
+            ],
+            'skills': ['Python'],
+        }
+    }
+    generate_email_for_profile(
+        profile, client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert 'do not claim anything they built' in client.last_user_prompt
+
+
+def test_has_descriptive_text_true_with_past_role_description_only():
+    assert _has_descriptive_text({
+        'current_employers': [{'title': 'Backend Engineer', 'company': 'CyberArk'}],
+        'past_employers': [{'title': 'Engineer', 'company': 'OldCo', 'role_description': 'Led the migration.'}],
+    }) is True
+
+
+def test_trim_profile_for_email_keeps_past_role_description_new_shape():
+    """Codex round 3: a profile whose ONLY description lives on a past role
+    (new shape: 'description' field) must not be flagged as thin, and the
+    description must survive trimming."""
+    raw = {
+        'name': 'New Shape Candidate',
+        'current_employers': [
+            {'title': 'Backend Engineer', 'name': 'CyberArk', 'start_date': '2023-01-01'}
+        ],
+        'past_employers': [
+            {
+                'title': 'Software Engineer',
+                'name': 'OldCo',
+                'description': 'Migrated the billing pipeline to Kubernetes.',
+                'start_date': '2021-01-01',
+                'end_date': '2022-12-01',
+            }
+        ],
+    }
+
+    trimmed = trim_profile_for_email(raw)
+
+    past = trimmed['past_employers'][0]
+    assert past['role_description'] == 'Migrated the billing pipeline to Kubernetes.'
+    assert _has_descriptive_text(trimmed) is True
+
+
+def test_trim_profile_for_email_keeps_past_role_description_old_shape():
+    """Same as above but for the old shape ('employee_description' field
+    on 'employer_name'-keyed entries)."""
+    raw = {
+        'name': 'Old Shape Candidate',
+        'current_employers': [
+            {'employee_title': 'Backend Engineer', 'employer_name': 'CyberArk', 'start_date': '2023-01-01'}
+        ],
+        'past_employers': [
+            {
+                'employee_title': 'Software Engineer',
+                'employer_name': 'OldCo',
+                'employee_description': 'Migrated the billing pipeline to Kubernetes.',
+                'start_date': '2021-01-01',
+                'end_date': '2022-12-01',
+            }
+        ],
+    }
+
+    trimmed = trim_profile_for_email(raw)
+
+    past = trimmed['past_employers'][0]
+    assert past['role_description'] == 'Migrated the billing pipeline to Kubernetes.'
+    assert _has_descriptive_text(trimmed) is True
+
+
+def test_trim_profile_for_email_past_role_before_2021_stays_excluded():
+    """The existing 'no companies before 2021' rule must still drop past
+    roles that ended before 2021, description or not."""
+    raw = {
+        'name': 'Old Job Candidate',
+        'current_employers': [
+            {'title': 'Backend Engineer', 'name': 'CyberArk', 'start_date': '2023-01-01'}
+        ],
+        'past_employers': [
+            {
+                'title': 'Junior Engineer',
+                'name': 'AncientCo',
+                'description': 'Built the original monolith.',
+                'start_date': '2015-01-01',
+                'end_date': '2018-01-01',
+            }
+        ],
+    }
+
+    trimmed = trim_profile_for_email(raw)
+
+    assert trimmed['past_employers'] == []
+    assert _has_descriptive_text(trimmed) is False
+
+
+THIN_PROFILE = {
+    'raw_data': {
+        'name': 'Thin Candidate',
+        'current_employers': [
+            {'title': 'Backend Engineer', 'employer_name': 'CyberArk', 'start_date': '2020-01-01'}
+        ],
+        'skills': ['Python'],
+    }
+}
+
+
+class _CapturingOpenAIClient:
+    """Stub client that records the user prompt it was called with."""
+
+    def __init__(self, contents):
+        self._queue = list(contents)
+        self.call_count = 0
+        self.last_user_prompt = None
+        chat = type('Chat', (), {})()
+        completions = type('Completions', (), {})()
+        completions.create = self._create
+        chat.completions = completions
+        self.chat = chat
+
+    def _create(self, **kwargs):
+        self.call_count += 1
+        for msg in kwargs.get('messages', []):
+            if msg.get('role') == 'user':
+                self.last_user_prompt = msg.get('content')
+        content = self._queue.pop(0)
+        return _StubOpenAIResponse(content)
+
+
+def test_thin_profile_gets_no_invention_note_in_user_prompt():
+    client = _CapturingOpenAIClient([CLEAN_OPENER])
+    generate_email_for_profile(
+        THIN_PROFILE, client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert 'do not claim anything they built' in client.last_user_prompt
+
+
+def test_generate_emails_batch_passes_company_through_to_prompt(monkeypatch):
+    import email_generator
+
+    captured = {}
+
+    class _CapturingClientForBatch(_CapturingOpenAIClient):
+        def _create(self, **kwargs):
+            for msg in kwargs.get('messages', []):
+                if msg.get('role') == 'system':
+                    captured['system_prompt'] = msg.get('content')
+            return super()._create(**kwargs)
+
+    def _fake_openai(api_key=None):
+        return _CapturingClientForBatch([CLEAN_OPENER])
+
+    monkeypatch.setattr(email_generator, 'OpenAI', _fake_openai)
+
+    results = email_generator.generate_emails_batch(
+        [THIN_PROFILE],
+        api_key='test-key',
+        generate_type='opener_only',
+        ai_provider='openai',
+        company='Acme'
+    )
+
+    assert len(results) == 1
+    assert 'at Acme' in captured['system_prompt']
+
+
+def test_profile_with_only_past_role_description_gets_no_thin_profile_note():
+    client = _CapturingOpenAIClient([CLEAN_OPENER])
+    profile = {
+        'raw_data': {
+            'name': 'Past Description Candidate',
+            'current_employers': [
+                {'title': 'Backend Engineer', 'employer_name': 'CyberArk', 'start_date': '2023-01-01'}
+            ],
+            'past_employers': [
+                {
+                    'title': 'Software Engineer',
+                    'employer_name': 'OldCo',
+                    'employee_description': 'Migrated the billing pipeline to Kubernetes.',
+                    'start_date': '2021-01-01',
+                    'end_date': '2022-12-01',
+                }
+            ],
+            'skills': ['Python'],
+        }
+    }
+    generate_email_for_profile(
+        profile, client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert 'do not claim anything they built' not in client.last_user_prompt
+
+
+def test_profile_with_descriptions_gets_no_thin_profile_note():
+    client = _CapturingOpenAIClient([CLEAN_OPENER])
+    profile = {
+        'raw_data': {
+            'name': 'Rich Candidate',
+            'current_employers': [
+                {'title': 'Backend Engineer', 'employer_name': 'CyberArk', 'start_date': '2020-01-01',
+                 'description': 'Led the migration of the payments pipeline to Kubernetes.'}
+            ],
+            'skills': ['Python'],
+        }
+    }
+    generate_email_for_profile(
+        profile, client,
+        generate_type='opener_only', ai_provider='openai'
+    )
+    assert 'do not claim anything they built' not in client.last_user_prompt

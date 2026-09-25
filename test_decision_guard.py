@@ -630,6 +630,35 @@ class TestResolveThreeStateDecision:
         assert decision == "NO GO"
         assert "5+ years of Python experience" in note
 
+    def test_meaningful_punctuation_is_kept_when_matching(self):
+        # Codex review, PR #150 round 4: "C++" and "C#" must not collapse
+        # to the same text.
+        must_haves = [{"text": "C# experience", "met": "met"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=5,
+            expected_must_haves=["C++ experience"],
+        )
+        assert decision == "NO GO"
+        assert "C++ experience" in note
+
+    def test_version_numbers_are_not_merged(self):
+        must_haves = [{"text": "Python 311", "met": "met"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=5,
+            expected_must_haves=["Python 3.11"],
+        )
+        assert decision == "NO GO"
+
+    def test_blank_text_not_met_verdict_still_blocks_go(self):
+        # An explicit not_met with no "text" field must not be dropped.
+        must_haves = [{"met": "not_met"}, {"text": "5+ years Python", "met": "met"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, [], score=9,
+            expected_must_haves=["5+ years Python"],
+        )
+        assert decision == "NO GO"
+        assert "unnamed requirement" in note
+
     def test_similar_looking_exclusion_is_not_matched(self):
         exclusions = [{"text": "Currently at Wix", "matched": False}]
         decision, note = _resolve_three_state_decision(

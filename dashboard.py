@@ -4803,10 +4803,13 @@ def _hard_filter_failure_named(hard_filter_failed) -> bool:
 
 
 def _norm_criterion_text(text) -> str:
-    """Lowercase, drop punctuation, collapse whitespace -- so a verdict whose
-    text differs from the brief line only by case/punctuation/spacing still
-    matches it."""
-    return " ".join(re.sub(r"[^\w\s]", " ", str(text or "").lower()).split())
+    """Lowercase and drop only HARMLESS formatting (commas, quotes, brackets,
+    hyphens, stray dots, extra spaces) so a verdict whose text differs from
+    the brief line only by case/spacing still matches it. Punctuation that
+    carries meaning is kept: "C++" and "C#" must stay different, and so must
+    "3.11" and "311" (Codex review, PR #150 round 4)."""
+    t = re.sub(r"[,;:!?\"'()\[\]{}_\-–—]", " ", str(text or "").lower())
+    return " ".join(w.strip(".") for w in t.split() if w.strip("."))
 
 
 def _align_verdicts_to_criteria(expected_texts, verdicts):
@@ -4948,7 +4951,9 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
             for _ in range(max(0, missing)):
                 normalized.append(('', 'needs_verification'))
 
-    not_met_items = [t for t, s in normalized if s == 'not_met' and t]
+    # An explicit not_met always blocks GO, even if the model left its text
+    # blank -- only the label shown in the reason falls back to a placeholder.
+    not_met_items = [t or 'unnamed requirement' for t, s in normalized if s == 'not_met']
 
     # Normalize exclusions: matched=True is a match, matched=False is
     # cleared, and anything else (missing key, None, unparseable value, or

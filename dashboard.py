@@ -11231,7 +11231,7 @@ with tab_screening:
                 _verdict_label = {"Good Fit": "GO", "Maybe": "MAYBE", "Not a Fit": "NO GO"}
                 display_data = []
                 for r in sorted_results:
-                    fit_val = r.get('fit', '') or ''
+                    fit_val = _result_bucket(r)  # historic NEEDS VERIFICATION rows show as NO GO
                     verdict = _verdict_label.get(fit_val, fit_val)  # Error/Skipped pass through
                     display_data.append({
                         'Verdict': verdict,
@@ -11289,6 +11289,11 @@ with tab_screening:
                     if 'fit' in screening_df.columns:
                         is_go = screening_df['fit'] == 'Good Fit'
                         is_maybe = screening_df['fit'] == 'Maybe'
+                        if 'decision' in screening_df.columns:
+                            # A carried-over NEEDS VERIFICATION row has not been
+                            # re-screened under the no-manual-bucket policy: it is
+                            # not outreach-ready, so keep it out of this paid flow.
+                            is_maybe = is_maybe & (screening_df['decision'] != 'NEEDS VERIFICATION')
                         enrich_df = screening_df[is_go | is_maybe].copy()
                     else:
                         enrich_df = screening_df.copy()

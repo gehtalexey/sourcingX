@@ -1,0 +1,41 @@
+id,position,group,fable,astra,sourcingx_new,sourcingx_old,kalamata,score
+P01,owner,kalamata_qualified,outreach,needs verification,NEEDS VERIFICATION,,qualified,6
+P02,dwelly,kalamata_not_qualified,needs verification,reject,NO GO,,not_qualified,3
+P03,owner,kalamata_not_qualified,needs verification,needs verification,NEEDS VERIFICATION,,not_qualified,5
+P04,dwelly,sourcingx_good_fit,outreach,reject,NEEDS VERIFICATION,Good Fit,,6
+P05,dwelly,kalamata_not_qualified,reject,reject,NEEDS VERIFICATION,,not_qualified,5
+P06,owner,kalamata_qualified,needs verification,needs verification,NEEDS VERIFICATION,,qualified,6
+P07,dwelly,kalamata_qualified,needs verification,needs verification,NO GO,,qualified,4
+P08,dwelly,sourcingx_not_a_fit,reject,reject,NO GO,Not a Fit,,1
+P09,owner,kalamata_qualified,reject,reject,NO GO,,qualified,2
+P10,dwelly,kalamata_qualified,needs verification,needs verification,NO GO,,qualified,4
+P11,dwelly,sourcingx_good_fit,needs verification,needs verification,NEEDS VERIFICATION,Good Fit,,6
+P12,owner,kalamata_not_qualified,needs verification,needs verification,NEEDS VERIFICATION,,not_qualified,5
+P13,dwelly,kalamata_qualified,needs verification,needs verification,NEEDS VERIFICATION,,qualified,6
+P14,owner,kalamata_not_qualified,reject,reject,NO GO,,not_qualified,2
+P15,dwelly,kalamata_qualified,needs verification,outreach,NEEDS VERIFICATION,,qualified,6
+P16,dwelly,kalamata_not_qualified,reject,reject,NO GO,,not_qualified,4
+P17,owner,sourcingx_good_fit,outreach,outreach,GO,Good Fit,,8
+P18,dwelly,kalamata_not_qualified,needs verification,needs verification,NEEDS VERIFICATION,,not_qualified,5
+P19,owner,kalamata_qualified,needs verification,needs verification,NEEDS VERIFICATION,,qualified,8
+P20,owner,sourcingx_not_a_fit,reject,reject,NEEDS VERIFICATION,Not a Fit,,5
+P21,owner,kalamata_not_qualified,reject,reject,NO GO,,not_qualified,1
+P22,owner,kalamata_not_qualified,needs verification,needs verification,NEEDS VERIFICATION,,not_qualified,5
+P23,dwelly,kalamata_qualified,needs verification,needs verification,NEEDS VERIFICATION,,qualified,6
+P24,owner,kalamata_qualified,outreach,needs verification,NEEDS VERIFICATION,,qualified,6
+P25,owner,kalamata_not_qualified,needs verification,needs verification,NEEDS VERIFICATION,,not_qualified,6
+P26,owner,kalamata_qualified,outreach,needs verification,NEEDS VERIFICATION,,qualified,6
+P27,dwelly,kalamata_qualified,outreach,outreach,GO,,qualified,8
+P28,dwelly,kalamata_not_qualified,needs verification,needs verification,NEEDS VERIFICATION,,not_qualified,5
+P29,dwelly,kalamata_not_qualified,reject,needs verification,NO GO,,not_qualified,2
+P30,dwelly,kalamata_not_qualified,needs verification,needs verification,NO GO,,not_qualified,4
+P31,dwelly,sourcingx_good_fit,reject,reject,NO GO,Good Fit,,6
+P32,dwelly,sourcingx_not_a_fit,reject,reject,NEEDS VERIFICATION,Not a Fit,,5
+P33,dwelly,sourcingx_not_a_fit,reject,reject,NO GO,Not a Fit,,4
+P34,owner,kalamata_not_qualified,needs verification,needs verification,NEEDS VERIFICATION,,not_qualified,8
+P35,dwelly,kalamata_qualified,outreach,outreach,NEEDS VERIFICATION,,qualified,6
+P36,owner,sourcingx_not_a_fit,needs verification,needs verification,NO GO,Not a Fit,,4
+P37,owner,sourcingx_not_a_fit,reject,needs verification,NEEDS VERIFICATION,Not a Fit,,6
+P38,owner,sourcingx_not_a_fit,needs verification,needs verification,NEEDS VERIFICATION,Not a Fit,,6
+P39,owner,kalamata_qualified,reject,needs verification,NO GO,,qualified,4
+P40,owner,sourcingx_not_a_fit,needs verification,needs verification,NEEDS VERIFICATION,Not a Fit,,6

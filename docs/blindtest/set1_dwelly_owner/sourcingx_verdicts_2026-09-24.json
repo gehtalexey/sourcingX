@@ -1,0 +1,465 @@
+[
+ {
+  "id": "P01",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "Strong evidence supports senior software depth, full-stack product ownership, US location, and the required degree. However, the profile does not verify production LLM/agentic shipping or top-tier VC backing, and the current 11x role has no description, so outreach is not justified without verification."
+ },
+ {
+  "id": "P02",
+  "position": "dwelly",
+  "decision": "NO GO",
+  "score": 3,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate has strong senior backend/software tenure, a relevant degree, and is based in the UK. However, the career is predominantly in consultancy/services-oriented employers, matching a stated exclusion, and there is no evidence of production AI or agentic-system delivery."
+ },
+ {
+  "id": "P03",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 5,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Full-stack: works across backend and frontend / UI",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has strong software-engineering tenure, a CS degree, US location, and substantial experience at Google, Lyft, and Union.ai. However, the profile does not provide evidence of production LLM or agentic features, verified full-stack delivery, or top-tier VC-backed startup experience, so outreach is not justified without verification."
+ },
+ {
+  "id": "P04",
+  "position": "dwelly",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "Strong evidence of backend Python engineering, cloud/platform ownership, and relevant AI-agent work, with a technical engineering education and European location. The decisive production-agentic-systems requirement is not fully evidenced because the profile does not explicitly establish that the OWKIN copilot ran in production or describe its operational metrics; verify before outreach."
+ },
+ {
+  "id": "P05",
+  "position": "dwelly",
+  "decision": "NEEDS VERIFICATION",
+  "score": 5,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate has strong backend engineering depth, relevant Node.js experience, a technical degree, and a European location. However, the profile contains no evidence of production AI or agentic system development, which is a required capability and needs direct verification before outreach."
+ },
+ {
+  "id": "P06",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Full-stack: works across backend and frontend / UI"
+  ],
+  "reasoning": "The candidate has strong AI/product signals, more than five years of relevant software experience, US location, and startup/founder background. However, the profile does not clearly verify production LLM-agent implementation or full-stack backend-plus-frontend ownership, so outreach should wait for confirmation of those requirements."
+ },
+ {
+  "id": "P07",
+  "position": "dwelly",
+  "decision": "NO GO",
+  "score": 4,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate has strong general software engineering experience, a relevant engineering degree, and is Europe-based. However, the profile does not demonstrate the required backend TypeScript/Node.js or Python experience and provides no evidence of production AI or agentic systems; the backend requirement is contradicted by the documented frontend TypeScript and backend PHP work."
+ },
+ {
+  "id": "P08",
+  "position": "dwelly",
+  "decision": "NO GO",
+  "score": 1,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "At least 3 years of hands-on software engineering, backend (TypeScript/Node.js or Python)",
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate is UK-based, but the profile provides no credible evidence of the required backend software engineering or production agentic-AI experience. The technical-degree requirement is contradicted by the listed Business Management and Facility and Environment Management degrees, and the broader career arc is predominantly facilities management rather than software engineering."
+ },
+ {
+  "id": "P09",
+  "position": "owner",
+  "decision": "NO GO",
+  "score": 2,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has strong relevant engineering depth, clear full-stack experience, and applied generative-AI agent work. However, he fails the explicit bachelor's-degree requirement because his listed bachelor's degree is in Film Studies and Production rather than CS or a related STEM field; production shipment and top-tier VC backing also require verification."
+ },
+ {
+  "id": "P10",
+  "position": "dwelly",
+  "decision": "NO GO",
+  "score": 4,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "At least 3 years of hands-on software engineering, backend (TypeScript/Node.js or Python)",
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "Auto-NO GO (hard filter applies): STABILITY VERDICT FAIL — the profile has 3 short-stint companies: Hedvig, Airpelago, and Linköping University; this imposes a maximum score of 4.; STABILITY VERDICT: FAIL (3+ short-stint companies). The candidate has strong backend depth, a relevant Computer Science master's degree, and is based in Europe. However, production AI/agentic experience is not established, and the required 3 years specifically in TypeScript/Node.js or Python backend work is also unverified. The pre-computed stability verdict limits the score to 4."
+ },
+ {
+  "id": "P11",
+  "position": "dwelly",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate has a strong software engineering background, relevant TypeScript/Node.js skills, a Computer Engineering degree, and is based in Germany. The decisive gap is the lack of concrete evidence that they personally built and operated production AI or agentic systems; the Cognigy affiliation alone is insufficient to establish that requirement."
+ },
+ {
+  "id": "P12",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 5,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Full-stack: works across backend and frontend / UI",
+   "Bachelor's degree in CS or a related STEM field",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has substantial software engineering experience, strong technology-company credentials, US location, and credible AI/LLM exposure. However, production agentic shipping, full-stack/UI depth, bachelor's degree level, and top-tier VC backing are not sufficiently evidenced, so outreach is not justified without verification."
+ },
+ {
+  "id": "P13",
+  "position": "dwelly",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate has strong, relevant software engineering depth, European location, a technical science degree, and current AI-related software ownership. The decisive gap is the lack of concrete evidence that AI or agentic systems with the required production characteristics were built and shipped, so outreach is not justified without verification."
+ },
+ {
+  "id": "P14",
+  "position": "owner",
+  "decision": "NO GO",
+  "score": 2,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Full-stack: works across backend and frontend / UI",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has sufficient software-engineering tenure, US location, and a related STEM degree, with apparent backend and frontend technology exposure. However, the profile lacks evidence of shipped LLM/agentic production features and top-tier VC-backed startup experience, and the career is dominated by consulting/services employers, matching a stated exclusion."
+ },
+ {
+  "id": "P15",
+  "position": "dwelly",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate has strong, well-evidenced TypeScript/Node.js and Python engineering experience, production ownership, relevant education, and is based in France. The central gap is the absence of clear evidence that they personally built and shipped production agentic systems matching the role's requirements, so AI production experience requires verification before outreach."
+ },
+ {
+  "id": "P16",
+  "position": "dwelly",
+  "decision": "NO GO",
+  "score": 4,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "At least 3 years of hands-on software engineering, backend (TypeScript/Node.js or Python)",
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "Strong academic credentials, European location, and current Applied AI experience at Mistral are positive signals. However, the profile has a clearly research-heavy ML history that matches an explicit exclusion, while production agentic-system experience and three years of qualifying backend engineering are not evidenced."
+ },
+ {
+  "id": "P17",
+  "position": "owner",
+  "decision": "GO",
+  "score": 8,
+  "fit": "Good Fit",
+  "needs_verification": [],
+  "reasoning": "The candidate has strong startup and product-building evidence, including YC/Accel-backed Venue, production LLM-platform work at Vellum, and clear full-stack ownership. The main residual concern is that the profile does not explicitly detail specific agent-loop or tool-calling implementations, but it provides credible evidence of shipped agent-focused product work."
+ },
+ {
+  "id": "P18",
+  "position": "dwelly",
+  "decision": "NEEDS VERIFICATION",
+  "score": 5,
+  "fit": "Maybe",
+  "needs_verification": [
+   "At least 3 years of hands-on software engineering, backend (TypeScript/Node.js or Python)",
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate has a strong software-engineering foundation, relevant backend and platform experience, European location, and a Computer Science master's degree. However, production AI/agentic experience is not documented, and the required three years of backend TypeScript/Node.js or Python experience cannot be established from the role descriptions; these gaps require verification."
+ },
+ {
+  "id": "P19",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 8,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Full-stack: works across backend and frontend / UI",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has strong evidence of production AI-agent ownership at Replit, substantial software engineering experience, relevant education, and US location. Full-stack frontend/UI experience and top-tier VC backing are not established by the profile, so recruiter outreach should wait for verification of those two requirements."
+ },
+ {
+  "id": "P20",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 5,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has clear full-stack application experience, US location, and the required degree and general software tenure. The core AI-agent production requirement and top-tier VC-backed startup requirement are not evidenced, while the current role description is too generic to establish them; therefore human verification is required."
+ },
+ {
+  "id": "P21",
+  "position": "owner",
+  "decision": "NO GO",
+  "score": 1,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "Bachelor's degree in CS or a related STEM field",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "This is a long-tenured enterprise sales profile, not a software engineering profile: no engineering, full-stack, or personally shipped LLM/agentic feature evidence is present. The candidate is US-based, but multiple required technical qualifications are directly contradicted by the complete career history, so the profile is not suitable for a Senior/Staff AI Agents Engineer role."
+ },
+ {
+  "id": "P22",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 5,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Full-stack: works across backend and frontend / UI",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate clearly exceeds the software-engineering experience requirement, is US-based, and has a relevant Computer Engineering degree. However, the profile contains no concrete evidence of shipped LLM/agentic features, and frontend/UI depth and top-tier VC-backed startup experience remain unverified."
+ },
+ {
+  "id": "P23",
+  "position": "dwelly",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "At least 3 years of hands-on software engineering, backend (TypeScript/Node.js or Python)",
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate has a strong software engineering track record at Facebook/Meta, a Computer Science Master's degree, and is UK-based. However, the profile does not verify the required backend TypeScript/Node.js or Python depth, nor production deployment of agentic systems; the current Granola description only mentions working on agentic workflows."
+ },
+ {
+  "id": "P24",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has strong software tenure, US location, CS education, startup/product experience, and credible full-stack signals. However, the profile does not establish shipped production agentic features or top-tier VC backing, so outreach should wait for verification of those requirements."
+ },
+ {
+  "id": "P25",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has strong senior software, full-stack, cloud-platform, and startup-building experience, with clear US location and a relevant CS degree. The profile does not establish production LLM/agentic engineering or top-tier VC-backed startup experience, so outreach should wait for verification of those two requirements."
+ },
+ {
+  "id": "P26",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate clearly meets the experience, full-stack, location, education, and likely startup-environment requirements, with strong product engineering evidence. However, the profile does not establish production LLM/agentic shipping or top-tier VC backing, both explicit must-haves; these require verification before outreach."
+ },
+ {
+  "id": "P27",
+  "position": "dwelly",
+  "decision": "GO",
+  "score": 8,
+  "fit": "Good Fit",
+  "needs_verification": [],
+  "reasoning": "Strong fit based on production-oriented AI engineering evidence, including RAG agents, LLM deployment, and an AI microservice, supported by substantial backend and platform experience. The candidate is based in Denmark and has a directly relevant Mathematics and Computer Science degree; the main limitation is that some requested agentic-system details such as explicit tool use, evals, and measurable impact are not documented."
+ },
+ {
+  "id": "P28",
+  "position": "dwelly",
+  "decision": "NEEDS VERIFICATION",
+  "score": 5,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate has a solid software engineering background, relevant Python/Django and Node.js/TypeScript exposure, a Computer Science degree, and is based in Europe. However, the profile does not provide evidence that he personally built and shipped production AI or agentic systems; Synthesia's company description alone is insufficient to establish that requirement."
+ },
+ {
+  "id": "P29",
+  "position": "dwelly",
+  "decision": "NO GO",
+  "score": 2,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate is based in the UK and has strong Computer Science education, but the documented software-engineering experience is below three years and backend stack depth is not established. The profile also directly matches the excluded data scientist/ML researcher/research-heavy background through multiple prior roles focused on classic machine learning."
+ },
+ {
+  "id": "P30",
+  "position": "dwelly",
+  "decision": "NO GO",
+  "score": 4,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "At least 3 years of hands-on software engineering, backend (TypeScript/Node.js or Python)",
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate is located in the UK and has strong technical education plus AI/ML engineering experience. However, production agentic-system delivery and the required backend experience are not evidenced in the role descriptions, and the profile has three qualifying short-stint companies, triggering the hard filter and score cap."
+ },
+ {
+  "id": "P31",
+  "position": "dwelly",
+  "decision": "NO GO",
+  "score": 6,
+  "fit": "Not a Fit",
+  "needs_verification": [],
+  "reasoning": "The candidate has strong evidence of hands-on Node/Python engineering and production-oriented agentic AI work, and is based in London. However, the explicit education requirement is contradicted by degrees only in Political Science and International Development, with no qualifying technical or science degree shown."
+ },
+ {
+  "id": "P32",
+  "position": "dwelly",
+  "decision": "NEEDS VERIFICATION",
+  "score": 5,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate has credible web engineering experience, NodeJS exposure, UK location, and Computer Science degrees. The decisive production AI/agentic requirement is entirely unsubstantiated, while the profile also provides no current employment details, so outreach is not justified without verification."
+ },
+ {
+  "id": "P33",
+  "position": "dwelly",
+  "decision": "NO GO",
+  "score": 4,
+  "fit": "Not a Fit",
+  "needs_verification": [],
+  "reasoning": "The candidate has strong evidence of UK-based production agentic AI work, including deployed RAG and LangGraph systems, and meets the stated must-haves. However, the authoritative stability verdict identifies three short-stint companies, triggering the mandatory hard cap and resulting in NO GO despite otherwise relevant experience."
+ },
+ {
+  "id": "P34",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 8,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has exceptional engineering depth, production-scale ML/LLM experience, and demonstrated backend/UI breadth at major product companies. The only unresolved requirement is explicit evidence that a strong startup employer was backed by top-tier VCs; the profile does not document that criterion."
+ },
+ {
+  "id": "P35",
+  "position": "dwelly",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "At least 3 years of hands-on software engineering, backend (TypeScript/Node.js or Python)",
+   "Has built and shipped AI or agentic systems that ran in production (tool use, orchestration, structured outputs, evals, cost/latency/reliability), not just demos, courses or side projects"
+  ],
+  "reasoning": "The candidate has strong relevant signals: a technical AI degree, extensive product-engineering leadership, recent Python agent-platform work, and clear European location. However, the profile does not conclusively establish three years of backend TypeScript/Node.js or Python experience, nor explicitly prove that the recent agentic systems ran in production with the required operational characteristics."
+ },
+ {
+  "id": "P36",
+  "position": "owner",
+  "decision": "NO GO",
+  "score": 4,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Bachelor's degree in CS or a related STEM field"
+  ],
+  "reasoning": "The candidate has strong software-engineering tenure, US location, and broad backend/frontend technology evidence. However, the complete history shows no startup experience, directly failing that must-have; production agentic shipping and bachelor's degree are also unverified."
+ },
+ {
+  "id": "P37",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has strong software-engineering depth, US location, relevant CS education, and explicit full-stack production experience at major technology companies. However, the profile does not establish production LLM/agentic feature delivery or experience at a top-tier-VC-backed startup, so the candidate requires verification before outreach."
+ },
+ {
+  "id": "P38",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Full-stack: works across backend and frontend / UI",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has exceptionally strong software-engineering depth, founding experience at Rec Room, and substantial production-scale architecture ownership. However, the profile contains no evidence of shipped LLM or agentic features, does not clearly establish frontend/UI depth, and does not verify top-tier VC backing, so outreach is not justified without confirming these requirements."
+ },
+ {
+  "id": "P39",
+  "position": "owner",
+  "decision": "NO GO",
+  "score": 4,
+  "fit": "Not a Fit",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate shows credible full-stack production ownership at Aviatrix, but the documented software-engineering experience is approximately 4 years 6 months, below the 5-year minimum. Production LLM/agent experience and top-tier VC backing are also unverified, making the profile unsuitable for this Senior/Staff AI Agents Engineer search."
+ },
+ {
+  "id": "P40",
+  "position": "owner",
+  "decision": "NEEDS VERIFICATION",
+  "score": 6,
+  "fit": "Maybe",
+  "needs_verification": [
+   "Has shipped production LLM or agentic features (tool calling, agent loops), not just a simple LLM API call",
+   "Worked at a strong startup backed by top-tier VCs"
+  ],
+  "reasoning": "The candidate has strong software engineering depth, US location, a relevant STEM degree, and evidence spanning backend infrastructure and UI development. The decisive gaps are the absence of documented production LLM or agentic features and the lack of evidence that a startup employer was backed by top-tier VCs, so outreach is not justified without verification."
+ }
+]

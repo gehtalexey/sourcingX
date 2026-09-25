@@ -57,6 +57,34 @@ instead of rejection. Either way the rejection stops being automatic.
 | Default filter search was the legacy endpoint that stops working 2026-09-30; credits display broken; the new search failed on every call (asked for two fields this account cannot read); thin search rows saved to the shared table as "enriched"; legacy search and `enrich.py` removed | PR #141 |
 | No way to combine a description with filters | PR #142 — combined search, used in the run (10/10 relevant, 7 s) |
 
+## What changed (trust-fixes goal, 2026-09-24)
+
+| Item | Status | Change |
+|---|---|---|
+| 1 | FIXED, PR #144 | Each must-have is now met / not met / needs verification. Only a contradiction rejects. Unproven must-haves go to a visible "Needs verification" group with its own download, kept out of outreach. Stored as "Maybe" plus `screening_notes` "Needs verification: ...", because agent-kalamata and Supanova filter on `screening_fit_level`. |
+| 2 | IMPROVED, PR #144 | The biggest source of flips (unproven = fail) is gone. Repeatability itself was not re-measured. |
+| 3 | FIXED, PRs #146, #147 | AI Screen shows "N profiles need a top-up = N Crustdata credits · AI ≈ $X" from the last run's real cost. Email buttons say "N lookups". All 5 search call sites write to `api_usage_logs`. Enrichment labels say 1 credit. SalesQL misses are logged as 0 credits (SalesQL does not charge for them). |
+| 4 | PR #145, waiting to merge | Openers cite one concrete thing from the profile, take the company from the position, and are checked in code for banned starts and words; an opener that breaks the rules twice is dropped. |
+| 8 | PARTLY FIXED, PR #146 | After a lookup the app says "SalesQL found N of M emails". Four causes fixed: empty group, result erased by an instant reload, hidden rows dropped from the session, Load tab counting one table and looking up another. "Send to Filter Tab" and the wrong banner are still open. |
+
+**The 20 kalamata-approved Dwelly candidates, original brief (must-have kept):**
+before 2 GO / 18 NO GO; now **2 GO / 15 Needs verification / 3 NO GO**. All 3 NO GOs cite
+evidence: a consultancy career, backend only in PHP, a research-heavy profile.
+
+**Blind test (40 anonymised profiles, Dwelly and Owner).** Fable 5.1 and GPT-6 Astra each
+labelled every profile outreach / needs verification / reject from the brief alone. They
+agreed on 31 of 40. This is AI judging AI, not recruiters.
+- Both experts say outreach (3): SourcingX says NO GO to **0** (2 GO, 1 needs verification).
+- Both experts say reject (10): SourcingX says GO to **0** (7 NO GO, 3 needs verification).
+- SourcingX matches the experts' shared answer on 23 of 31.
+- SourcingX says NO GO where neither expert rejects: 4. One is its own short-stint rule,
+  one is a real contradiction, and 2 still reject for "not shown" (the old habit, about 1 in 20).
+- The "both say outreach" group is small, so treat the 0 as encouraging, not proven.
+
+**Live check (18:48-18:51 UTC):** a 10-result search logged 0.3 credits; screening 3 profiles
+predicted 2 top-up credits and charged 2; one email lookup found nothing, said "found 0 of 1"
+and logged 0 credits.
+
 ## What the experts said
 
 **Fable 5.1:** SourcingX can be trusted today to find people (the combined search is good and

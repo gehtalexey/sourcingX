@@ -4620,21 +4620,33 @@ GO_CONFIDENCE_THRESHOLD = 7  # a GO decision requires score >= this (see _resolv
 
 
 def _decision_to_fit_label(decision: str, score: int) -> str:
-    """Map a screening decision to the recruiter-facing fit label.
+    """Map a screening {decision, score} to the recruiter-facing fit label.
 
-    There is no manual-review bucket any more -- _resolve_three_state_decision
-    already folds the score threshold into the GO/NO GO call itself (GO only
-    ever comes back at score >= GO_CONFIDENCE_THRESHOLD), so this is now a
-    direct, unconditional map:
-      - GO    -> "Good Fit"
-      - NO GO -> "Not a Fit"
-    `score` is accepted for backward-compatible call sites but no longer
-    changes the outcome. SourcingX no longer writes "Maybe" or
-    "NEEDS VERIFICATION" for new screening results -- older session results
-    from a previous build may still carry a "Maybe" fit_level, and the UI
-    keeps displaying those correctly (see _result_bucket)."""
+    There is no manual-review bucket any more -- a NO GO is always
+    "Not a Fit". For the structured path, _resolve_three_state_decision
+    already folds the score threshold into the GO/NO GO call itself (it
+    only ever returns GO at score >= GO_CONFIDENCE_THRESHOLD), so this
+    check is redundant there but harmless. It is NOT redundant for the
+    legacy freeform path (screen_profile called without a screening_brief),
+    which never runs the resolver and takes the model's raw {decision,
+    score} at face value -- without this check, a legacy {"decision": "GO",
+    "score": 6} would wrongly become "Good Fit" (Codex review, PR #150).
+    So the threshold is kept here too, still with no third "Maybe" bucket:
+      - NO GO                        -> "Not a Fit"
+      - GO, score >= GO_CONFIDENCE_THRESHOLD -> "Good Fit"
+      - GO, score <  GO_CONFIDENCE_THRESHOLD -> "Not a Fit"
+    SourcingX no longer writes "Maybe" or "NEEDS VERIFICATION" for new
+    screening results -- older session results from a previous build may
+    still carry a "Maybe" fit_level, and the UI keeps displaying those
+    correctly (see _result_bucket)."""
     d = str(decision).upper().strip()
-    return "Good Fit" if d == "GO" else "Not a Fit"
+    if d != "GO":
+        return "Not a Fit"
+    try:
+        s = int(score or 0)
+    except (TypeError, ValueError):
+        s = 0
+    return "Good Fit" if s >= GO_CONFIDENCE_THRESHOLD else "Not a Fit"
 
 
 def _result_bucket(r: dict) -> str:
@@ -4785,6 +4797,7 @@ def _hard_filter_failure_named(hard_filter_failed) -> bool:
 
 def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdicts,
                                    score=0, num_expected_must_haves=None,
+                                   num_expected_exclusions=None,
                                    hard_filter_failed=None, stability_failed=False,
                                    experience_limit_failed=False):
     """Deterministically resolve the final GO / NO GO decision. There is no
@@ -4804,6 +4817,12 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
             as needs_verification rather than silently passing -- a GO must
             never rest on a must-have the model never actually judged. Pass
             None (default) to skip this check (e.g. no brief / no must-haves).
+        num_expected_exclusions: how many exclusions the brief actually
+            asked about. Same idea as num_expected_must_haves, but for
+            exclusions: a missing or unparseable `matched` value is never
+            treated as "cleared" -- it blocks GO until the model actually
+            rules it out (Codex review, PR #150). Pass None (default) to
+            skip this check.
         hard_filter_failed: the model's own free-text name of a generic
             Hard Filter it applied (empty/None means it didn't cite one).
         stability_failed: Python-computed STABILITY VERDICT is FAIL (see
@@ -4815,6 +4834,8 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
     Returns (decision: "GO" or "NO GO", note: str) -- note is:
       - an "Auto-NO GO (...)" explanation when a hard signal overrode a
         different model decision, else ''.
+      - "Exclusion not judged: a; b" when an exclusion verdict is missing
+        or unparseable -- GO is blocked until it's actually ruled out.
       - "Verify in call: a; b" when the decision is GO and one or more
         must-haves are needs_verification (unproven, not contradicted, and
         the visible career is judged to imply it per the prompt).
@@ -4824,14 +4845,18 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
 
     Resolution order:
       1. Any not_met must-have or matched exclusion -> NO GO.
-      2. Otherwise, if a generic hard filter / stability / experience-limit
+      2. Otherwise, any exclusion never actually judged (missing/unparseable
+         `matched`, including one the model never returned a verdict for at
+         all) -> NO GO. A cleared exclusion needs an explicit matched=False;
+         "the model didn't say" is not that.
+      3. Otherwise, if a generic hard filter / stability / experience-limit
          failure applies -> NO GO. A real hard filter overrides a model GO
          just as much as anything else.
-      3. Otherwise, GO only when score >= GO_CONFIDENCE_THRESHOLD; a
+      4. Otherwise, GO only when score >= GO_CONFIDENCE_THRESHOLD; a
          needs_verification must-have never lowers this on its own (the
          prompt already tells the model not to penalize the score for it),
          it only adds a "verify in call" note to a GO.
-      4. Otherwise (score below threshold) -> NO GO, with a
+      5. Otherwise (score below threshold) -> NO GO, with a
          "not shown..." note when needs_verification items exist.
     """
     # Normalize verdicts: an unparseable/missing state, or a must-have the
@@ -4850,10 +4875,23 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
             normalized.append(('', 'needs_verification'))
 
     not_met_items = [t for t, s in normalized if s == 'not_met' and t]
-    matched_exclusions = [
-        str(e.get('text', '')).strip() for e in (exclusion_verdicts or [])
-        if isinstance(e, dict) and _tri(e.get('matched')) is True
-    ]
+
+    # Normalize exclusions: matched=True is a match, matched=False is
+    # cleared, and anything else (missing key, None, unparseable value, or
+    # an exclusion the model never returned a verdict for at all) is
+    # "unjudged" -- it must never be silently treated as cleared.
+    exclusion_normalized = []
+    for e in (exclusion_verdicts or []):
+        if not isinstance(e, dict):
+            continue
+        text = str(e.get('text', '')).strip()
+        exclusion_normalized.append((text, _tri(e.get('matched'))))
+    if num_expected_exclusions:
+        missing = num_expected_exclusions - len(exclusion_normalized)
+        for _ in range(max(0, missing)):
+            exclusion_normalized.append(('', None))
+
+    matched_exclusions = [t for t, tri in exclusion_normalized if tri is True and t]
 
     if not_met_items or matched_exclusions:
         bits = []
@@ -4863,6 +4901,11 @@ def _resolve_three_state_decision(decision, must_have_verdicts, exclusion_verdic
             bits.append('exclusion(s) matched: ' + '; '.join(matched_exclusions))
         reason = ' | '.join(bits)
         note = '' if decision == 'NO GO' else f"Auto-NO GO (model verdicts contradicted its GO): {reason}."
+        return ('NO GO', note)
+
+    unjudged_exclusions = [t if t else 'unnamed' for t, tri in exclusion_normalized if tri is None]
+    if unjudged_exclusions:
+        note = "Exclusion not judged: " + "; ".join(unjudged_exclusions)
         return ('NO GO', note)
 
     hard_filter_named = _hard_filter_failure_named(hard_filter_failed)
@@ -5151,6 +5194,7 @@ def screen_profile(profile: dict, job_description: str, client,
                 model_decision, must_have_verdicts, exclusion_verdicts,
                 score=score,
                 num_expected_must_haves=len(must_haves) if must_haves else None,
+                num_expected_exclusions=len(exclusions) if exclusions else None,
                 hard_filter_failed=hard_filter_failed,
                 stability_failed=_stability_verdict_failed(durations_text),
             )

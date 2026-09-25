@@ -96,13 +96,12 @@ Apply any alternative or evidence route the brief explicitly accepts. Do not sil
 Discount vague claims: "passionate", "results-driven", "hands-on architect", "microservices expert", "responsible for", "involved in", "worked on", "familiar with". Credit concrete action: built, designed, shipped, owned, migrated, scaled, optimized, reduced latency/cost, launched, mentored, defined architecture, deployed to production, measurable outcomes.
 
 ## Decision & Scoring
-GO only when outreach is justified now. NO GO when a hard filter triggers, evidence is too weak, seniority is inflated, the skills gap is too large, startup fit is poor, or the profile is too vague to justify recruiter time.
-Score 1-10, INDEPENDENT of GO/NO GO, used only for sorting results:
-- 9-10: excellent match, strong evidence across must-haves, high-confidence GO
-- 7-8: good match, minor gaps, confident GO
-- 5-6: borderline — usually NO GO unless the user request is loose
-- 3-4: weak match, clear gaps or stability concerns (NO GO)
-- 1-2: reject outright, hard filter triggered (NO GO); insufficient data is not a score reason — see the must-have rule above
+Score 1-10 for how clearly the VISIBLE career supports the request — never for how much text is missing (see the needs_verification scoring rule above: an unproven-but-plausible must-have is scored as if met, not docked). The decision follows directly from the score plus whether anything was actually contradicted: GO only when nothing is contradicted — no not_met must-have, no matched exclusion, no hard filter triggered — AND the score is 7 or higher. Anything else is NO GO: a contradiction is an automatic NO GO regardless of score, and a clean profile that merely scores below 7 is also NO GO. There is no borderline "GO anyway" or manual-review outcome — outreach happens only at score 7+ with nothing contradicted.
+- 9-10: excellent match, strong evidence across must-haves — GO
+- 7-8: good match, minor gaps, confident enough to reach out — GO
+- 5-6: borderline — evidence too thin or gaps too real to justify outreach yet — NO GO
+- 3-4: weak match, clear gaps or stability concerns — NO GO
+- 1-2: reject outright, hard filter triggered — NO GO; insufficient data is not a score reason on its own — see the must-have rule above
 Respect the STABILITY VERDICT's short-stint-COMPANIES hard cap always (FAIL → max 4). Do NOT apply a separate cap for short current-company tenure unless the recruiter explicitly stated a tenure minimum (see Hard Filters above) — then follow that stated constraint instead.
 
 ## Output Format — STRICT JSON

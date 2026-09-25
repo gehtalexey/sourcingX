@@ -343,6 +343,34 @@ class TestThreeStateDecisionGuardIntegration:
         assert "5+ years Python" in guard_reason
 
 
+class TestDecisionToFitLabelKeepsThreshold:
+    """_decision_to_fit_label(decision, score) -> str. The structured path
+    only ever calls this with a decision _resolve_three_state_decision
+    already computed (GO implies score >= GO_CONFIDENCE_THRESHOLD there),
+    so the threshold check here is redundant for it -- but the LEGACY
+    freeform path (screen_profile called without a screening_brief) never
+    runs the resolver and passes the model's raw {decision, score}
+    straight through. Without keeping the threshold here too, a legacy
+    {"decision": "GO", "score": 6} would wrongly become "Good Fit" instead
+    of "Not a Fit" (Codex review, PR #150). There is still no third "Maybe"
+    bucket -- a GO below the threshold is "Not a Fit", same as a NO GO."""
+
+    def test_no_go_is_always_not_a_fit_regardless_of_score(self):
+        assert _decision_to_fit_label("NO GO", 9) == "Not a Fit"
+        assert _decision_to_fit_label("NO GO", 1) == "Not a Fit"
+
+    def test_go_at_or_above_threshold_is_good_fit(self):
+        assert _decision_to_fit_label("GO", 7) == "Good Fit"
+        assert _decision_to_fit_label("GO", 10) == "Good Fit"
+
+    def test_go_below_threshold_is_not_a_fit_not_maybe(self):
+        # This is the legacy-path regression: a low-score GO must not
+        # become "Good Fit", and must NOT become "Maybe" either -- there
+        # is no manual-review bucket any more.
+        assert _decision_to_fit_label("GO", 6) == "Not a Fit"
+        assert _decision_to_fit_label("GO", 1) == "Not a Fit"
+
+
 class TestPolicyNoLongerTreatsMissingEvidenceAsFail:
     """screening_policy.py must no longer instruct the model to treat
     missing/unproven evidence as a fail, and must instead spell out that a
@@ -485,6 +513,40 @@ class TestResolveThreeStateDecision:
         )
         assert decision == "NO GO"
         assert note.startswith("Not shown and the visible career doesn't clearly imply:")
+
+    def test_missing_exclusion_verdict_blocks_go_even_at_high_score(self):
+        # The brief listed 2 exclusions; the model only returned a verdict
+        # for 1. A missing exclusion verdict must never be treated as
+        # "cleared" -- it blocks GO regardless of score (Codex review, PR #150).
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        exclusions = [{"text": "Currently at a competitor", "matched": False}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, exclusions, score=9, num_expected_exclusions=2,
+        )
+        assert decision == "NO GO"
+        assert "Exclusion not judged" in note
+
+    def test_unparseable_matched_value_blocks_go(self):
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        exclusions = [{"text": "Currently at a competitor", "matched": "partial"}]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, exclusions, score=9,
+        )
+        assert decision == "NO GO"
+        assert "Exclusion not judged" in note
+        assert "Currently at a competitor" in note
+
+    def test_all_exclusions_present_and_cleared_can_go(self):
+        must_haves = [{"text": "5+ years Python", "met": "met"}]
+        exclusions = [
+            {"text": "Currently at a competitor", "matched": False},
+            {"text": "No pure managers", "matched": False},
+        ]
+        decision, note = _resolve_three_state_decision(
+            "GO", must_haves, exclusions, score=9, num_expected_exclusions=2,
+        )
+        assert decision == "GO"
+        assert note == ""
 
     def test_model_no_go_with_hard_filter_named_stays_no_go(self):
         must_haves = [{"text": "EU-based", "met": "needs_verification"}]

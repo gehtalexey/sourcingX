@@ -86,12 +86,15 @@ class SupabaseClient:
     def _request(self, method: str, endpoint: str, params: dict = None, json_data: dict = None) -> dict:
         """Make a request to Supabase REST API."""
         url = f"{self.url}/rest/v1/{endpoint}"
+        # Postgres rejects NUL in jsonb/text; sanitize here so every caller
+        # of _request (insert()/update() included) is covered, not just the
+        # callers that pre-serialize their own payload.
         response = requests.request(
             method,
             url,
             headers=self.headers,
             params=params,
-            json=json_data,
+            json=_sanitize_nan(json_data) if json_data is not None else None,
             timeout=90
         )
         response.raise_for_status()

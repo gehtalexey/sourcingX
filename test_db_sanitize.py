@@ -150,3 +150,53 @@ def test_upsert_batch_body_has_no_nul(client):
         assert row['name'] == 'Test Person'
         assert 'headline' in row['raw_data']
         assert row['raw_data']['score'] is None
+
+
+# --- SupabaseClient._request (insert/update) --------------------------------
+
+def _mock_request_response():
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.text = '[]'
+    resp.json.return_value = []
+    resp.raise_for_status.return_value = None
+    return resp
+
+
+def _assert_clean_json_kwarg(mock_request):
+    assert mock_request.call_count == 1
+    payload = mock_request.call_args.kwargs['json']
+    dumped = json.dumps(payload)
+    assert '\\u0000' not in dumped
+
+    def _no_nul(value):
+        if isinstance(value, str):
+            assert NUL not in value
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                assert NUL not in k
+                _no_nul(v)
+        elif isinstance(value, list):
+            for v in value:
+                _no_nul(v)
+
+    _no_nul(payload)
+    return payload
+
+
+def test_insert_json_kwarg_has_no_nul(client):
+    with patch('db.requests.request', return_value=_mock_request_response()) as mock_request:
+        client.insert('profiles', _dirty_profile())
+    payload = _assert_clean_json_kwarg(mock_request)
+    assert payload['name'] == 'Test Person'
+    assert payload['raw_data']['headline'] == 'Engineer'
+    assert payload['raw_data']['score'] is None
+
+
+def test_update_json_kwarg_has_no_nul(client):
+    with patch('db.requests.request', return_value=_mock_request_response()) as mock_request:
+        client.update('profiles', _dirty_profile(), {'linkedin_url': 'https://www.linkedin.com/in/test-person'})
+    payload = _assert_clean_json_kwarg(mock_request)
+    assert payload['name'] == 'Test Person'
+    assert payload['raw_data']['headline'] == 'Engineer'
+    assert payload['raw_data']['score'] is None

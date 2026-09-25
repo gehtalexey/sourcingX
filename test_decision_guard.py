@@ -932,3 +932,34 @@ class TestScreenProfileTiesAnswersToIds:
         result, _ = self._run(monkeypatch, reply)
         assert result["decision"] == "NO GO"
         assert "Must-have not judged: Kubernetes in production" in result["summary"]
+
+    def test_tenure_override_to_no_go_clears_the_verify_note(self, monkeypatch):
+        # Codex review, PR #150 round 5: a GO with a "Verify in call" note
+        # that a later tenure check turns into NO GO must not keep the note.
+        import tenure_constraint_validator as tcv
+
+        def force_no_go(result, *_a, **_k):
+            result = dict(result)
+            result["decision"] = "NO GO"
+            result["fit"] = "Not a Fit"
+            return result
+
+        monkeypatch.setattr(tcv, "enforce_tenure_constraint", force_no_go)
+        reply = {
+            "must_haves": [{"id": "M1", "met": "met"}, {"id": "M2", "met": "needs_verification"}],
+            "exclusions": [{"id": "E1", "matched": False}],
+            "decision": "GO", "score": 8, "reasoning": "ok",
+        }
+        result, _ = self._run(monkeypatch, reply)
+        assert result["decision"] == "NO GO"
+        assert result["verify_note"] is None
+
+    def test_go_keeps_its_verify_note_when_nothing_overrides_it(self, monkeypatch):
+        reply = {
+            "must_haves": [{"id": "M1", "met": "met"}, {"id": "M2", "met": "needs_verification"}],
+            "exclusions": [{"id": "E1", "matched": False}],
+            "decision": "GO", "score": 8, "reasoning": "ok",
+        }
+        result, _ = self._run(monkeypatch, reply)
+        assert result["decision"] == "GO"
+        assert result["verify_note"] == "Verify in call: Kubernetes in production"

@@ -5379,6 +5379,15 @@ def screen_profile(profile: dict, job_description: str, client,
             # through with the original model result.
             pass
 
+        # A tenure override can turn a GO into NO GO after the "Verify in
+        # call" note was written; a rejected row must not keep it (Codex
+        # review, PR #150 round 5).
+        if result.get("verify_note") and (
+            str(result.get("decision", "")).upper().strip() != "GO"
+            or result.get("fit") != "Good Fit"
+        ):
+            result["verify_note"] = None
+
         return result
 
     except json.JSONDecodeError as e:

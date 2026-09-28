@@ -137,6 +137,7 @@ try:
         check_credits as check_crustdata_credits,
         expand_variations,
         search_people_semantic,
+        search_people_semantic_paged,
         semantic_profile_to_legacy_shape,
         batch_enrich_profiles,
         sync_enrich_profile,
@@ -6620,9 +6621,9 @@ with tab_search:
             sem_col1, sem_col2 = st.columns([1, 3])
             with sem_col1:
                 semantic_limit = st.number_input(
-                    "Results", min_value=5, max_value=100, value=20, step=5,
+                    "Results", min_value=5, max_value=1000, value=20, step=5,
                     key="crust_semantic_limit",
-                    help="Max 100 per search (Crustdata beta limit).",
+                    help="Fetched in pages of up to 100 (Crustdata's per-request limit).",
                 )
             with sem_col2:
                 st.write("")  # vertical spacer to align button with the number input
@@ -6647,13 +6648,20 @@ with tab_search:
                     try:
                         sem_progress = st.empty()
                         sem_progress.info("Searching Crustdata by description...")
-                        sem_results = search_people_semantic(
+                        # Crustdata caps each request at 100, so follow the cursor
+                        # until the target is reached (same as the filter search).
+                        # Exclusions below run once over every collected page.
+                        sem_results = search_people_semantic_paged(
                             semantic_query.strip(),
-                            limit=int(semantic_limit),
+                            int(semantic_limit),
                             api_key=api_key,
                             filters=_sem_form_filters or None,
                             tracker=get_usage_tracker(),
+                            on_page=lambda got, goal: sem_progress.info(
+                                f"Loading profiles... {got:,} / {goal:,}"
+                            ),
                         )
+                        sem_progress.empty()
                         sem_shimmed = [
                             semantic_profile_to_legacy_shape(p)
                             for p in (sem_results.get("profiles") or [])
@@ -6727,7 +6735,8 @@ with tab_search:
                         st.session_state['crustdata_search_mode'] = 'semantic'
                         st.session_state['_last_semantic_params'] = {
                             'query': semantic_query.strip(),
-                            'limit': int(semantic_limit),
+                            # Load More fetches one page, and a page is at most 100.
+                            'limit': min(int(semantic_limit), 100),
                             # Load More must send the same filters with the cursor.
                             'filters': _sem_form_filters or None,
                         }

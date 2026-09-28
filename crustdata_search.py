@@ -1103,6 +1103,64 @@ def search_people_semantic(
         )
 
 
+def search_people_semantic_paged(
+    query: str,
+    target: int,
+    api_key: str = None,
+    filters: Optional[Dict[str, Any]] = None,
+    tracker=None,
+    fetch=None,
+    on_page=None,
+) -> Dict[str, Any]:
+    """
+    Description search that follows the cursor until `target` results are
+    collected. Crustdata caps each /person/search request at 100, so a target
+    above that takes several requests — same idea as the filter search's
+    auto-pagination loop in dashboard.py.
+
+    Stops when: target reached, total_count reached, no cursor left, or a page
+    comes back empty. `fetch` defaults to search_people_semantic (tests pass a
+    fake). `on_page(collected, target)` is called before each follow-up page,
+    for progress display.
+
+    Returns the same shape as search_people_semantic(): all raw profiles, the
+    LAST cursor (so Load More continues from here), total_count, and
+    credits_used summed across pages.
+    """
+    fetch = fetch or search_people_semantic
+    target = max(1, int(target))
+
+    first = fetch(query, limit=min(target, 100), api_key=api_key,
+                  filters=filters, tracker=tracker)
+    profiles = list(first.get("profiles") or [])
+    cursor = first.get("cursor")
+    total_count = first.get("total_count", len(profiles))
+    credits_used = first.get("credits_used", 0) or 0
+    response_time_ms = first.get("response_time_ms", 0) or 0
+
+    goal = min(target, total_count) if total_count else target
+    while cursor and profiles and len(profiles) < goal:
+        if on_page:
+            on_page(len(profiles), goal)
+        page = fetch(query, limit=min(goal - len(profiles), 100), cursor=cursor,
+                     api_key=api_key, filters=filters, tracker=tracker)
+        page_profiles = page.get("profiles") or []
+        credits_used += page.get("credits_used", 0) or 0
+        response_time_ms += page.get("response_time_ms", 0) or 0
+        cursor = page.get("cursor")
+        if not page_profiles:
+            break
+        profiles.extend(page_profiles)
+
+    return {
+        "profiles": profiles,
+        "cursor": cursor,
+        "total_count": total_count,
+        "credits_used": round(credits_used, 2),
+        "response_time_ms": response_time_ms,
+    }
+
+
 @retry_with_backoff(
     max_retries=3,
     base_delay=2.0,

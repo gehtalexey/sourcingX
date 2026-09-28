@@ -1103,6 +1103,83 @@ def search_people_semantic(
         )
 
 
+def search_people_semantic_paged(
+    query: str,
+    target: int,
+    api_key: str = None,
+    filters: Optional[Dict[str, Any]] = None,
+    tracker=None,
+    fetch=None,
+    on_page=None,
+    keep=None,
+) -> Dict[str, Any]:
+    """
+    Description search that follows the cursor until `target` usable results
+    are collected. Crustdata caps each /person/search request at 100, so a
+    target above that takes several requests — same idea as the filter
+    search's auto-pagination loop in dashboard.py.
+
+    `keep(raw_profile) -> bool` decides which results count (the dashboard
+    passes its past-candidate / blacklist / not-relevant exclusions), so
+    excluded people don't eat into the requested number. Without it, every
+    result counts.
+
+    Stops when: `target` kept, total_count fetched, no cursor left, a page
+    comes back empty, or 2 x target raw results fetched (spend cap — never
+    pay for more than twice what was asked). `fetch` defaults to
+    search_people_semantic (tests pass a fake). `on_page(kept, target)` is
+    called before each follow-up page, for progress display.
+
+    Returns the search_people_semantic() shape with only the KEPT raw
+    profiles, plus "removed" (fetched minus kept), the LAST cursor (so Load
+    More continues from here), total_count, and credits_used summed across
+    pages.
+    """
+    fetch = fetch or search_people_semantic
+    target = max(1, int(target))
+    cap = 2 * target
+
+    kept = []
+    fetched = 0
+    cursor = None
+    total_count = None
+    credits_used = 0
+    response_time_ms = 0
+
+    while True:
+        if total_count is not None:
+            # Follow-up page: only if there's more to get and room to spend.
+            if (not cursor or len(kept) >= target or fetched >= cap
+                    or (total_count and fetched >= total_count)):
+                break
+            if on_page:
+                on_page(len(kept), target)
+        limit = min(100, target - len(kept), cap - fetched)
+        if total_count:
+            limit = min(limit, total_count - fetched)
+        page = fetch(query, limit=max(1, limit), cursor=cursor, api_key=api_key,
+                     filters=filters, tracker=tracker)
+        page_profiles = page.get("profiles") or []
+        if total_count is None:
+            total_count = page.get("total_count", len(page_profiles))
+        credits_used += page.get("credits_used", 0) or 0
+        response_time_ms += page.get("response_time_ms", 0) or 0
+        cursor = page.get("cursor")
+        if not page_profiles:
+            break
+        fetched += len(page_profiles)
+        kept.extend(p for p in page_profiles if keep is None or keep(p))
+
+    return {
+        "profiles": kept,
+        "removed": fetched - len(kept),
+        "cursor": cursor,
+        "total_count": total_count,
+        "credits_used": round(credits_used, 2),
+        "response_time_ms": response_time_ms,
+    }
+
+
 @retry_with_backoff(
     max_retries=3,
     base_delay=2.0,

@@ -63,6 +63,7 @@ jobs:
             test_csv_upload_clears_derived_state.py \
             test_crustdata_title_variants.py \
             test_crustdata_semantic_search.py \
+            test_crustdata_semantic_paging.py \
             test_db_full_details_export.py \
             test_search_full_details_export.py \
             test_normalize_current_tenure.py \

@@ -552,7 +552,7 @@ class TestSearchUsageLogged:
         assert result["credits_used"] == 0
 
     def test_every_dashboard_search_call_passes_a_tracker(self):
-        """Filter search, its auto-pagination, description (+filters) search,
+        """Filter search, its auto-pagination, description (+filters) search and its auto-pagination,
         and both Load More paths: each call must hand over the usage tracker,
         or that search's spend never reaches api_usage_logs."""
         import ast
@@ -566,7 +566,7 @@ class TestSearchUsageLogged:
             if isinstance(node, ast.Call):
                 fn = node.func
                 name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
-                if name in ("search_people_semantic", "_active_search_people_db", "search_people_db_v2"):
+                if name in ("search_people_semantic", "search_people_semantic_paged", "_active_search_people_db", "search_people_db_v2"):
                     calls.append(node)
         assert len(calls) >= 5
         for call in calls:

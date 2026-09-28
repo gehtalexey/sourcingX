@@ -86,6 +86,36 @@ def test_passes_query_filters_and_tracker_to_every_page():
     assert all(c["tracker"] is tracker for c in fetch.calls)
 
 
+def test_no_keep_means_nothing_removed():
+    fetch = FakeFetch([(100, "c1"), (100, "c2")])
+    res = search_people_semantic_paged("q", 200, fetch=fetch)
+    assert res["removed"] == 0
+
+
+def test_keep_filter_pages_further_to_fill_target():
+    # 20 of the first page are excluded, so one more page of 20 fills the count.
+    fetch = FakeFetch([(100, "c1"), (100, "c2"), (100, "c3")])
+    res = search_people_semantic_paged(
+        "q", 100, fetch=fetch,
+        keep=lambda p: not (p["i"] == 1 and p["n"] < 20),
+    )
+    assert [c["limit"] for c in fetch.calls] == [100, 20]
+    assert len(res["profiles"]) == 100
+    assert res["removed"] == 20
+    assert all(not (p["i"] == 1 and p["n"] < 20) for p in res["profiles"])
+    assert res["cursor"] == "c2"
+
+
+def test_keep_filter_stops_at_twice_the_target():
+    fetch = FakeFetch([(100, "c1"), (100, "c2"), (100, "c3"), (100, "c4")])
+    res = search_people_semantic_paged("q", 100, fetch=fetch,
+                                       keep=lambda p: False)
+    assert [c["limit"] for c in fetch.calls] == [100, 100]
+    assert res["profiles"] == []
+    assert res["removed"] == 200
+    assert res["credits_used"] == 6.0
+
+
 def test_on_page_reports_progress_before_each_follow_up():
     seen = []
     fetch = FakeFetch([(100, "c1"), (100, "c2"), (100, "c3")])

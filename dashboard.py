@@ -6639,6 +6639,11 @@ with tab_search:
                 f"Estimated cost: up to {int(semantic_limit) * CREDITS_PER_RESULT_SEMANTIC:.2f} credits "
                 f"({int(semantic_limit)} results × {CREDITS_PER_RESULT_SEMANTIC} credits)"
                 + (" — description + filters" if _sem_form_filters else "")
+                + (
+                    ". If past candidates / blacklist / not-relevant exclusions remove "
+                    "people, it keeps fetching to fill the count, up to twice as many "
+                    f"(max {2 * int(semantic_limit) * CREDITS_PER_RESULT_SEMANTIC:.2f} credits)"
+                )
             )
 
             if semantic_submitted:
@@ -6648,25 +6653,6 @@ with tab_search:
                     try:
                         sem_progress = st.empty()
                         sem_progress.info("Searching Crustdata by description...")
-                        # Crustdata caps each request at 100, so follow the cursor
-                        # until the target is reached (same as the filter search).
-                        # Exclusions below run once over every collected page.
-                        sem_results = search_people_semantic_paged(
-                            semantic_query.strip(),
-                            int(semantic_limit),
-                            api_key=api_key,
-                            filters=_sem_form_filters or None,
-                            tracker=get_usage_tracker(),
-                            on_page=lambda got, goal: sem_progress.info(
-                                f"Loading profiles... {got:,} / {goal:,}"
-                            ),
-                        )
-                        sem_progress.empty()
-                        sem_shimmed = [
-                            semantic_profile_to_legacy_shape(p)
-                            for p in (sem_results.get("profiles") or [])
-                        ]
-
                         # Apply the same past-candidates / blacklist / not-relevant
                         # exclusions the filter search applies, so description
                         # search doesn't resurface people already ruled out.
@@ -6704,25 +6690,50 @@ with tab_search:
                             emp = pick_current_employer(p.get('current_employers'))
                             return (emp.get('name') or '') if emp else ''
 
-                        _sem_removed = 0
-                        _sem_clean = []
-                        for p in sem_shimmed:
+                        _sem_removed_box = [0]
+
+                        def _sem_keep(raw_p):
+                            # Works on the shimmed shape, like the exclusion code
+                            # always has. Excluded people don't count toward the
+                            # requested number, so paging continues to fill it.
+                            p = semantic_profile_to_legacy_shape(raw_p)
                             if not p:
-                                continue
+                                return False
                             if _sem_pc_names and _sem_name_of(p) in _sem_pc_names:
-                                _sem_removed += 1
-                                continue
+                                _sem_removed_box[0] += 1
+                                return False
                             if _sem_pc_urls and _sem_url_of(p) in _sem_pc_urls:
-                                _sem_removed += 1
-                                continue
+                                _sem_removed_box[0] += 1
+                                return False
                             _sem_co = _sem_company_of(p)
                             if _sem_co and _sem_bl and _company_matches_filter_list(_sem_co, _sem_bl):
-                                _sem_removed += 1
-                                continue
+                                _sem_removed_box[0] += 1
+                                return False
                             if _sem_co and _sem_nr and _company_matches_filter_list(_sem_co, _sem_nr):
-                                _sem_removed += 1
-                                continue
-                            _sem_clean.append(p)
+                                _sem_removed_box[0] += 1
+                                return False
+                            return True
+
+                        # Crustdata caps each request at 100, so follow the cursor
+                        # until the target is reached (same as the filter search),
+                        # counting only people who pass the exclusions above.
+                        sem_results = search_people_semantic_paged(
+                            semantic_query.strip(),
+                            int(semantic_limit),
+                            api_key=api_key,
+                            filters=_sem_form_filters or None,
+                            tracker=get_usage_tracker(),
+                            on_page=lambda got, goal: sem_progress.info(
+                                f"Loading profiles... {got:,} / {goal:,}"
+                            ),
+                            keep=_sem_keep,
+                        )
+                        sem_progress.empty()
+                        _sem_removed = _sem_removed_box[0]
+                        _sem_clean = [
+                            semantic_profile_to_legacy_shape(p)
+                            for p in (sem_results.get("profiles") or [])
+                        ]
 
                         st.session_state['crustdata_search_results'] = _sem_clean
                         st.session_state['crustdata_search_cursor'] = sem_results.get('cursor')

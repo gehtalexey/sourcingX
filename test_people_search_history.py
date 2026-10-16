@@ -33,7 +33,7 @@ def test_hash_ignores_sort_and_limit():
     base = {'crust_search_title': 'backend'}
     with_sort_limit = {
         'crust_search_title': 'backend',
-        'crust_search_sort': 'Connections (most first)',
+        'crust_search_sort': 'Experience (most first)',
         'crust_search_limit': 1000,
     }
     assert hash_search_filters(base) == hash_search_filters(with_sort_limit)

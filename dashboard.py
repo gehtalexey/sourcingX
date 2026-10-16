@@ -6446,12 +6446,20 @@ with tab_search:
             'crust_search_school': 'expanded_schools',
         }
 
+        _PS_SORT_OPTIONS = ["Experience (most first)", "No sort"]
+
         def _load_people_search_into_form(stored_filters):
             """Refill the Search-tab widgets from a saved search's stored filters."""
             for _ek in _PS_AI_EXPANDED.values():
                 for _k in (_ek, f'sel_{_ek}', f'custom_{_ek}'):
                     st.session_state.pop(_k, None)
             for _key, _val in (stored_filters or {}).items():
+                # Older saved searches can hold the removed connections sort
+                # or min-connections filter; skip them so the form stays valid.
+                if _key == 'crust_search_min_connections':
+                    continue
+                if _key == 'crust_search_sort' and _val not in _PS_SORT_OPTIONS:
+                    continue
                 if _key in _PS_MS_OPTIONS:
                     _opts = _PS_MS_OPTIONS[_key]
                     _val = [v for v in (_val or []) if v in _opts]
@@ -6989,16 +6997,9 @@ with tab_search:
                     key="crust_search_has_email"
                 )
 
-            st.divider()
-
-            # Min connections (geo radius moved to main section)
-            search_min_connections = st.number_input(
-                "Min connections",
-                min_value=0,
-                value=0,
-                key="crust_search_min_connections",
-                help="0 = no minimum. Filters for people with at least this many LinkedIn connections."
-            )
+            # Min connections filter removed 2026-10-16: our Crustdata account
+            # lost access to the connections field (professional_network).
+            search_min_connections = 0
 
         # Controls row
         ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1, 1, 2])
@@ -7012,8 +7013,10 @@ with tab_search:
         with ctrl_col2:
             search_sort = st.selectbox(
                 "Sort by",
-                options=["Connections (most first)", "Experience (most first)", "No sort"],
-                index=0,
+                # "Connections (most first)" removed 2026-10-16: the
+                # connections field is locked on our Crustdata account.
+                options=_PS_SORT_OPTIONS,
+                index=_PS_SORT_OPTIONS.index("No sort"),
                 key="crust_search_sort"
             )
         with ctrl_col3:
@@ -7106,11 +7109,10 @@ with tab_search:
             ])
 
             _SORT_MAP = {
-                "Connections (most first)": [{"column": "num_of_connections", "order": "desc"}],
                 "Experience (most first)": [{"column": "years_of_experience_raw", "order": "desc"}],
                 "No sort": None,
             }
-            search_sorts = _SORT_MAP.get(search_sort, [{"column": "num_of_connections", "order": "desc"}])
+            search_sorts = _SORT_MAP.get(search_sort)
 
             if not has_filters:
                 st.warning("Please provide at least one search filter.")

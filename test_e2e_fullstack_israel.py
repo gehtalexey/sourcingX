@@ -173,7 +173,9 @@ def step1_search(api_key):
         headcount=["11-50", "51-200", "201-500"],
     )
 
-    sorts = [{"column": "num_of_connections", "order": "desc"}]
+    # No connections sort: that field was locked on our Crustdata account
+    # on 2026-10-16 (dashboard default is now "No sort").
+    sorts = None
 
     print("\n  Calling Crustdata API...")
     t0 = time.time()

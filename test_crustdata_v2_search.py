@@ -179,13 +179,14 @@ class TestSearchV2Request:
     def test_sort_field_value_is_remapped_not_just_the_key(self):
         """Regression test for a Codex-caught bug (2026-07-20): renaming
         `column` -> `field` isn't enough — the VALUE must go through the same
-        _LEGACY_TO_V2_FIELD map filters use. The dashboard's default sort is
-        `num_of_connections`, which has no v2 field of that name."""
+        _LEGACY_TO_V2_FIELD map filters use. (The old dashboard default sort,
+        `num_of_connections`, was removed on 2026-10-16 when the connections
+        field was locked on our account; `headline` exercises the same remap.)"""
         with patch("crustdata_search.requests.post") as mock_post:
             mock_post.return_value = _mock_response(json_data={"profiles": [], "total_count": 0})
-            search_people_db_v2({}, sorts=[{"column": "num_of_connections", "order": "desc"}], api_key="test-key")
+            search_people_db_v2({}, sorts=[{"column": "headline", "order": "desc"}], api_key="test-key")
             body = mock_post.call_args.kwargs["json"]
-            assert body["sorts"] == [{"field": "professional_network.connections", "order": "desc"}]
+            assert body["sorts"] == [{"field": "basic_profile.headline", "order": "desc"}]
 
     def test_exclude_profiles_normalized_under_post_processing(self):
         with patch("crustdata_search.requests.post") as mock_post:
@@ -207,6 +208,8 @@ class TestSearchV2Request:
             body = mock_post.call_args.kwargs["json"]
             assert "years_of_experience_raw" not in body["fields"]
             assert "recently_changed_jobs" not in body["fields"]
+            # Locked 2026-10-16: "Access denied to fields: professional_network".
+            assert not any(f.startswith("professional_network") for f in body["fields"])
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +289,7 @@ class TestDashboardUsesV2SearchOnly:
         ) as mock_post:
             dashboard._active_search_people_db(
                 filters, limit=100,
-                sorts=[{"column": "num_of_connections", "order": "desc"}],
+                sorts=[{"column": "years_of_experience_raw", "order": "desc"}],
                 api_key="test-key",
                 exclude_profiles=["https://www.linkedin.com/in/past-candidate"],
             )

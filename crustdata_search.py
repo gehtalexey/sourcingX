@@ -825,7 +825,10 @@ def build_filters_from_search_form(state) -> Dict[str, Any]:
     geo_radius = _num('crust_search_geo_radius')
     exp_min = _num('crust_search_exp_min')
     exp_max = _num('crust_search_exp_max')
-    min_connections = _num('crust_search_min_connections')
+    # Min connections is no longer sent: our Crustdata account lost access to
+    # the `professional_network` field (connections count) on 2026-10-16, so a
+    # filter on it would be refused. A saved search reloaded from history can
+    # still carry crust_search_min_connections in state; it is ignored here.
     skill_groups = [skills] if skills else []
 
     return build_filters(
@@ -849,7 +852,6 @@ def build_filters_from_search_form(state) -> Dict[str, Any]:
         continent=continent or None,
         geo_city=geo_city or None,
         geo_radius_km=geo_radius if geo_radius > 0 else None,
-        min_connections=min_connections if min_connections > 0 else None,
         exact_company=bool(state.get('crust_search_exact_company')),
         # not_relevant and blacklist are applied client-side, as in the
         # filter search — sending them changes Crustdata's scoring universe.
@@ -1268,9 +1270,13 @@ def search_people_db_v2(
     # Requesting them in `fields` fails the whole call with
     # "permission_error: Access denied to fields: recently_changed_jobs,
     # years_of_experience_raw".
+    # `professional_network` (the connections count) was also locked on
+    # 2026-10-16 ("permission_error: Access denied to fields:
+    # professional_network"), so it is no longer requested either. Do not
+    # sort or filter on professional_network.connections for the same reason.
     body["fields"] = [
         "basic_profile", "experience.employment_details", "education.schools",
-        "social_handles.professional_network_identifier", "professional_network",
+        "social_handles.professional_network_identifier",
         "crustdata_person_id",
     ]
 

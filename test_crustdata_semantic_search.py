@@ -247,6 +247,14 @@ class TestCombinedSearchRequest:
         assert build_filters_from_search_form({}) == {}
         assert build_filters_from_search_form({"crust_search_exp_min": 0}) == {}
 
+    def test_min_connections_is_never_sent(self):
+        """The connections field was locked on our Crustdata account on
+        2026-10-16. A saved search reloaded from history can still carry a
+        min-connections value; it must not become a filter."""
+        state = dict(_FORM_STATE, crust_search_min_connections=500)
+        assert build_filters_from_search_form(state) == build_filters_from_search_form(_FORM_STATE)
+        assert build_filters_from_search_form({"crust_search_min_connections": 500}) == {}
+
     def test_years_of_experience_raw_never_requested_as_a_field(self):
         filters = build_filters_from_search_form(
             dict(_FORM_STATE, crust_search_exp_max=10)

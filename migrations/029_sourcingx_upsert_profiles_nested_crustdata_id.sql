@@ -1,4 +1,4 @@
--- Migration 028: public.sourcingx_upsert_profiles - the Crustdata-id dedupe
+-- Migration 029: public.sourcingx_upsert_profiles - the Crustdata-id dedupe
 -- (027) also reads the id nested under raw_data._new_api.
 --
 -- STATUS: NOT YET APPLIED. Written 2026-11-03. Needs a real Codex review and
@@ -21,7 +21,19 @@
 --              nullif(raw_data->>'crustdata_person_id',''),
 --              nullif(raw_data->'_new_api'->>'crustdata_person_id',''))
 --   WHERE <same expression> IS NOT NULL
--- - Advisory lock (same key prefix), ordering, results and grants unchanged.
+-- - Advisory locks: every Crustdata id in the batch is locked ONCE, in
+--   ascending order, right after the ingestion-run INSERT and before the
+--   per-element loop, outside any exception block. Two concurrent batches
+--   holding the same ids in opposite order can therefore never wait on each
+--   other in a cycle (Codex found that deadlock on the sibling PR
+--   gehtalexey/agent-kalamata#817: the per-row lock's exception handler fell
+--   back to the sent URL and inserted the duplicate). Same key prefix as
+--   agent-kalamata, so both projects serialize on the same person. A lock
+--   error now fails the whole call instead of silently skipping dedupe.
+-- - The per-row id is read from the RAW element (v_elem), the same source the
+--   lock loop reads, so the id looked up is always an id that was locked.
+-- - Ordering, results and grants unchanged.
+-- - Requires migration 028 (the indexes) to be applied first.
 --
 -- Rollback: re-apply the function body from
 -- migrations/027_sourcingx_upsert_profiles_dedupe_by_crustdata_id.sql (same
@@ -55,6 +67,7 @@ declare
   v_err      text;
   v_aliases  text[];
   v_alias_n  int;
+  v_lock_cid text;     -- one Crustdata id from the batch, for the up-front lock loop
   v_cid      text;     -- incoming Crustdata id (person_id, else crustdata_person_id, else _new_api.crustdata_person_id)
   v_target   text;     -- linkedin_url of an existing row with the same Crustdata id
   v_ident    text;     -- the identity URL actually passed to upsert_profile
@@ -86,6 +99,27 @@ begin
           'started', v_total, now(),
           'via public.sourcingx_upsert_profiles');
 
+  -- Lock every Crustdata id the batch needs ONCE, in ascending order, before
+  -- any row is saved. Fixed order means two batches can never wait on each
+  -- other in a cycle (no deadlock). The key prefix is the same as
+  -- agent-kalamata's, so saves from both projects serialize on one person.
+  -- Deliberately OUTSIDE any exception block: a lock error fails the whole
+  -- call instead of silently skipping dedupe. The id expression must match
+  -- the per-row v_cid expression below exactly (both read the raw element).
+  for v_lock_cid in
+    select distinct btrim(coalesce(
+             nullif(btrim(e.elem -> 'raw_data' ->> 'person_id'), ''),
+             nullif(btrim(e.elem -> 'raw_data' ->> 'crustdata_person_id'), ''),
+             nullif(btrim(e.elem -> 'raw_data' -> '_new_api' ->> 'crustdata_person_id'), ''))) as cid
+      from jsonb_array_elements(p_profiles) as e(elem)
+     where jsonb_typeof(e.elem) = 'object'
+     order by 1
+  loop
+    if v_lock_cid ~ '^[0-9]+$' and v_lock_cid !~ '^0+$' then
+      perform pg_advisory_xact_lock(hashtextextended('sourcing-profiles-crustdata-id:' || v_lock_cid, 0));
+    end if;
+  end loop;
+
   -- Iterate the RAW array WITH ORDINALITY so every input element gets a
   -- result row, including malformed ones.
   for v_elem in
@@ -116,17 +150,18 @@ begin
       -- idx_profiles_crustdata_id_any expression and predicate EXACTLY so the
       -- planner can use the index (anything else scans the whole table).
       begin
+        -- Read from the raw element (v_elem), the same source the lock loop
+        -- above reads, so this id is always one that is already locked.
         v_cid := btrim(coalesce(
-                   nullif(btrim(v_prof -> 'raw_data' ->> 'person_id'), ''),
-                   nullif(btrim(v_prof -> 'raw_data' ->> 'crustdata_person_id'), ''),
-                   nullif(btrim(v_prof -> 'raw_data' -> '_new_api' ->> 'crustdata_person_id'), '')));
+                   nullif(btrim(v_elem -> 'raw_data' ->> 'person_id'), ''),
+                   nullif(btrim(v_elem -> 'raw_data' ->> 'crustdata_person_id'), ''),
+                   nullif(btrim(v_elem -> 'raw_data' -> '_new_api' ->> 'crustdata_person_id'), '')));
         if v_cid ~ '^[0-9]+$' and v_cid !~ '^0+$' then
-          -- Serializes saves of the same Crustdata id until this transaction
-          -- ends (the whole RPC call), so a concurrent save of the same person
-          -- under another URL spelling waits, then finds this row. The key
-          -- prefix keeps it distinct from the identity trigger's handle lock
-          -- (which hashes the bare handle with seed 0).
-          perform pg_advisory_xact_lock(hashtextextended('sourcing-profiles-crustdata-id:' || v_cid, 0));
+          -- The advisory lock for v_cid was already taken by the up-front
+          -- lock loop and is held until the transaction (the whole RPC call)
+          -- ends, so a concurrent save of the same person under another URL
+          -- spelling waits, then finds this row. The key prefix keeps it
+          -- distinct from the identity trigger's handle lock.
           select p.linkedin_url
             into v_target
             from public.profiles p
@@ -145,7 +180,9 @@ begin
           end if;
         end if;
       exception when others then
-        -- A lookup failure must never break the save: fall back to v_sent.
+        -- A lookup failure (not a lock failure: locks were taken up front,
+        -- outside this block) must never break the save: fall back to v_sent.
+        -- The id stays locked, so a concurrent save still serializes.
         v_err := 'crustdata-id-lookup-failed: ' || SQLERRM;
         v_ident := v_sent;
         v_redir := false;

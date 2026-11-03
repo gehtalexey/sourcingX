@@ -35,6 +35,10 @@
 -- - New per-row key `redirected_from_crustdata_id`; new summary key
 --   `redirected`. sent_url stays what the caller sent; canonical_url stays
 --   what upsert_profile returned. All 025 keys are kept.
+-- - Concurrency: a transaction-level advisory lock per Crustdata id is taken
+--   just before the lookup. It is taken inside the lookup's exception block,
+--   so if it fails (e.g. a deadlock between two batches locking ids in
+--   opposite order) the save falls back to the sent URL as before.
 --
 -- This does NOT merge the 74 existing duplicate pairs; it only stops new ones.
 --
@@ -135,6 +139,12 @@ begin
                    nullif(btrim(v_prof -> 'raw_data' ->> 'person_id'), ''),
                    nullif(btrim(v_prof -> 'raw_data' ->> 'crustdata_person_id'), '')));
         if v_cid ~ '^[0-9]+$' and v_cid !~ '^0+$' then
+          -- Serializes saves of the same Crustdata id until this transaction
+          -- ends (the whole RPC call), so a concurrent save of the same person
+          -- under another URL spelling waits, then finds this row. The key
+          -- prefix keeps it distinct from the identity trigger's handle lock
+          -- (which hashes the bare handle with seed 0).
+          perform pg_advisory_xact_lock(hashtextextended('sourcing-profiles-crustdata-id:' || v_cid, 0));
           select p.linkedin_url
             into v_target
             from public.profiles p

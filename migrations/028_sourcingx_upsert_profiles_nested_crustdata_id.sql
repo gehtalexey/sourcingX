@@ -1,4 +1,4 @@
--- Migration 029: public.sourcingx_upsert_profiles - the Crustdata-id dedupe
+-- Migration 028: public.sourcingx_upsert_profiles - the Crustdata-id dedupe
 -- (027) also reads the id nested under raw_data._new_api.
 --
 -- STATUS: NOT YET APPLIED. Written 2026-11-03. Needs a real Codex review and
@@ -33,7 +33,7 @@
 -- - The per-row id is read from the RAW element (v_elem), the same source the
 --   lock loop reads, so the id looked up is always an id that was locked.
 -- - Ordering, results and grants unchanged.
--- - Requires migration 028 (the indexes) to be applied first.
+-- - Requires the indexes in migrations/manual/028_profiles_crustdata_id_indexes.sql to be applied first (by hand).
 --
 -- Rollback: re-apply the function body from
 -- migrations/027_sourcingx_upsert_profiles_dedupe_by_crustdata_id.sql (same

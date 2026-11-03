@@ -2,16 +2,18 @@
 --
 -- STATUS: APPLIED 2026-11-03 by hand (built via a one-off pg_cron job because
 -- the MCP session cuts statements at 2 min; each built in ~3 min,
--- CONCURRENTLY, no writes blocked). Must run outside a transaction
--- (CREATE INDEX CONCURRENTLY cannot run inside one).
+-- CONCURRENTLY, no writes blocked).
+-- This file lives in migrations/manual/ because it must run outside a
+-- transaction (CREATE INDEX CONCURRENTLY cannot run inside one), so the
+-- automatic migration runner (db_migrations.py) must not pick it up.
 --
 -- WHY
--- Migrations 027 and 029 (sourcingx_upsert_profiles dedupe) look up an
+-- Migrations 027 and 028 (nested-id) (sourcingx_upsert_profiles dedupe) look up an
 -- existing row by Crustdata id on every save. Without an index that lookup
 -- scans the whole profiles table. 027's lookup matches idx_profiles_crustdata_id;
--- 029's lookup repeats the expression and predicate of
+-- 028's (nested-id) lookup repeats the expression and predicate of
 -- idx_profiles_crustdata_id_any EXACTLY, so the planner uses it. This
--- migration must be applied BEFORE the 027/029 functions are relied on.
+-- migration must be applied BEFORE the 027/028 functions are relied on.
 --
 -- The Crustdata id lives in one of three places in raw_data:
 --   raw_data.person_id, raw_data.crustdata_person_id, or (new-API profiles)

@@ -12,10 +12,8 @@
 --      and tgname = 'trg_profiles_preserve_rich_evidence';
 --
 -- Applying this file is a no-op: CREATE OR REPLACE with the identical body
--- keeps the function's owner and grants, and the trigger is dropped and
--- re-created with the same name, timing, event and function (BEFORE triggers
--- fire in name order, so the firing order is unchanged too). Both run inside
--- one transaction when applied as a migration.
+-- keeps the function's owner and grants, and the trigger is created only if
+-- it is missing (it is live today, so nothing happens to it).
 --
 -- What the function does (for readers):
 --   (a) raw_data: an update that makes the JSON text shorter, or null, is
@@ -70,6 +68,21 @@ $function$
 ;
 -- END LIVE FUNCTION DEFINITION
 
--- Live trigger definition (pg_get_triggerdef), re-created unchanged:
-DROP TRIGGER IF EXISTS trg_profiles_preserve_rich_evidence ON public.profiles;
-CREATE TRIGGER trg_profiles_preserve_rich_evidence BEFORE UPDATE ON public.profiles FOR EACH ROW EXECUTE FUNCTION sourcing_core.profiles_preserve_rich_evidence();
+-- Live trigger definition (pg_get_triggerdef), recorded verbatim:
+--   CREATE TRIGGER trg_profiles_preserve_rich_evidence BEFORE UPDATE ON public.profiles FOR EACH ROW EXECUTE FUNCTION sourcing_core.profiles_preserve_rich_evidence()
+--
+-- The trigger is created only when it is missing. It is never dropped here:
+-- DROP TRIGGER takes an ACCESS EXCLUSIVE lock on the shared profiles table
+-- and can stall profile traffic behind long reads.
+DO $do$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_catalog.pg_trigger
+     WHERE tgrelid = 'public.profiles'::regclass
+       AND tgname = 'trg_profiles_preserve_rich_evidence'
+       AND NOT tgisinternal
+  ) THEN
+    CREATE TRIGGER trg_profiles_preserve_rich_evidence BEFORE UPDATE ON public.profiles FOR EACH ROW EXECUTE FUNCTION sourcing_core.profiles_preserve_rich_evidence();
+  END IF;
+END
+$do$;

@@ -2726,18 +2726,17 @@ def _v2_employer_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     if not isinstance(entry, dict):
         return None
-    return {
-        "employee_title": (entry.get("title") or "").strip(),
-        "employer_name": entry.get("name") or "",
-        "start_date": entry.get("start_date"),
-        "end_date": entry.get("end_date"),
-        "employee_description": entry.get("description") or None,
-        # The new API has no per-employer company-description field (confirmed
-        # live — absent even where a `description` exists on the position
-        # itself). trim_raw_profile() only keeps the first sentence anyway,
-        # so a missing value here just degrades gracefully to nothing shown.
-        "employer_linkedin_description": None,
-    }
+    out = dict(entry)  # keep EVERY field the enrichment returns (company url, headcount, ...)
+    out["employee_title"] = (entry.get("title") or "").strip()
+    out["employer_name"] = entry.get("name") or ""
+    out["start_date"] = entry.get("start_date")
+    out["end_date"] = entry.get("end_date")
+    out["employee_description"] = entry.get("description") or None
+    # Legacy names agent-kalamata readers use, filled from the kept v2 fields.
+    out["company_linkedin_profile_url"] = (
+        entry.get("company_professional_network_profile_url") or None)
+    out["employer_linkedin_description"] = entry.get("company_description") or None
+    return out
 
 
 def _v2_school_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -2746,11 +2745,11 @@ def _v2_school_entry(entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     education_background shape. Verified live 2026-07-20."""
     if not isinstance(entry, dict):
         return None
-    return {
-        "institute_name": entry.get("school") or "",
-        "degree_name": entry.get("degree") or "",
-        "field_of_study": entry.get("field_of_study") or "",
-    }
+    out = dict(entry)
+    out["institute_name"] = entry.get("school") or ""
+    out["degree_name"] = entry.get("degree") or ""
+    out["field_of_study"] = entry.get("field_of_study") or ""
+    return out
 
 
 def enrich_profile_to_legacy_shape(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -2799,11 +2798,13 @@ def enrich_profile_to_legacy_shape(data: Dict[str, Any]) -> Dict[str, Any]:
     # falling back only if it's ever absent.
     title = basic.get("current_title") or (current_employers[0]["employee_title"] if current_employers else "")
 
-    return {
+    exp = data.get("experience") or {}
+
+    out = {
         "name": basic.get("name") or "",
         "title": title,
-        "headline": basic.get("headline") or "",
-        "summary": basic.get("summary") or "",
+        "headline": basic.get("headline") or professional_network.get("headline") or "",
+        "summary": basic.get("summary") or professional_network.get("summary") or "",
         "location": location.get("raw") or pn_location.get("raw") or "",
         "region": pn_location.get("raw") or location.get("raw") or "",
         "num_of_connections": professional_network.get("connections"),
@@ -2819,7 +2820,25 @@ def enrich_profile_to_legacy_shape(data: Dict[str, Any]) -> Dict[str, Any]:
         "all_schools": all_schools,
         "all_degrees": all_degrees,
         "crustdata_person_id": data.get("crustdata_person_id"),
+        # Extras kept for parity with Supanova's to_legacy_shape (additive).
+        "location_details": location or None,
+        "years_of_experience": exp.get("years_of_experience"),
+        "years_of_experience_raw": exp.get("years_of_experience_raw"),
+        "profile_picture_permalink": (basic.get("profile_picture_permalink")
+                                      or professional_network.get("profile_picture_permalink")),
+        "normalized_title": basic.get("normalized_title") or None,
+        "first_name": basic.get("first_name") or None,
+        "last_name": basic.get("last_name") or None,
+        "followers": professional_network.get("followers"),
+        "pronoun": professional_network.get("pronoun") or None,
+        "social_handles": data.get("social_handles") or None,
     }
+    # Contact / email keys, kept so later merges can union them.
+    for key in ("contact", "emails", "email", "personal_emails", "business_emails"):
+        v = data.get(key)
+        if not (v is None or v == "" or v == [] or v == {}):
+            out[key] = v
+    return out
 
 
 def normalize_search_results_to_df(profiles: List[Dict[str, Any]]) -> pd.DataFrame:

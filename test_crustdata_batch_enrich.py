@@ -1114,8 +1114,9 @@ class TestEnrichProfileToLegacyShape:
         assert emp["employer_name"] == "Retool"
         assert emp["start_date"] == "2017-01-01T00:00:00+00:00"
         assert emp["end_date"] is None  # current role — compute_role_durations() relies on this
-        assert "title" not in emp  # must be the FLAT shape, not the raw v2 keys
-        assert "name" not in emp
+        # v2 fields are now kept alongside the flat legacy keys (additive)
+        assert emp["title"] == "Founder, CEO"
+        assert emp["name"] == "Retool"
 
     def test_education_uses_flat_legacy_keys(self):
         flat = enrich_profile_to_legacy_shape(_REAL_ENRICH_RESPONSE)

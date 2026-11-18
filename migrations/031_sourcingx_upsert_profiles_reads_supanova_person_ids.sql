@@ -51,8 +51,18 @@ BEGIN
   IF to_regclass('public.supanova_person_ids') IS NULL THEN
     RAISE EXCEPTION 'migration 031: public.supanova_person_ids does not exist (Supanova table); the new save check needs it';
   END IF;
-  IF to_regclass('public.idx_supanova_person_ids_person_id') IS NULL THEN
-    RAISE EXCEPTION 'migration 031: apply migrations/manual/031_supanova_person_ids_person_id_index.sql first';
+  -- A cancelled CREATE INDEX CONCURRENTLY leaves an INVALID index behind, so
+  -- require a valid, ready index on supanova_person_ids(person_id), not just a name.
+  IF NOT EXISTS (
+    SELECT 1
+      FROM pg_index i
+      JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+     WHERE i.indexrelid = to_regclass('public.idx_supanova_person_ids_person_id')
+       AND i.indrelid = 'public.supanova_person_ids'::regclass
+       AND a.attname = 'person_id'
+       AND i.indisvalid AND i.indisready
+  ) THEN
+    RAISE EXCEPTION 'migration 031: idx_supanova_person_ids_person_id is missing or invalid; (re)apply migrations/manual/031_supanova_person_ids_person_id_index.sql first (DROP INDEX CONCURRENTLY it if invalid)';
   END IF;
 END
 $check$;

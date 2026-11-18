@@ -41,6 +41,22 @@
 -- migrations/028_sourcingx_upsert_profiles_nested_crustdata_id.sql (same
 -- signature). The index can stay.
 
+-- Prerequisite check. public.supanova_person_ids is Supanova's table and no
+-- migration in this repo creates it. PL/pgSQL plans the lookup only at run
+-- time, and the lookup sits inside an exception block, so without this check a
+-- database that lacks the table would accept the function and then silently
+-- skip the new dedupe on every save. Fail here instead, loudly.
+DO $check$
+BEGIN
+  IF to_regclass('public.supanova_person_ids') IS NULL THEN
+    RAISE EXCEPTION 'migration 031: public.supanova_person_ids does not exist (Supanova table); the new save check needs it';
+  END IF;
+  IF to_regclass('public.idx_supanova_person_ids_person_id') IS NULL THEN
+    RAISE EXCEPTION 'migration 031: apply migrations/manual/031_supanova_person_ids_person_id_index.sql first';
+  END IF;
+END
+$check$;
+
 CREATE OR REPLACE FUNCTION public.sourcingx_upsert_profiles(p_profiles jsonb)
  RETURNS jsonb
  LANGUAGE plpgsql
